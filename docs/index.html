@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>받아쓰기 — 화자를 구분하는 한국어 회의 전사 앱</title>
+  <meta name="description" content="말하는 사람을 구분해 실시간으로 받아 적는 Windows 회의 전사 앱. 러스트로 만들어 가볍고, 로컬 AI로 인터넷 없이도 동작합니다. 무료 · 오픈소스." />
+  <meta property="og:title" content="받아쓰기 — 회의는 말로, 기록은 받아쓰기가" />
+  <meta property="og:description" content="화자 구분 · 한국어 특화 · 로컬 AI · 트레이 원클릭. 가볍고 빠른 Windows 회의 전사 앱." />
+  <meta property="og:image" content="https://jeiel85.github.io/badasugi/assets/screenshot-dark.png" />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#0b0b12" />
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+  <style>
+    :root {
+      --bg: #0b0b12;
+      --bg-2: #11111b;
+      --card: rgba(255, 255, 255, 0.035);
+      --card-2: rgba(255, 255, 255, 0.06);
+      --line: rgba(255, 255, 255, 0.08);
+      --line-2: rgba(255, 255, 255, 0.14);
+      --text: #f1f1f6;
+      --text-2: #b9b9c8;
+      --muted: #7e7e92;
+      --accent: #8b7dff;
+      --accent-2: #c07bff;
+      --rec: #ff5a4f;
+      --c0: #8b7dff; --c1: #38bdf8; --c2: #fbbf24; --c3: #34d399;
+      --radius: 18px;
+      --font: "Pretendard Variable", Pretendard, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; overflow-x: clip; }
+    body { margin: 0; font-family: var(--font); background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; line-height: 1.6; overflow-x: clip; letter-spacing: -0.01em; }
+    a { color: inherit; text-decoration: none; }
+    img { max-width: 100%; display: block; }
+    .wrap { width: min(1160px, 100% - 40px); margin: 0 auto; }
+    svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+    /* 배경 */
+    .glow { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+    .glow::before, .glow::after { content: ""; position: absolute; border-radius: 50%; filter: blur(90px); opacity: .55; }
+    .glow::before { width: 720px; height: 720px; left: 50%; top: -360px; transform: translateX(-70%); background: radial-gradient(circle, rgba(124, 92, 255, .55), transparent 65%); animation: drift 14s ease-in-out infinite alternate; }
+    .glow::after { width: 620px; height: 620px; right: -160px; top: 80px; background: radial-gradient(circle, rgba(192, 123, 255, .35), transparent 65%); animation: drift 18s ease-in-out infinite alternate-reverse; }
+    @keyframes drift { to { transform: translate(-40%, 60px) scale(1.1); } }
+    .grid-bg { position: absolute; inset: 0; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 64px 64px; mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 70%); opacity: .45; }
+
+    /* 내비 */
+    nav { position: sticky; top: 0; z-index: 50; backdrop-filter: saturate(160%) blur(16px); background: rgba(11, 11, 18, .66); border-bottom: 1px solid transparent; transition: border-color .2s; }
+    nav.scrolled { border-color: var(--line); }
+    .nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 18px; letter-spacing: -0.03em; }
+    .brand img { width: 30px; height: 30px; }
+    .links { display: flex; gap: 28px; font-size: 14.5px; color: var(--text-2); font-weight: 500; }
+    .links a:hover { color: var(--text); }
+    .nav-cta { display: flex; gap: 10px; align-items: center; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 20px; border-radius: 12px; font-weight: 700; font-size: 15px; transition: transform .15s, box-shadow .2s, background .2s; white-space: nowrap; }
+    .btn.primary { color: #fff; background: linear-gradient(135deg, #7c6cff, #a35cff); box-shadow: 0 10px 30px -8px rgba(139, 125, 255, .7), inset 0 1px 0 rgba(255, 255, 255, .25); }
+    .btn.primary:hover { transform: translateY(-1px); box-shadow: 0 14px 36px -8px rgba(139, 125, 255, .85), inset 0 1px 0 rgba(255, 255, 255, .25); }
+    .btn.ghost { color: var(--text); background: var(--card-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+    .btn.ghost:hover { background: rgba(255, 255, 255, .1); }
+    .btn.sm { height: 36px; padding: 0 14px; font-size: 13.5px; border-radius: 10px; }
+
+    /* 히어로 */
+    .hero { position: relative; padding: 84px 0 40px; }
+    .hero .wrap { position: relative; z-index: 1; }
+    .hero-grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 8px; border-radius: 999px; background: var(--card-2); box-shadow: inset 0 0 0 1px var(--line-2); font-size: 13px; color: var(--text-2); font-weight: 600; }
+    .eyebrow b { padding: 2px 8px; border-radius: 999px; background: linear-gradient(135deg, #7c6cff, #a35cff); color: #fff; font-size: 11.5px; }
+    h1 { font-size: clamp(40px, 5.6vw, 68px); line-height: 1.12; letter-spacing: -0.045em; margin: 22px 0 18px; font-weight: 800; }
+    h1 .grad { background: linear-gradient(110deg, #fff 10%, #c9c2ff 45%, #b98bff 70%, #ffb3e6 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lead { font-size: 18.5px; color: var(--text-2); max-width: 540px; margin: 0 0 32px; line-height: 1.7; }
+    .cta { display: flex; gap: 12px; flex-wrap: wrap; }
+    .fine { margin-top: 18px; font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+    .fine span { display: inline-flex; align-items: center; gap: 6px; }
+    .fine svg { width: 15px; height: 15px; color: #8be3b9; }
+
+    /* 앱 목업 */
+    .mock-wrap { position: relative; }
+    .mock-wrap::before { content: ""; position: absolute; inset: 40px 0 -30px; background: radial-gradient(closest-side, rgba(139, 125, 255, .45), transparent); filter: blur(30px); z-index: -1; }
+    .mock { width: 100%; max-width: 420px; margin-left: auto; border-radius: 20px; background: #15151c; border: 1px solid var(--line-2); box-shadow: 0 40px 80px -30px rgba(0, 0, 0, .8), 0 0 0 1px rgba(255, 255, 255, .03); overflow: hidden; transform: perspective(1400px) rotateY(-7deg) rotateX(3deg); transition: transform .6s; }
+    .mock:hover { transform: perspective(1400px) rotateY(0) rotateX(0); }
+    .m-bar { display: flex; align-items: center; justify-content: space-between; height: 42px; padding: 0 14px; font-weight: 700; font-size: 13px; }
+    .m-bar .l { display: flex; align-items: center; gap: 7px; }
+    .m-bar img { width: 18px; height: 18px; }
+    .m-bar .r { display: flex; gap: 12px; color: var(--muted); }
+    .m-bar .r i { width: 13px; height: 13px; border-radius: 4px; background: rgba(255, 255, 255, .12); }
+    .m-meta { padding: 2px 16px 12px; border-bottom: 1px solid var(--line); }
+    .m-title { font-weight: 800; font-size: 16px; letter-spacing: -0.03em; }
+    .m-chips { display: flex; gap: 6px; margin-top: 7px; }
+    .m-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; padding: 3px 9px 3px 7px; border-radius: 999px; background: rgba(255, 255, 255, .05); border: 1px solid var(--line); color: var(--text-2); }
+    .m-chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+    .m-body { height: 330px; overflow: hidden; padding: 6px 16px 10px; position: relative; display: flex; flex-direction: column; justify-content: flex-end; }
+    .m-body::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 50px; background: linear-gradient(#15151c, transparent); z-index: 2; }
+    .m-g { position: relative; padding: 8px 0 8px 12px; animation: rise .5s ease-out both; }
+    .m-g::before { content: ""; position: absolute; left: 0; top: 11px; bottom: 10px; width: 3px; border-radius: 3px; background: var(--c); }
+    .m-g .h { display: flex; gap: 7px; align-items: baseline; font-size: 11.5px; }
+    .m-g .h b { color: var(--c); }
+    .m-g .h span { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .m-g p { margin: 1px 0 0; font-size: 13.5px; line-height: 1.6; color: #e9e9f1; word-break: keep-all; }
+    .m-g .sk { height: 18px; width: 70%; margin-top: 4px; border-radius: 6px; background: linear-gradient(90deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, .13), rgba(255, 255, 255, .05)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+    @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+    .m-dock { display: flex; align-items: center; gap: 12px; padding: 12px 16px 16px; border-top: 1px solid var(--line); background: #17171f; }
+    .m-rec { position: relative; width: 46px; height: 46px; border-radius: 50%; background: var(--rec); display: grid; place-items: center; box-shadow: 0 6px 18px rgba(255, 90, 79, .45); flex: none; }
+    .m-rec::before { content: ""; width: 14px; height: 14px; border-radius: 3px; background: #fff; }
+    .m-rec::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 2px solid var(--rec); opacity: .45; animation: pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 50% { transform: scale(1.12); opacity: .15; } }
+    .m-time { font-weight: 800; font-size: 19px; color: var(--rec); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+    .m-src { font-size: 11px; color: var(--muted); font-weight: 600; }
+    .m-meter { display: flex; align-items: center; gap: 3px; height: 20px; margin-left: 6px; }
+    .m-meter i { width: 3px; border-radius: 3px; background: var(--rec); height: 4px; transition: height .09s linear; }
+    .m-acts { margin-left: auto; display: flex; gap: 10px; color: var(--muted); }
+    .m-acts i { width: 16px; height: 16px; border-radius: 4px; border: 1.8px solid currentColor; opacity: .7; }
+
+    /* 숫자 띠 */
+    .stats { position: relative; z-index: 1; margin-top: 64px; display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); overflow: hidden; }
+    .stat { padding: 22px 24px; border-right: 1px solid var(--line); }
+    .stat:last-child { border-right: 0; }
+    .stat b { display: block; font-size: 26px; letter-spacing: -0.03em; font-weight: 800; }
+    .stat span { font-size: 13.5px; color: var(--muted); }
+
+    section { position: relative; padding: 110px 0 0; }
+    .sec-head { max-width: 680px; margin-bottom: 48px; }
+    .sec-head.center { text-align: center; margin-left: auto; margin-right: auto; }
+    .kicker { font-size: 13px; font-weight: 800; letter-spacing: .08em; color: var(--accent); text-transform: uppercase; }
+    h2 { font-size: clamp(30px, 3.8vw, 44px); line-height: 1.2; letter-spacing: -0.04em; margin: 12px 0 14px; font-weight: 800; }
+    .sec-head p { color: var(--text-2); font-size: 17px; margin: 0; }
+
+    /* 기능 */
+    .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .feat { position: relative; padding: 28px 26px 26px; border-radius: var(--radius); background: var(--card); border: 1px solid var(--line); transition: transform .25s, border-color .25s, background .25s; overflow: hidden; }
+    .feat:hover { transform: translateY(-3px); border-color: var(--line-2); background: var(--card-2); }
+    .feat::after { content: ""; position: absolute; width: 180px; height: 180px; right: -60px; top: -60px; border-radius: 50%; background: radial-gradient(circle, var(--g, rgba(139, 125, 255, .22)), transparent 70%); }
+    .feat .ic { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(135deg, rgba(139, 125, 255, .22), rgba(192, 123, 255, .08)); box-shadow: inset 0 0 0 1px rgba(139, 125, 255, .3); color: #cfc7ff; margin-bottom: 18px; }
+    .feat h3 { font-size: 18.5px; margin: 0 0 8px; letter-spacing: -0.03em; }
+    .feat p { margin: 0; color: var(--text-2); font-size: 14.5px; line-height: 1.7; }
+    .feat.wide { grid-column: span 2; display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: center; }
+    .fmt-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .fmt { padding: 14px; border-radius: 12px; background: rgba(255, 255, 255, .04); border: 1px solid var(--line); }
+    .fmt b { display: block; font-size: 17px; letter-spacing: -0.02em; background: linear-gradient(120deg, #fff, #c9c2ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .fmt span { font-size: 12.5px; color: var(--muted); }
+    .spk-demo { display: flex; flex-direction: column; gap: 10px; }
+    .spk-line { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; }
+    .spk-line b { flex: none; font-size: 12px; padding: 3px 9px; border-radius: 999px; background: color-mix(in srgb, var(--c) 18%, transparent); color: var(--c); border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); }
+    .spk-line span { color: var(--text-2); padding-top: 1px; }
+
+    /* 작동 방식 */
+    .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; position: relative; }
+    .step { position: relative; padding: 22px 18px; border-radius: 16px; background: var(--card); border: 1px solid var(--line); }
+    .step .n { font-size: 12px; font-weight: 800; color: var(--accent); }
+    .step h4 { margin: 8px 0 6px; font-size: 16px; letter-spacing: -0.02em; }
+    .step p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.65; }
+    .step .tag { display: inline-block; margin-top: 12px; font-size: 11px; font-weight: 700; color: var(--text-2); padding: 3px 8px; border-radius: 6px; background: rgba(255, 255, 255, .06); }
+    .wire { position: absolute; left: 4%; right: 4%; top: 50%; height: 2px; background: linear-gradient(90deg, transparent, var(--line-2), transparent); z-index: -1; overflow: hidden; }
+    .wire::after { content: ""; position: absolute; top: 0; left: -20%; width: 20%; height: 100%; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: flow 2.6s linear infinite; }
+    @keyframes flow { to { left: 100%; } }
+
+    /* 엔진 비교 */
+    .table { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--card); }
+    .tr { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr; border-bottom: 1px solid var(--line); }
+    .tr:last-child { border-bottom: 0; }
+    .tr > div { padding: 16px 20px; font-size: 14.5px; color: var(--text-2); }
+    .tr > div:first-child { color: var(--text); font-weight: 700; }
+    .tr.head > div { font-weight: 800; color: var(--text); font-size: 15px; background: rgba(255, 255, 255, .025); }
+    .tr.head small { display: block; font-weight: 500; color: var(--muted); font-size: 12.5px; }
+    .dots { letter-spacing: 2px; color: var(--accent); }
+    .dots i { font-style: normal; color: rgba(255, 255, 255, .15); }
+    .note { margin-top: 14px; font-size: 13px; color: var(--muted); }
+
+    /* 개인정보 */
+    .privacy { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .pv { padding: 34px; border-radius: var(--radius); border: 1px solid var(--line); background: linear-gradient(160deg, rgba(139, 125, 255, .12), transparent 60%), var(--card); }
+    .pv h3 { font-size: 22px; letter-spacing: -0.03em; margin: 0 0 10px; }
+    .pv p, .pv li { color: var(--text-2); font-size: 15px; }
+    .pv ul { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+    .pv li { display: flex; gap: 10px; align-items: flex-start; }
+    .pv li svg { color: #8be3b9; margin-top: 3px; width: 17px; height: 17px; }
+    .kbd { display: inline-flex; gap: 6px; margin: 12px 0 4px; }
+    .kbd span { padding: 8px 12px; border-radius: 10px; background: rgba(255, 255, 255, .06); box-shadow: inset 0 -2px 0 rgba(0, 0, 0, .35), inset 0 0 0 1px var(--line-2); font-weight: 800; font-size: 15px; }
+
+    /* FAQ */
+    .faq { display: grid; gap: 10px; max-width: 820px; margin: 0 auto; }
+    details { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 0 22px; transition: background .2s; }
+    details[open] { background: var(--card-2); }
+    summary { cursor: pointer; list-style: none; padding: 18px 0; font-weight: 700; font-size: 16px; display: flex; justify-content: space-between; gap: 16px; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; font-size: 22px; line-height: 1; color: var(--muted); transition: transform .2s; }
+    details[open] summary::after { transform: rotate(45deg); }
+    details p { margin: 0 0 18px; color: var(--text-2); font-size: 15px; }
+    code { font-family: "Cascadia Mono", Consolas, monospace; font-size: .9em; background: rgba(255, 255, 255, .07); padding: 2px 6px; border-radius: 6px; }
+
+    /* 마지막 CTA */
+    .final { margin: 120px 0 0; padding: 72px 32px; border-radius: 28px; text-align: center; position: relative; overflow: hidden; border: 1px solid var(--line-2); background: radial-gradient(ellipse at top, rgba(139, 125, 255, .35), transparent 60%), var(--bg-2); }
+    .final h2 { margin-top: 0; }
+    .final p { color: var(--text-2); font-size: 17px; margin: 0 0 30px; }
+    .final .cta { justify-content: center; }
+    footer { padding: 56px 0 48px; color: var(--muted); font-size: 13.5px; }
+    .foot { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 28px; }
+    .foot a:hover { color: var(--text); }
+    .foot .fl { display: flex; gap: 20px; }
+
+    .reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s ease, transform .7s ease; }
+    .reveal.in { opacity: 1; transform: none; }
+
+    @media (max-width: 960px) {
+      .hero-grid { grid-template-columns: 1fr; }
+      .mock { margin: 0 auto; transform: none; }
+      .links { display: none; }
+      .features { grid-template-columns: 1fr 1fr; }
+      .feat.wide { grid-column: span 2; }
+      .flow { grid-template-columns: 1fr 1fr; }
+      .wire { display: none; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      .stat:nth-child(2) { border-right: 0; }
+      .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+    }
+    @media (max-width: 640px) {
+      .wrap { width: calc(100% - 32px); }
+      .hero { padding-top: 48px; }
+      .features, .privacy { grid-template-columns: 1fr; }
+      .feat.wide { grid-column: auto; grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .tr { grid-template-columns: 1fr 1fr 1fr 1fr; }
+      .tr > div { padding: 12px 10px; font-size: 12.5px; }
+      .nav-cta .ghost { display: none; }
+      .final { padding: 56px 20px; }
+      section { padding-top: 84px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .reveal { opacity: 1; transform: none; } }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+      <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+      <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.9 15.5A2 2 0 0 0 8.5 14.1L2.4 12.5a.5.5 0 0 1 0-1l6.1-1.6a2 2 0 0 0 1.4-1.4l1.6-6.1a.5.5 0 0 1 1 0l1.6 6.1a2 2 0 0 0 1.4 1.4l6.1 1.6a.5.5 0 0 1 0 1l-6.1 1.6a2 2 0 0 0-1.4 1.4l-1.6 6.1a.5.5 0 0 1-1 0z"/></symbol>
+      <symbol id="i-feather" viewBox="0 0 24 24"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h5"/><path d="M9 13h6"/><path d="M9 17h4"/></symbol>
+      <symbol id="i-ko" viewBox="0 0 24 24"><path d="M4 5h7"/><path d="M7.5 5v4"/><circle cx="7.5" cy="13" r="3"/><path d="M14 4v9"/><path d="M14 8.5h3"/><path d="M13 19h7"/><path d="M16.5 15v4"/></symbol>
+      <symbol id="i-headset" viewBox="0 0 24 24"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
+      <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></symbol>
+    </defs>
+  </svg>
+
+  <nav id="nav">
+    <div class="wrap nav">
+      <a class="brand" href="#"><img src="assets/logo.svg" alt="" />받아쓰기</a>
+      <div class="links">
+        <a href="#features">기능</a>
+        <a href="#how">작동 방식</a>
+        <a href="#engines">엔진</a>
+        <a href="#faq">FAQ</a>
+      </div>
+      <div class="nav-cta">
+        <a class="btn ghost sm" href="https://github.com/jeiel85/badasugi"><svg class="i"><use href="#i-github"/></svg>GitHub</a>
+        <a class="btn primary sm" href="https://github.com/jeiel85/badasugi/releases/latest">다운로드</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="glow"><div class="grid-bg"></div></div>
+    <div class="wrap hero-grid">
+      <div>
+        <span class="eyebrow"><b>v0.1</b> Rust · 로컬 AI · 오픈소스</span>
+        <h1>회의는 말로,<br /><span class="grad">기록은 받아쓰기가.</span></h1>
+        <p class="lead">말하는 사람을 구분해 실시간으로 받아 적는 Windows 회의 전사 앱. 러스트로 만들어 가볍고, 로컬 AI로 인터넷 없이도 동작합니다. 트레이에서 한 번 누르면 시작이에요.</p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/jeiel85/badasugi/releases/latest"><svg class="i"><use href="#i-download"/></svg>Windows용 내려받기</a>
+          <a class="btn ghost" href="https://github.com/jeiel85/badasugi"><svg class="i"><use href="#i-github"/></svg>소스 보기</a>
+        </div>
+        <div class="fine">
+          <span><svg class="i"><use href="#i-check"/></svg>무료 · MIT</span>
+          <span><svg class="i"><use href="#i-check"/></svg>Windows 10 / 11 (64bit)</span>
+          <span><svg class="i"><use href="#i-check"/></svg>GPU 없어도 OK</span>
+        </div>
+      </div>
+
+      <div class="mock-wrap">
+        <div class="mock" aria-label="받아쓰기 앱 화면 예시">
+          <div class="m-bar">
+            <span class="l"><img src="assets/logo.svg" alt="" />받아쓰기</span>
+            <span class="r"><i></i><i></i><i></i></span>
+          </div>
+          <div class="m-meta">
+            <div class="m-title">앱 출시 일정 회의</div>
+            <div class="m-chips">
+              <span class="m-chip" style="--c:var(--c0)"><i></i>김 팀장</span>
+              <span class="m-chip" style="--c:var(--c1)"><i></i>이 개발</span>
+              <span class="m-chip" style="--c:var(--c2)"><i></i>박 디자인</span>
+            </div>
+          </div>
+          <div class="m-body" id="m-body"></div>
+          <div class="m-dock">
+            <span class="m-rec"></span>
+            <div>
+              <div class="m-time" id="m-time">00:00</div>
+              <div class="m-src">마이크 + 시스템</div>
+            </div>
+            <div class="m-meter" id="m-meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="m-acts"><i></i><i></i><i></i></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div class="stats reveal">
+        <div class="stat"><b>수 초 안에</b><span>말이 끝나면 바로 글자로</span></div>
+        <div class="stat"><b>자동 화자 구분</b><span>누가 말했는지 색으로</span></div>
+        <div class="stat"><b>0바이트 전송</b><span>로컬 모드는 인터넷 불필요</span></div>
+        <div class="stat"><b>원클릭</b><span>트레이 · <code>Ctrl+Alt+R</code></span></div>
+      </div>
+    </div>
+  </header>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <div class="kicker">Features</div>
+        <h2>군더더기 없이,<br />회의에 필요한 것만.</h2>
+        <p>녹음 버튼 하나. 나머지는 받아쓰기가 알아서 합니다.</p>
+      </div>
+      <div class="features">
+        <div class="feat wide reveal">
+          <div>
+            <div class="ic"><svg class="i"><use href="#i-users"/></svg></div>
+            <h3>누가 말했는지 자동으로</h3>
+            <p>발화마다 목소리 특징(화자 임베딩)을 뽑아 실시간으로 사람을 구분합니다. 쉼 없이 말을 이어받아도 문장 안에서 화자가 바뀌는 지점을 찾아 나눠요. 이름을 누르면 "화자 1"을 "김 팀장"으로 바로 바꿀 수 있습니다.</p>
+          </div>
+          <div class="spk-demo">
+            <div class="spk-line" style="--c:var(--c0)"><b>김 팀장</b><span>출시일은 15일로 잡고, 목요일에 한 번 더 점검합시다.</span></div>
+            <div class="spk-line" style="--c:var(--c1)"><b>이 개발</b><span>결제 모듈은 금요일까지 배포 가능합니다.</span></div>
+            <div class="spk-line" style="--c:var(--c2)"><b>박 디자인</b><span>온보딩 시안은 수요일까지 드릴게요.</span></div>
+          </div>
+        </div>
+        <div class="feat reveal" style="--g:rgba(56,189,248,.18)">
+          <div class="ic"><svg class="i"><use href="#i-ko"/></svg></div>
+          <h3>한국어에 강한 인식</h3>
+          <p>Whisper large-v3 turbo 기반. 용어집에 회사·제품 이름을 넣으면 고유명사도 정확하게. 유튜브식 환각 문구("시청해 주셔서…")는 걸러냅니다.</p>
+        </div>
+        <div class="feat reveal" style="--g:rgba(52,211,153,.16)">
+          <div class="ic"><svg class="i"><use href="#i-lock"/></svg></div>
+          <h3>로컬 또는 API, 내가 선택</h3>
+          <p>민감한 회의는 PC 안에서만. 빠르게 필요하면 Groq · OpenAI API. 클릭 한 번으로 바꿔요.</p>
+        </div>
+        <div class="feat reveal" style="--g:rgba(251,191,36,.14)">
+          <div class="ic"><svg class="i"><use href="#i-feather"/></svg></div>
+          <h3>트레이에 숨어 있다가 원클릭</h3>
+          <p>러스트 + Tauri로 만든 가벼운 앱. 창을 닫아도 트레이에 머물고, 단축키 한 번으로 어디서든 녹음 시작·중지.</p>
+        </div>
+        <div class="feat reveal" style="--g:rgba(192,123,255,.2)">
+          <div class="ic"><svg class="i"><use href="#i-sparkles"/></svg></div>
+          <h3>AI 회의록 요약</h3>
+          <p>한 줄 요약 · 결정 사항 · 할 일(담당자/기한)까지 정리. 로컬 LLM(Ollama, 한국어 특화 EXAONE)부터 Claude · OpenAI까지.</p>
+        </div>
+        <div class="feat reveal" style="--g:rgba(56,189,248,.16)">
+          <div class="ic"><svg class="i"><use href="#i-headset"/></svg></div>
+          <h3>온라인 회의도 그대로</h3>
+          <p>마이크와 PC 소리(WASAPI 루프백)를 함께 받아 Zoom · Teams · Meet 상대방 목소리까지 받아 적습니다. 별도 가상 오디오 장치가 필요 없어요.</p>
+        </div>
+        <div class="feat wide reveal" style="--g:rgba(255,90,79,.14)">
+          <div>
+            <div class="ic"><svg class="i"><use href="#i-file"/></svg></div>
+            <h3>자동 저장 · 어디로든 내보내기</h3>
+            <p>말하는 동안 계속 저장돼 앱이 꺼져도 안전합니다. 잘못 들린 단어는 더블클릭해서 바로 고치고, 원하는 형식으로 내보내세요.</p>
+          </div>
+          <div class="fmt-list">
+            <div class="fmt"><b>.md</b><span>회의록 · 요약 포함</span></div>
+            <div class="fmt"><b>.txt</b><span>메모장 · 메신저 공유</span></div>
+            <div class="fmt"><b>.srt</b><span>영상 자막</span></div>
+            <div class="fmt"><b>.json</b><span>원본 데이터</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <div class="kicker">How it works</div>
+        <h2>말이 멈추는 순간,<br />바로 받아 적습니다.</h2>
+        <p>긴 녹음을 끝까지 기다리지 않습니다. 발화 단위로 잘라 즉시 처리하는 실시간 파이프라인이에요.</p>
+      </div>
+      <div class="flow">
+        <div class="wire"></div>
+        <div class="step reveal"><div class="n">01</div><h4>소리 듣기</h4><p>마이크, PC 소리(Zoom·Teams 상대방), 또는 둘 다를 동시에.</p><span class="tag">WASAPI 루프백</span></div>
+        <div class="step reveal"><div class="n">02</div><h4>발화 자르기</h4><p>32ms마다 말소리 여부를 판단해 말이 끝나는 즉시 한 덩어리로.</p><span class="tag">Silero VAD v6</span></div>
+        <div class="step reveal"><div class="n">03</div><h4>화자 구분</h4><p>목소리 임베딩으로 누구인지 판별하고, 문장 안의 화자 전환도 찾아냅니다.</p><span class="tag">3D-Speaker CAM++</span></div>
+        <div class="step reveal"><div class="n">04</div><h4>글자로 옮기기</h4><p>발화 길이에 맞춰 인코더를 줄여 짧은 말도 빠르게 인식합니다.</p><span class="tag">whisper.cpp · API</span></div>
+        <div class="step reveal"><div class="n">05</div><h4>정리하기</h4><p>환각·반복 제거, 자동 저장, 끝나면 AI 요약까지.</p><span class="tag">로컬 LLM · Claude</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="engines">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <div class="kicker">Engines</div>
+        <h2>상황에 맞는 엔진을 고르세요.</h2>
+        <p>회의 성격과 PC 사양에 따라 언제든 바꿀 수 있어요. 화자 구분은 어떤 엔진을 쓰든 PC 안에서 처리합니다.</p>
+      </div>
+      <div class="table reveal">
+        <div class="tr head"><div></div><div>로컬<small>whisper.cpp</small></div><div>Groq<small>whisper-large-v3-turbo</small></div><div>OpenAI<small>gpt-4o-transcribe</small></div></div>
+        <div class="tr"><div>속도</div><div><span class="dots">●●<i>●●</i></span> PC 사양에 따라</div><div><span class="dots">●●●●</span> 매우 빠름</div><div><span class="dots">●●●<i>●</i></span> 빠름</div></div>
+        <div class="tr"><div>한국어 정확도</div><div><span class="dots">●●●<i>●</i></span></div><div><span class="dots">●●●<i>●</i></span></div><div><span class="dots">●●●●</span></div></div>
+        <div class="tr"><div>비용</div><div>무료</div><div>시간당 약 $0.04</div><div>시간당 약 $0.36</div></div>
+        <div class="tr"><div>회의 내용</div><div>PC 밖으로 안 나감</div><div>Groq 서버로 전송</div><div>OpenAI 서버로 전송</div></div>
+      </div>
+      <p class="note">※ 비용은 작성 시점 각 사 공개 요금을 바탕으로 한 대략치이며, 실제 요금은 각 사 가격표를 확인하세요. 사용자 지정 엔진으로 사내 Whisper 서버(OpenAI 호환)도 연결할 수 있어요.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap privacy">
+      <div class="pv reveal">
+        <h3>회의 내용은 내 PC에.</h3>
+        <p>로컬 모드에서는 소리도, 글자도 밖으로 나가지 않습니다.</p>
+        <ul>
+          <li><svg class="i"><use href="#i-check"/></svg>모델은 처음 한 번만 내려받고 이후 오프라인 동작</li>
+          <li><svg class="i"><use href="#i-check"/></svg>API 키는 Windows 자격 증명 관리자에 암호화 보관</li>
+          <li><svg class="i"><use href="#i-check"/></svg>기록은 <code>문서\받아쓰기</code> 폴더에 평범한 파일로</li>
+          <li><svg class="i"><use href="#i-check"/></svg>전체 소스 공개 — 직접 확인하고 빌드할 수 있어요</li>
+        </ul>
+      </div>
+      <div class="pv reveal">
+        <h3>어디서든, 단축키 한 번.</h3>
+        <p>회의 창을 띄운 채로 바로 녹음을 시작하고 멈추세요.</p>
+        <div class="kbd"><span>Ctrl</span><span>Alt</span><span>R</span></div>
+        <ul>
+          <li><svg class="i"><use href="#i-check"/></svg>창을 닫아도 트레이에서 계속 받아쓰기</li>
+          <li><svg class="i"><use href="#i-check"/></svg>"항상 위" 고정으로 회의 화면 옆에 자막처럼</li>
+          <li><svg class="i"><use href="#i-check"/></svg>Windows 시작 시 자동 실행 (선택)</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="wrap">
+      <div class="sec-head center reveal">
+        <div class="kicker">FAQ</div>
+        <h2>자주 묻는 질문</h2>
+      </div>
+      <div class="faq">
+        <details class="reveal"><summary>정말 무료인가요?</summary><p>네. MIT 라이선스 오픈소스입니다. 로컬 모드는 비용이 전혀 들지 않고, API 모드를 쓸 때만 각 사에 사용량만큼 요금이 나갑니다.</p></details>
+        <details class="reveal"><summary>어떤 PC에서 돌아가나요? GPU가 필요한가요?</summary><p>Windows 10/11 64비트, AVX2를 지원하는 CPU(2013년 이후 대부분)면 됩니다. GPU는 없어도 됩니다. 로컬 모드의 속도는 CPU 성능에 따라 달라서, 사양이 낮은 노트북이라면 Groq API(매우 빠르고 저렴)를 추천합니다.</p></details>
+        <details class="reveal"><summary>설치하면 "Windows의 PC 보호" 경고가 떠요.</summary><p>코드 서명 인증서가 없는 개인 오픈소스 앱이라 SmartScreen이 경고합니다. <b>추가 정보 → 실행</b>을 누르면 설치됩니다. 걱정되면 소스를 직접 빌드할 수 있어요.</p></details>
+        <details class="reveal"><summary>온라인 회의(Zoom · Teams · Meet)도 받아 적을 수 있나요?</summary><p>입력을 <b>마이크 + 시스템</b>으로 바꾸면 내 목소리와 상대방 목소리를 함께 받아 적습니다. 스피커 소리가 마이크로 다시 들어가면 중복될 수 있어 헤드셋을 권장합니다.</p></details>
+        <details class="reveal"><summary>화자 구분이 틀리면 어떻게 하나요?</summary><p>설정의 <b>구분 민감도</b>로 조절하세요. 한 사람이 여러 명으로 나뉘면 왼쪽(적게)으로, 여러 명이 한 사람으로 합쳐지면 오른쪽(많게)으로 옮기면 됩니다. 참석 인원을 알면 <b>최대 화자 수</b>를 지정하는 게 가장 정확합니다.</p></details>
+        <details class="reveal"><summary>macOS · Linux는 지원하나요?</summary><p>지금은 Windows만 공식 지원합니다. 코어 엔진은 크로스플랫폼(Rust)이라 추후 확장할 수 있도록 만들어 두었습니다.</p></details>
+      </div>
+
+      <div class="final reveal">
+        <h2>다음 회의부터,<br />받아 적지 말고 대화하세요.</h2>
+        <p>설치 1분. 녹음 버튼 하나면 충분합니다.</p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/jeiel85/badasugi/releases/latest"><svg class="i"><use href="#i-download"/></svg>Windows용 내려받기</a>
+          <a class="btn ghost" href="https://github.com/jeiel85/badasugi"><svg class="i"><use href="#i-github"/></svg>GitHub에서 별 주기</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap foot">
+      <span>© 2026 받아쓰기 · MIT License · Rust + Tauri로 만들었습니다</span>
+      <span class="fl">
+        <a href="https://github.com/jeiel85/badasugi">GitHub</a>
+        <a href="https://github.com/jeiel85/badasugi/issues">문의 · 버그 제보</a>
+        <a href="https://github.com/jeiel85/badasugi#감사의-말">오픈소스 고지</a>
+      </span>
+    </div>
+  </footer>
+
+  <script>
+    // 내비 테두리
+    const nav = document.getElementById('nav');
+    addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 8), { passive: true });
+
+    // 스크롤 등장
+    const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }), { threshold: 0.12 });
+    document.querySelectorAll('.reveal').forEach((el, i) => { el.style.transitionDelay = `${(i % 3) * 70}ms`; io.observe(el); });
+
+    // 목업: 발화가 실시간으로 쌓이는 연출
+    const script = [
+      ['김 팀장', 'var(--c0)', '자, 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.'],
+      ['이 개발', 'var(--c1)', '결제 모듈은 개발이 끝났고 지금 테스트 서버에서 검증 중입니다.'],
+      ['이 개발', 'var(--c1)', '금요일까지는 배포 가능할 것 같아요.'],
+      ['박 디자인', 'var(--c2)', '온보딩 화면 두 개만 남았어요. 수요일까지 시안 드릴게요.'],
+      ['김 팀장', 'var(--c0)', '좋아요. 출시일은 15일로 잡고 목요일에 한 번 더 점검합시다.'],
+      ['이 개발', 'var(--c1)', '키오스크 응답 속도는 평균 2초에서 0.4초로 줄였습니다.'],
+      ['박 디자인', 'var(--c2)', '오, 체감이 확 다르겠네요. 매장 피드백도 다시 받아볼게요.'],
+    ];
+    const body = document.getElementById('m-body');
+    const time = document.getElementById('m-time');
+    const bars = [...document.querySelectorAll('#m-meter i')];
+    let t0 = Date.now(), idx = 0, lastSpk = null, lastGroup = null;
+    const fmt = (ms) => { const s = Math.floor(ms / 1000); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+    setInterval(() => { time.textContent = fmt(Date.now() - t0 + 754000); }, 250);
+    setInterval(() => {
+      const v = Math.random();
+      const shape = [0.45, 0.7, 0.9, 1, 0.9, 0.7, 0.45];
+      bars.forEach((b, i) => (b.style.height = `${4 + v * 15 * shape[i] * (0.7 + Math.random() * 0.6)}px`));
+    }, 110);
+    function next() {
+      if (idx >= script.length) {
+        idx = 0;
+        body.innerHTML = '';
+        lastSpk = null;
+      }
+      const [name, color, text] = script[idx++];
+      let g = lastGroup;
+      if (name !== lastSpk) {
+        g = document.createElement('div');
+        g.className = 'm-g';
+        g.style.setProperty('--c', color);
+        g.innerHTML = `<div class="h"><b>${name}</b><span>${fmt(Date.now() - t0 + 754000)}</span></div>`;
+        body.appendChild(g);
+        lastGroup = g;
+        lastSpk = name;
+      }
+      const sk = document.createElement('div');
+      sk.className = 'sk';
+      g.appendChild(sk);
+      setTimeout(() => {
+        const p = document.createElement('p');
+        p.textContent = text;
+        sk.replaceWith(p);
+        while (body.children.length > 5) body.removeChild(body.firstChild);
+        setTimeout(next, 1500);
+      }, 1100);
+    }
+    next();
+  </script>
+</body>
+</html>

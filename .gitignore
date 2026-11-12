@@ -1,0 +1,6 @@
+/target/
+/src-tauri/gen/
+*.part
+*.wav
+!crates/badasugi-core/assets/*.wav
+/.claude/

@@ -1,0 +1,12 @@
+# whisper.cpp(ggml) 빌드 설정
+[env]
+# "이 PC 전용(native)" 이 아니라 배포 가능한 AVX2 기준으로 빌드 (2013년 이후 대부분의 x86-64 CPU)
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
+# cmake 크레이트가 Visual Studio 생성기에서 Release 최적화 플래그(/O2)를 지워버리는 문제 우회.
+# 이게 없으면 whisper.cpp 가 최적화 없이 컴파일되어 20배 이상 느려진다.
+CMAKE_C_FLAGS_RELEASE = "-nologo -MD -O2 -Ob2 -DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "-nologo -MD -O2 -Ob2 -DNDEBUG /utf-8 /EHsc"

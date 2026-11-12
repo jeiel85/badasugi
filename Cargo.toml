@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/badasugi-core", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jeiel85/badasugi"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+# whisper.cpp / onnx 연산은 디버그 빌드에서도 최적화해야 테스트가 현실적인 속도로 돈다
+[profile.dev.package."*"]
+opt-level = 3

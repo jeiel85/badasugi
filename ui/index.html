@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>받아쓰기</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <!-- 타이틀바 (창 끌기 영역) -->
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6D5DFC"/><stop offset="1" stop-color="#9F5BF6"/></linearGradient></defs><rect x="2" y="2" width="60" height="60" rx="16" fill="url(#lg)"/><g fill="#fff"><rect x="11" y="26" width="7" height="12" rx="3.5"/><rect x="21" y="18" width="7" height="28" rx="3.5"/><rect x="31" y="12" width="7" height="40" rx="3.5"/><rect x="41" y="22" width="13" height="7" rx="3.5"/><rect x="41" y="35" width="10" height="7" rx="3.5"/></g></svg>
+        <span data-tauri-drag-region>받아쓰기</span>
+      </div>
+      <div class="tb-actions">
+        <button class="icon-btn" id="btn-history" title="회의 기록"><svg><use href="#i-history"/></svg></button>
+        <button class="icon-btn" id="btn-pin" title="항상 위에 표시"><svg><use href="#i-pin"/></svg></button>
+        <button class="icon-btn" id="btn-settings" title="설정"><svg><use href="#i-settings"/></svg></button>
+        <span class="tb-sep"></span>
+        <button class="icon-btn win" id="btn-min" title="최소화"><svg><use href="#i-minus"/></svg></button>
+        <button class="icon-btn win close" id="btn-close" title="트레이로 숨기기"><svg><use href="#i-x"/></svg></button>
+      </div>
+    </header>
+
+    <!-- 기록 보기 배너 -->
+    <div class="viewing" id="viewing" hidden>
+      <svg><use href="#i-history"/></svg>
+      <span id="viewing-label">기록 보기</span>
+      <button class="chip-btn" id="btn-back-live">실시간으로 돌아가기</button>
+    </div>
+
+    <!-- 회의 제목 + 화자 -->
+    <section class="meta" id="meta" hidden>
+      <input class="title-input" id="title-input" spellcheck="false" maxlength="80" />
+      <div class="speakers" id="speakers"></div>
+    </section>
+
+    <!-- 본문 -->
+    <main class="body" id="body">
+      <div class="summary-card" id="summary-card" hidden>
+        <div class="summary-head">
+          <span><svg><use href="#i-sparkles"/></svg> 회의 요약</span>
+          <div>
+            <button class="icon-btn sm" id="btn-copy-summary" title="요약 복사"><svg><use href="#i-copy"/></svg></button>
+            <button class="icon-btn sm" id="btn-fold-summary" title="접기"><svg><use href="#i-chevron"/></svg></button>
+          </div>
+        </div>
+        <div class="summary-body md" id="summary-body"></div>
+      </div>
+
+      <div class="empty" id="empty">
+        <div class="empty-art" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <h2>회의를 받아 적을 준비가 됐어요</h2>
+        <p class="hint">아래 버튼이나 <kbd id="hotkey-hint">Ctrl+Alt+R</kbd> 로 시작하세요.<br />말하는 사람을 구분해서 바로 글로 옮겨 드려요.</p>
+        <div class="setup" id="setup"></div>
+      </div>
+
+      <div class="transcript" id="transcript"></div>
+      <div class="listening" id="listening" hidden><span class="dot"></span><span id="listening-text">듣는 중</span></div>
+    </main>
+
+    <button class="jump" id="jump" hidden>새 발화 ↓</button>
+
+    <!-- 하단 도크 -->
+    <footer class="dock">
+      <button class="rec" id="btn-rec" title="녹음 시작/중지">
+        <span class="ring" id="rec-ring"></span>
+        <svg class="ic-mic"><use href="#i-mic"/></svg>
+        <span class="ic-stop"></span>
+      </button>
+      <div class="dock-mid">
+        <div class="dock-row">
+          <span class="timer" id="timer">00:00</span>
+          <span class="meter" id="meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        </div>
+        <button class="source" id="btn-source" title="입력 소리 선택">
+          <svg><use href="#i-mic"/></svg><span id="source-label">마이크</span><svg class="chev"><use href="#i-chevron"/></svg>
+        </button>
+      </div>
+      <div class="dock-actions">
+        <button class="icon-btn" id="btn-copy" title="전체 복사"><svg><use href="#i-copy"/></svg></button>
+        <button class="icon-btn" id="btn-save" title="파일로 저장"><svg><use href="#i-download"/></svg></button>
+        <button class="icon-btn accent" id="btn-summary" title="AI 회의 요약"><svg><use href="#i-sparkles"/></svg></button>
+      </div>
+      <div class="engine-label" id="engine-label"></div>
+    </footer>
+
+    <!-- 팝오버 메뉴 -->
+    <div class="popover" id="pop-source" hidden>
+      <button data-source="mic"><svg><use href="#i-mic"/></svg><div><b>마이크</b><small>대면 회의 · 내 목소리</small></div></button>
+      <button data-source="system"><svg><use href="#i-speaker"/></svg><div><b>시스템 소리</b><small>Zoom·Teams 상대방 · 영상</small></div></button>
+      <button data-source="both"><svg><use href="#i-both"/></svg><div><b>마이크 + 시스템</b><small>온라인 회의 전체 (헤드셋 권장)</small></div></button>
+    </div>
+    <div class="popover" id="pop-save" hidden>
+      <button data-fmt="md"><b>Markdown</b><small>.md · 회의록 (요약 포함)</small></button>
+      <button data-fmt="txt"><b>텍스트</b><small>.txt · 메모장</small></button>
+      <button data-fmt="srt"><b>자막</b><small>.srt · 영상 자막</small></button>
+      <button data-fmt="json"><b>JSON</b><small>.json · 원본 데이터</small></button>
+    </div>
+
+    <!-- 기록 패널 -->
+    <aside class="panel" id="panel-history" hidden>
+      <div class="panel-head">
+        <h3>회의 기록</h3>
+        <div>
+          <button class="icon-btn" id="btn-open-folder" title="폴더 열기"><svg><use href="#i-folder"/></svg></button>
+          <button class="icon-btn" data-close title="닫기"><svg><use href="#i-x"/></svg></button>
+        </div>
+      </div>
+      <div class="panel-body" id="history-list"></div>
+    </aside>
+
+    <!-- 설정 패널 -->
+    <aside class="panel" id="panel-settings" hidden>
+      <div class="panel-head">
+        <h3>설정</h3>
+        <button class="icon-btn" data-close title="닫기"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="panel-body settings" id="settings">
+        <section>
+          <h4>음성 인식</h4>
+          <div class="seg" id="seg-engine">
+            <button data-v="local">로컬</button>
+            <button data-v="openai">OpenAI</button>
+            <button data-v="groq">Groq</button>
+            <button data-v="custom">사용자 지정</button>
+          </div>
+          <p class="desc" id="engine-desc"></p>
+
+          <div data-engine="local">
+            <div class="models" id="model-list"></div>
+            <label class="row"><span>정확도 우선 <small>빔 서치 · 느려짐</small></span><input type="checkbox" class="switch" id="opt-beam" /></label>
+          </div>
+          <div data-engine="openai">
+            <label class="field"><span>API 키</span><input type="password" id="key-openai" placeholder="sk-…" autocomplete="off" /></label>
+            <label class="field"><span>모델</span>
+              <select id="opt-openai-model">
+                <option value="gpt-4o-transcribe">gpt-4o-transcribe (정확)</option>
+                <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (저렴)</option>
+                <option value="whisper-1">whisper-1</option>
+              </select>
+            </label>
+          </div>
+          <div data-engine="groq">
+            <label class="field"><span>API 키</span><input type="password" id="key-groq" placeholder="gsk_…" autocomplete="off" /></label>
+            <label class="field"><span>모델</span>
+              <select id="opt-groq-model">
+                <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (가장 빠름)</option>
+                <option value="whisper-large-v3">whisper-large-v3 (더 정확)</option>
+              </select>
+            </label>
+          </div>
+          <div data-engine="custom">
+            <label class="field"><span>주소</span><input id="opt-custom-url" placeholder="http://localhost:8000/v1" /></label>
+            <label class="field"><span>모델</span><input id="opt-custom-model" placeholder="whisper-1" /></label>
+            <label class="field"><span>API 키 <small>(선택)</small></span><input type="password" id="key-custom" autocomplete="off" /></label>
+          </div>
+          <button class="btn ghost" id="btn-test">연결 테스트</button>
+        </section>
+
+        <section>
+          <h4>화자 구분</h4>
+          <label class="row"><span>화자 구분하기</span><input type="checkbox" class="switch" id="opt-diar" /></label>
+          <div class="model-mini" id="speaker-model"></div>
+          <label class="field"><span>구분 민감도 <small id="thr-label"></small></span>
+            <input type="range" id="opt-thr" min="0.25" max="0.70" step="0.01" />
+            <div class="range-ends"><small>화자를 적게</small><small>화자를 많이</small></div>
+          </label>
+          <label class="field"><span>최대 화자 수</span>
+            <select id="opt-maxspk">
+              <option value="0">자동</option>
+              <option value="2">2명</option><option value="3">3명</option><option value="4">4명</option>
+              <option value="5">5명</option><option value="6">6명</option><option value="8">8명</option><option value="10">10명</option>
+            </select>
+          </label>
+        </section>
+
+        <section>
+          <h4>입력</h4>
+          <label class="field"><span>마이크</span><select id="opt-mic"></select></label>
+          <label class="field"><span>언어</span>
+            <select id="opt-lang">
+              <option value="ko">한국어</option>
+              <option value="auto">자동 감지</option>
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+              <option value="zh">中文</option>
+            </select>
+          </label>
+          <label class="field"><span>용어집 <small>쉼표로 구분 · 고유명사 인식률 향상</small></span>
+            <textarea id="opt-glossary" rows="2" placeholder="예) OKPOS, 키오스크, 스캔프리, 정산"></textarea>
+          </label>
+        </section>
+
+        <section>
+          <h4>AI 요약</h4>
+          <div class="seg" id="seg-llm">
+            <button data-v="ollama">Ollama</button>
+            <button data-v="openai">OpenAI</button>
+            <button data-v="anthropic">Claude</button>
+            <button data-v="custom">사용자 지정</button>
+          </div>
+          <div data-llm="ollama">
+            <label class="field"><span>Ollama 주소</span><input id="opt-ollama-url" /></label>
+            <label class="field"><span>모델 <small>한국어 특화: exaone3.5</small></span><input id="opt-ollama-model" /></label>
+          </div>
+          <div data-llm="openai">
+            <label class="field"><span>모델 <small>API 키는 음성 인식 OpenAI 키를 함께 사용</small></span><input id="opt-llm-openai-model" /></label>
+          </div>
+          <div data-llm="anthropic">
+            <label class="field"><span>Anthropic API 키</span><input type="password" id="key-anthropic" placeholder="sk-ant-…" autocomplete="off" /></label>
+            <label class="field"><span>모델</span><input id="opt-anthropic-model" /></label>
+          </div>
+          <div data-llm="custom">
+            <label class="field"><span>주소 <small>OpenAI 호환</small></span><input id="opt-llm-custom-url" placeholder="http://localhost:1234/v1" /></label>
+            <label class="field"><span>모델</span><input id="opt-llm-custom-model" /></label>
+            <label class="field"><span>API 키 <small>(선택)</small></span><input type="password" id="key-llm-custom" autocomplete="off" /></label>
+          </div>
+        </section>
+
+        <section>
+          <h4>일반</h4>
+          <label class="field"><span>녹음 단축키 <small>칸을 누르고 조합키 입력</small></span><input id="opt-hotkey" readonly /></label>
+          <label class="row"><span>항상 위에 표시</span><input type="checkbox" class="switch" id="opt-top" /></label>
+          <label class="row"><span>Windows 시작 시 트레이에서 실행</span><input type="checkbox" class="switch" id="opt-autostart" /></label>
+          <label class="row"><span>녹음 파일(WAV)도 저장</span><input type="checkbox" class="switch" id="opt-audio" /></label>
+          <label class="row"><span>대기 중 모델 메모리 비우기 <small>가볍게</small></span><input type="checkbox" class="switch" id="opt-unload" /></label>
+          <label class="field"><span>테마</span>
+            <select id="opt-theme"><option value="system">시스템 설정</option><option value="light">밝게</option><option value="dark">어둡게</option></select>
+          </label>
+        </section>
+
+        <section class="about">
+          <div class="about-row">
+            <span>받아쓰기 <b id="app-version"></b></span>
+            <button class="link" id="btn-github">GitHub</button>
+          </div>
+          <div class="about-row">
+            <button class="link" id="btn-folder-sessions">기록 폴더</button>
+            <button class="link" id="btn-folder-models">모델 폴더</button>
+            <button class="link danger" id="btn-quit">완전히 종료</button>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <div class="scrim" id="scrim" hidden></div>
+    <div class="toast" id="toast" hidden></div>
+  </div>
+
+  <!-- 아이콘 (Lucide 스타일) -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 18v4"/></symbol>
+      <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.4 5.6a9 9 0 0 1 0 12.8"/></symbol>
+      <symbol id="i-both" viewBox="0 0 24 24"><rect x="3" y="3" width="5" height="10" rx="2.5"/><path d="M1.5 9.5a4 4 0 0 0 8 0"/><path d="M5.5 14v3"/><path d="M17 7l-3 3h-2v4h2l3 3z"/><path d="M20 9.5a3.5 3.5 0 0 1 0 5"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.2 2h-.4a2 2 0 0 0-2 2v.2a2 2 0 0 1-1 1.7l-.4.3a2 2 0 0 1-2 0l-.2-.1a2 2 0 0 0-2.7.7l-.2.4a2 2 0 0 0 .7 2.7l.2.1a2 2 0 0 1 1 1.7v.5a2 2 0 0 1-1 1.7l-.2.1a2 2 0 0 0-.7 2.7l.2.4a2 2 0 0 0 2.7.7l.2-.1a2 2 0 0 1 2 0l.4.3a2 2 0 0 1 1 1.7v.2a2 2 0 0 0 2 2h.4a2 2 0 0 0 2-2v-.2a2 2 0 0 1 1-1.7l.4-.3a2 2 0 0 1 2 0l.2.1a2 2 0 0 0 2.7-.7l.2-.4a2 2 0 0 0-.7-2.7l-.2-.1a2 2 0 0 1-1-1.7v-.5a2 2 0 0 1 1-1.7l.2-.1a2 2 0 0 0 .7-2.7l-.2-.4a2 2 0 0 0-2.7-.7l-.2.1a2 2 0 0 1-2 0l-.4-.3a2 2 0 0 1-1-1.7V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5"/><path d="M9 10.8V6h6v4.8l2.5 2.7a1 1 0 0 1-.7 1.5H7.2a1 1 0 0 1-.7-1.5z"/><path d="M8 6h8"/><path d="M9 2h6v4H9z"/></symbol>
+      <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
+      <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.9 15.5A2 2 0 0 0 8.5 14.1L2.4 12.5a.5.5 0 0 1 0-1l6.1-1.6a2 2 0 0 0 1.4-1.4l1.6-6.1a.5.5 0 0 1 1 0l1.6 6.1a2 2 0 0 0 1.4 1.4l6.1 1.6a.5.5 0 0 1 0 1l-6.1 1.6a2 2 0 0 0-1.4 1.4l-1.6 6.1a.5.5 0 0 1-1 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+      <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8l-1.3 4.4a.5.5 0 0 0 .6.6l4.4-1.3a2 2 0 0 0 .8-.5z"/></symbol>
+    </defs>
+  </svg>
+
+  <script src="app.js"></script>
+</body>
+</html>

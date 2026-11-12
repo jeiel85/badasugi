@@ -1,0 +1,937 @@
+'use strict';
+
+/* ───────────── 기반 ───────────── */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const T = window.__TAURI__;
+const api = T ? {
+  invoke: T.core.invoke,
+  listen: T.event.listen,
+  win: T.window.getCurrentWindow(),
+  save: (o) => T.dialog.save(o),
+  ask: (m, o) => T.dialog.ask(m, o),
+} : createMock();
+
+const COLORS = ['#7c6cff', '#0ea5e9', '#f59e0b', '#10b981', '#f43f5e', '#6366f1', '#14b8a6', '#f97316', '#a855f7', '#84cc16'];
+const spkColor = (s) => (s == null ? 'var(--muted)' : COLORS[s % COLORS.length]);
+const SOURCE_LABEL = { mic: '마이크', system: '시스템 소리', both: '마이크 + 시스템' };
+const SOURCE_ICON = { mic: '#i-mic', system: '#i-speaker', both: '#i-both' };
+const ENGINE_DESC = {
+  local: '인터넷 없이 이 PC에서 인식합니다. 회의 내용이 밖으로 나가지 않아요. 첫 사용 때 모델을 한 번 내려받습니다.',
+  openai: 'OpenAI gpt-4o-transcribe — 한국어 정확도가 가장 높습니다. 사용량만큼 과금됩니다.',
+  groq: 'Groq Whisper — 매우 빠르고 저렴합니다. (large-v3-turbo 기준 시간당 약 $0.04)',
+  custom: 'OpenAI 호환 음성 인식 서버(faster-whisper-server, LocalAI 등)를 사용합니다.',
+};
+
+const S = {
+  app: null,
+  settings: null,
+  rec: 'idle',
+  live: true,
+  liveDoc: null,
+  viewDoc: null,
+  pending: new Map(),
+  failed: new Map(),
+  timerStart: 0,
+  speaking: false,
+  downloads: {},
+  dlQueue: [],
+  summarizing: false,
+};
+const doc = () => (S.live ? S.liveDoc : S.viewDoc);
+
+/* ───────────── 유틸 ───────────── */
+function fmt(ms) {
+  const s = Math.floor((ms || 0) / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s / 60) % 60), x = s % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${p(m)}:${p(x)}` : `${p(m)}:${p(x)}`;
+}
+function mb(bytes) {
+  return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)}GB` : `${Math.round(bytes / 1e6)}MB`;
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function speakerName(d, s) {
+  if (s == null) return '발화';
+  return (d && d.speakers && d.speakers[s]) || `화자 ${s + 1}`;
+}
+let toastTimer;
+function toast(msg, kind = '') {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = `toast ${kind}`;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), kind === 'error' ? 5200 : 2600);
+}
+async function call(cmd, args) {
+  try {
+    return await api.invoke(cmd, args);
+  } catch (e) {
+    toast(String(e), 'error');
+    throw e;
+  }
+}
+function debounce(fn, ms) {
+  let t;
+  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+function md(src) {
+  const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`(.+?)`/g, '<code>$1</code>');
+  let html = '', list = false;
+  for (const raw of String(src).split('\n')) {
+    const line = raw.trimEnd();
+    const li = line.match(/^\s*[-*]\s+(\[[ xX]\]\s+)?(.*)$/);
+    if (li) {
+      if (!list) { html += '<ul>'; list = true; }
+      html += li[1] ? `<li class="task"><span>${inline(li[2])}</span></li>` : `<li>${inline(li[2])}</li>`;
+      continue;
+    }
+    if (list) { html += '</ul>'; list = false; }
+    const h = line.match(/^#{1,6}\s+(.*)$/);
+    if (h) html += `<h4>${inline(h[1])}</h4>`;
+    else if (line.trim()) html += `<p>${inline(line)}</p>`;
+  }
+  if (list) html += '</ul>';
+  return html;
+}
+
+/* ───────────── 테마 ───────────── */
+const darkMq = matchMedia('(prefers-color-scheme: dark)');
+function applyTheme() {
+  const t = S.settings?.theme || 'system';
+  document.documentElement.dataset.theme = t === 'system' ? (darkMq.matches ? 'dark' : 'light') : t;
+}
+darkMq.addEventListener('change', applyTheme);
+
+/* ───────────── 본문 렌더 ───────────── */
+const body = $('#body');
+let editing = false;
+let renderQueued = false;
+
+function nearBottom() {
+  return body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+}
+
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; renderDoc(); });
+}
+
+function renderDoc() {
+  if (editing) return;
+  const d = doc();
+  const items = [];
+  if (d) for (const u of d.utterances) items.push({ kind: 'u', ...u });
+  if (S.live) {
+    for (const [id, p] of S.pending) items.push({ kind: 'p', id, ...p });
+    for (const [id, f] of S.failed) items.push({ kind: 'f', id, ...f });
+  }
+  items.sort((a, b) => a.startMs - b.startMs || a.id - b.id);
+
+  const hasContent = items.length > 0;
+  $('#empty').hidden = hasContent || S.rec !== 'idle' || !S.live;
+  $('#meta').hidden = !d || (!hasContent && S.rec === 'idle');
+  renderSetup();
+
+  const stick = nearBottom();
+  const tr = $('#transcript');
+  const groups = [];
+  for (const it of items) {
+    const g = groups[groups.length - 1];
+    if (g && g.speaker === it.speaker && it.startMs - g.endMs < 15000) {
+      g.items.push(it);
+      g.endMs = Math.max(g.endMs, it.endMs);
+    } else {
+      groups.push({ speaker: it.speaker, startMs: it.startMs, endMs: it.endMs, items: [it] });
+    }
+  }
+  tr.innerHTML = groups.map((g) => `
+    <div class="group" style="--c:${spkColor(g.speaker)}">
+      <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
+      ${g.items.map((it) => it.kind === 'u'
+        ? `<div class="u" data-id="${it.id}">${esc(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>`
+        : it.kind === 'p'
+          ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
+          : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
+    </div>`).join('');
+
+  $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking);
+  renderMeta();
+  renderSummary();
+  updateActions();
+  if (stick) body.scrollTop = body.scrollHeight;
+  else if (S.live && S.rec === 'recording') $('#jump').hidden = false;
+}
+
+function renderMeta() {
+  const d = doc();
+  if (!d) return;
+  const ti = $('#title-input');
+  if (document.activeElement !== ti) ti.value = d.title || '';
+  const spk = new Set();
+  for (const u of d.utterances) if (u.speaker != null) spk.add(u.speaker);
+  if (S.live) for (const p of S.pending.values()) if (p.speaker != null) spk.add(p.speaker);
+  const box = $('#speakers');
+  if (box.querySelector('input')) return;
+  box.innerHTML = [...spk].sort((a, b) => a - b)
+    .map((s) => `<button class="spk-chip" data-spk="${s}" style="--c:${spkColor(s)}" title="이름 바꾸기"><i></i>${esc(speakerName(d, s))}</button>`)
+    .join('');
+}
+
+function renderSummary() {
+  const d = doc();
+  const card = $('#summary-card');
+  if (S.summarizing && d) {
+    card.hidden = false;
+    $('#summary-body').innerHTML = '<div class="loading"><span class="dot"></span>회의 내용을 정리하는 중…</div>';
+    return;
+  }
+  card.hidden = !(d && d.summary);
+  if (d && d.summary) $('#summary-body').innerHTML = md(d.summary);
+}
+
+function updateActions() {
+  const d = doc();
+  const has = !!(d && d.utterances.length);
+  $('#btn-copy').disabled = !has;
+  $('#btn-save').disabled = !has;
+  $('#btn-summary').disabled = !has || S.summarizing;
+  $('#viewing').hidden = S.live;
+  if (!S.live && S.viewDoc) $('#viewing-label').textContent = `기록 보기 · ${S.viewDoc.title}`;
+}
+
+function renderSetup() {
+  const box = $('#setup');
+  if (!S.app || !S.settings) return;
+  const cards = [];
+  const s = S.settings;
+  if (s.engine === 'local') {
+    const m = S.app.models.find((x) => x.id === s.localModel);
+    const custom = !m && S.app.customModels.includes(s.localModel);
+    const needSpk = s.diarization.enabled && !S.app.speakerModelReady;
+    if ((m && !m.ready) || needSpk) {
+      const ids = [];
+      if (needSpk) ids.push('campplus-zh-en');
+      if (m && !m.ready) ids.push(m.id);
+      const total = (needSpk ? 28281164 : 0) + (m && !m.ready ? m.size : 0);
+      const active = ids.find((id) => S.downloads[id]);
+      const dl = active ? S.downloads[active] : null;
+      cards.push(`<div class="setup-card">
+        <b>처음 한 번, 모델을 내려받아 주세요</b>
+        <p>${m && !m.ready ? `음성 인식 ${esc(m.label)}` : ''}${m && !m.ready && needSpk ? ' + ' : ''}${needSpk ? '화자 구분' : ''} 모델 · 약 ${mb(total)}. 받고 나면 인터넷 없이 동작해요.</p>
+        ${dl ? `<div class="progress"><i style="width:${(dl.done / Math.max(dl.total, 1)) * 100}%"></i></div><p style="margin:6px 0 0">${mb(dl.done)} / ${mb(dl.total)}</p>`
+          : `<div class="actions"><button class="btn sm" data-dl="${ids.join(',')}">내려받기</button><button class="link" data-open-settings>API로 쓰기</button></div>`}
+      </div>`);
+    } else if (!m && !custom) {
+      cards.push('<div class="setup-card"><b>모델을 선택해 주세요</b><p>설정에서 음성 인식 모델을 고를 수 있어요.</p><div class="actions"><button class="btn sm" data-open-settings>설정 열기</button></div></div>');
+    }
+  } else {
+    const keyName = { openai: 'openai', groq: 'groq' }[s.engine];
+    if (keyName && !S.app.keys[keyName]) {
+      cards.push(`<div class="setup-card"><b>${s.engine === 'openai' ? 'OpenAI' : 'Groq'} API 키가 필요해요</b><p>설정에서 키를 입력하면 바로 사용할 수 있어요. 키는 Windows 자격 증명 관리자에 안전하게 보관됩니다.</p><div class="actions"><button class="btn sm" data-open-settings>설정 열기</button></div></div>`);
+    }
+  }
+  box.innerHTML = cards.join('');
+}
+
+/* ───────────── 도크 ───────────── */
+function renderDock() {
+  const app = $('#app');
+  app.classList.toggle('recording', S.rec === 'recording');
+  app.classList.toggle('busy', S.rec === 'starting' || S.rec === 'stopping');
+  const src = S.settings?.source || 'mic';
+  $('#source-label').textContent = SOURCE_LABEL[src];
+  $('#btn-source use').setAttribute('href', SOURCE_ICON[src]);
+  $('#btn-pin').classList.toggle('on', !!S.settings?.alwaysOnTop);
+  $('#hotkey-hint').textContent = S.settings?.hotkey || '단축키 없음';
+  const lbl = S.rec === 'stopping' ? '남은 발화를 정리하는 중…' : S.rec === 'starting' ? '준비하는 중…' : engineLabel();
+  $('#engine-label').textContent = lbl;
+  tickTimer();
+}
+
+function engineLabel() {
+  const s = S.settings;
+  if (!s) return '';
+  const spk = s.diarization.enabled ? ' · 화자 구분' : '';
+  if (s.engine === 'local') {
+    const m = S.app?.models.find((x) => x.id === s.localModel);
+    return `로컬 · ${m ? m.label : s.localModel}${spk}`;
+  }
+  const model = { openai: s.openaiModel, groq: s.groqModel, custom: s.customModel }[s.engine];
+  const name = { openai: 'OpenAI', groq: 'Groq', custom: '사용자 지정' }[s.engine];
+  return `${name} · ${model}${spk}`;
+}
+
+function tickTimer() {
+  const d = doc();
+  const ms = S.rec === 'recording' || S.rec === 'stopping' ? Date.now() - S.timerStart : d ? d.durationMs : 0;
+  $('#timer').textContent = fmt(S.live || S.rec !== 'idle' ? ms : d?.durationMs);
+}
+setInterval(() => { if (S.rec === 'recording') tickTimer(); }, 250);
+
+const meterBars = $$('#meter i');
+const ring = $('#rec-ring');
+function setLevel(rms) {
+  const db = 20 * Math.log10(rms + 1e-6);
+  const v = Math.min(1, Math.max(0, (db + 58) / 46));
+  const shape = [0.45, 0.7, 0.9, 1, 0.9, 0.7, 0.45];
+  meterBars.forEach((b, i) => {
+    const jitter = 0.75 + Math.random() * 0.5;
+    b.style.height = `${4 + v * 16 * shape[i] * jitter}px`;
+  });
+  ring.style.setProperty('--lv', (1 + v * 0.14).toFixed(3));
+}
+function resetLevel() {
+  meterBars.forEach((b) => (b.style.height = '4px'));
+  ring.style.setProperty('--lv', 1);
+}
+
+/* ───────────── 이벤트 (백엔드) ───────────── */
+async function refreshState() {
+  S.app = await api.invoke('get_state');
+  S.settings = S.app.settings;
+  S.rec = S.app.rec;
+  applyTheme();
+  if (S.app.current) S.liveDoc = S.app.current;
+  if (S.rec === 'recording') S.timerStart = Date.now() - S.app.elapsedMs;
+  renderDock();
+  scheduleRender();
+}
+
+function onRec(state) {
+  const prev = S.rec;
+  S.rec = state;
+  if (state === 'starting' && prev === 'idle') {
+    S.live = true;
+    S.pending.clear();
+    S.failed.clear();
+    S.liveDoc = null;
+    S.slowHinted = false;
+  }
+  if (state === 'recording' && prev !== 'recording') {
+    S.timerStart = Date.now();
+    api.invoke('get_state').then((st) => {
+      S.app = st;
+      S.liveDoc = st.current;
+      scheduleRender();
+    });
+  }
+  if (state === 'idle') {
+    S.speaking = false;
+    resetLevel();
+  }
+  renderDock();
+  scheduleRender();
+}
+
+function onEvent(e) {
+  const d = S.liveDoc;
+  switch (e.type) {
+    case 'level':
+      setLevel(e.rms);
+      if (S.speaking !== e.speaking) {
+        S.speaking = e.speaking;
+        $('#listening').hidden = !(S.live && S.speaking);
+      }
+      break;
+    case 'pending':
+      S.pending.set(e.id, { startMs: e.startMs, endMs: e.endMs, speaker: e.speaker });
+      // PC 가 받아 적는 속도보다 말이 빨라 대기열이 쌓이면 한 번만 안내
+      if (S.pending.size >= 4 && !S.slowHinted && S.settings?.engine === 'local') {
+        S.slowHinted = true;
+        toast('이 PC에선 인식이 말보다 느려 조금씩 밀리고 있어요.\n설정에서 가벼운 모델이나 Groq API를 쓰면 더 빨라요.');
+      }
+      scheduleRender();
+      break;
+    case 'transcript':
+      S.pending.delete(e.id);
+      if (d) {
+        const u = { id: e.id, startMs: e.startMs, endMs: e.endMs, speaker: e.speaker, text: e.text, latencyMs: e.latencyMs };
+        const i = d.utterances.findIndex((x) => x.id === e.id);
+        if (i >= 0) d.utterances[i] = u; else d.utterances.push(u);
+        d.durationMs = Math.max(d.durationMs || 0, e.endMs);
+      }
+      scheduleRender();
+      break;
+    case 'discarded':
+      S.pending.delete(e.id);
+      scheduleRender();
+      break;
+    case 'failed': {
+      const p = S.pending.get(e.id);
+      S.pending.delete(e.id);
+      if (p) S.failed.set(e.id, { ...p, message: e.message });
+      if (S.failed.size === 1) toast(`인식 실패: ${e.message}`, 'error');
+      scheduleRender();
+      break;
+    }
+    case 'status':
+      toast(e.message);
+      break;
+    case 'error':
+      toast(e.message, 'error');
+      break;
+    case 'stopped':
+      S.pending.clear();
+      api.invoke('get_state').then((st) => { S.app = st; renderDock(); scheduleRender(); });
+      break;
+  }
+}
+
+function onDownload(e) {
+  if (e.state === 'progress') {
+    S.downloads[e.id] = { done: e.done, total: e.total };
+  } else {
+    delete S.downloads[e.id];
+    if (e.state === 'error') { toast(e.message, 'error'); S.dlQueue = []; }
+    if (e.state === 'done') {
+      refreshState().then(() => { renderSettings(); nextDownload(); });
+      return;
+    }
+  }
+  renderSetup();
+  renderModels();
+}
+
+function queueDownloads(ids) {
+  for (const id of ids) if (!S.dlQueue.includes(id)) S.dlQueue.push(id);
+  if (!Object.keys(S.downloads).length) nextDownload();
+}
+function nextDownload() {
+  const id = S.dlQueue.shift();
+  if (!id) return;
+  S.downloads[id] = { done: 0, total: 1 };
+  renderSetup();
+  renderModels();
+  call('download_model', { id }).catch(() => { delete S.downloads[id]; renderSetup(); renderModels(); });
+}
+
+/* ───────────── 동작 ───────────── */
+$('#btn-rec').addEventListener('click', async () => {
+  try {
+    await api.invoke('toggle_recording');
+  } catch (e) {
+    toast(String(e), 'error');
+    if (/모델|API 키/.test(String(e))) openPanel('settings');
+  }
+});
+
+$('#btn-min').addEventListener('click', () => api.win.minimize());
+$('#btn-close').addEventListener('click', () => api.win.hide());
+$('#btn-pin').addEventListener('click', () => {
+  S.settings.alwaysOnTop = !S.settings.alwaysOnTop;
+  saveSettings();
+  renderDock();
+  toast(S.settings.alwaysOnTop ? '항상 위에 표시합니다' : '항상 위 표시를 껐습니다');
+});
+$('#btn-back-live').addEventListener('click', () => { S.live = true; S.viewDoc = null; renderDock(); scheduleRender(); });
+$('#jump').addEventListener('click', () => { body.scrollTop = body.scrollHeight; $('#jump').hidden = true; });
+body.addEventListener('scroll', () => { if (nearBottom()) $('#jump').hidden = true; });
+
+// 제목
+$('#title-input').addEventListener('change', (e) => {
+  const d = doc();
+  if (!d) return;
+  d.title = e.target.value.trim() || d.title;
+  persistDoc(d);
+});
+$('#title-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
+
+// 화자 이름 바꾸기
+function startRename(spk) {
+  const d = doc();
+  if (!d || spk === '' || spk == null) return;
+  const chip = $(`.spk-chip[data-spk="${spk}"]`);
+  if (!chip) return;
+  chip.innerHTML = `<i></i><input value="${esc(speakerName(d, +spk))}" />`;
+  const inp = chip.querySelector('input');
+  inp.focus();
+  inp.select();
+  const done = (ok) => {
+    if (ok) {
+      const v = inp.value.trim();
+      d.speakers = d.speakers || {};
+      if (v && v !== `화자 ${+spk + 1}`) d.speakers[spk] = v; else delete d.speakers[spk];
+      persistDoc(d);
+    }
+    chip.innerHTML = '';
+    $('#speakers').innerHTML = '';
+    scheduleRender();
+  };
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+  inp.addEventListener('blur', () => done(true), { once: true });
+}
+$('#speakers').addEventListener('click', (e) => {
+  const c = e.target.closest('.spk-chip');
+  if (c && !c.querySelector('input')) startRename(c.dataset.spk);
+});
+$('#transcript').addEventListener('click', (e) => {
+  const n = e.target.closest('.g-name');
+  if (n) startRename(n.dataset.spk);
+});
+
+// 발화 고치기 (더블클릭)
+$('#transcript').addEventListener('dblclick', (e) => {
+  const el = e.target.closest('.u[data-id]');
+  const d = doc();
+  if (!el || !d) return;
+  const u = d.utterances.find((x) => x.id === +el.dataset.id);
+  if (!u) return;
+  editing = true;
+  el.textContent = u.text;
+  el.contentEditable = 'true';
+  el.focus();
+  const finish = (save) => {
+    el.contentEditable = 'false';
+    editing = false;
+    const v = el.innerText.trim();
+    if (save && v && v !== u.text) { u.text = v; persistDoc(d); }
+    scheduleRender();
+  };
+  el.addEventListener('keydown', (k) => {
+    if (k.key === 'Enter' && !k.shiftKey) { k.preventDefault(); el.blur(); }
+    if (k.key === 'Escape') { el.textContent = u.text; finish(false); }
+  });
+  el.addEventListener('blur', () => finish(true), { once: true });
+});
+
+const persistDoc = debounce((d) => {
+  api.invoke('save_session', { doc: d }).catch((e) => toast(String(e), 'error'));
+}, 300);
+
+// 복사 · 저장
+$('#btn-copy').addEventListener('click', async () => {
+  const d = doc();
+  if (!d) return;
+  const text = await call('session_text', { id: d.id, format: 'txt' });
+  await navigator.clipboard.writeText(text);
+  toast('전체 녹취록을 복사했어요');
+});
+$('#btn-copy-summary').addEventListener('click', async () => {
+  const d = doc();
+  if (d?.summary) { await navigator.clipboard.writeText(d.summary); toast('요약을 복사했어요'); }
+});
+$('#btn-fold-summary').addEventListener('click', () => $('#summary-card').classList.toggle('folded'));
+
+function showPopover(pop, anchor, align = 'left') {
+  hidePopovers();
+  pop.hidden = false;
+  const a = anchor.getBoundingClientRect();
+  const p = pop.getBoundingClientRect();
+  const appR = $('#app').getBoundingClientRect();
+  let left = align === 'right' ? a.right - p.width : a.left;
+  left = Math.max(8, Math.min(left, appR.width - p.width - 8));
+  pop.style.left = `${left}px`;
+  pop.style.top = `${a.top - p.height - 8}px`;
+}
+function hidePopovers() { $$('.popover').forEach((p) => (p.hidden = true)); }
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save')) hidePopovers(); });
+
+$('#btn-save').addEventListener('click', (e) => showPopover($('#pop-save'), e.currentTarget, 'right'));
+$('#pop-save').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-fmt]');
+  const d = doc();
+  if (!b || !d) return;
+  hidePopovers();
+  const fmtName = b.dataset.fmt;
+  const safe = (d.title || d.id).replace(/[\\/:*?"<>|]/g, '_');
+  const path = await api.save({ defaultPath: `${safe}.${fmtName}`, filters: [{ name: fmtName.toUpperCase(), extensions: [fmtName] }] });
+  if (!path) return;
+  await call('export_session', { id: d.id, format: fmtName, path });
+  toast('저장했어요');
+});
+
+$('#btn-source').addEventListener('click', (e) => {
+  $$('#pop-source button').forEach((b) => b.classList.toggle('on', b.dataset.source === S.settings.source));
+  showPopover($('#pop-source'), e.currentTarget);
+});
+$('#pop-source').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-source]');
+  if (!b) return;
+  hidePopovers();
+  S.settings.source = b.dataset.source;
+  saveSettings();
+  renderDock();
+  if (S.rec !== 'idle') toast('다음 녹음부터 적용됩니다');
+  else if (b.dataset.source === 'both') toast('스피커 소리가 마이크로 다시 들어가면 중복될 수 있어요. 헤드셋을 권장해요.');
+});
+
+// 요약
+$('#btn-summary').addEventListener('click', async () => {
+  const d = doc();
+  if (!d || S.summarizing) return;
+  if (S.rec !== 'idle' && S.live) toast('지금까지의 내용으로 요약할게요');
+  S.summarizing = true;
+  $('#summary-card').classList.remove('folded');
+  renderSummary();
+  updateActions();
+  body.scrollTop = 0;
+  try {
+    const text = await api.invoke('summarize', { id: d.id });
+    d.summary = text;
+  } catch (e) {
+    toast(String(e), 'error');
+  } finally {
+    S.summarizing = false;
+    renderSummary();
+    updateActions();
+  }
+});
+
+/* ───────────── 패널 ───────────── */
+function openPanel(name) {
+  closePanels();
+  $('#scrim').hidden = false;
+  $(`#panel-${name}`).hidden = false;
+  if (name === 'settings') renderSettings();
+  if (name === 'history') renderHistory();
+}
+function closePanels() {
+  $$('.panel').forEach((p) => (p.hidden = true));
+  $('#scrim').hidden = true;
+  stopHotkeyCapture();
+}
+$('#btn-settings').addEventListener('click', () => openPanel('settings'));
+$('#btn-history').addEventListener('click', () => openPanel('history'));
+$('#scrim').addEventListener('click', closePanels);
+$$('[data-close]').forEach((b) => b.addEventListener('click', closePanels));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !hotkeyCapturing) { closePanels(); hidePopovers(); } });
+document.addEventListener('click', (e) => {
+  const dl = e.target.closest('[data-dl]');
+  if (dl) queueDownloads(dl.dataset.dl.split(','));
+  if (e.target.closest('[data-open-settings]')) openPanel('settings');
+});
+
+/* 기록 */
+async function renderHistory() {
+  const list = await call('list_sessions');
+  const box = $('#history-list');
+  if (!list.length) {
+    box.innerHTML = '<div class="h-empty">아직 회의 기록이 없어요.<br>녹음을 마치면 자동으로 저장돼요.</div>';
+    return;
+  }
+  let day = '';
+  const liveId = S.rec !== 'idle' ? S.liveDoc?.id : null;
+  box.innerHTML = list.map((m) => {
+    const dd = m.startedAt.slice(0, 10);
+    const head = dd !== day ? `<div class="h-day">${dd.replace(/-/g, '. ')}</div>` : '';
+    day = dd;
+    return `${head}<div class="h-item" role="button" data-id="${esc(m.id)}">
+      <div class="h-title"><span>${esc(m.title)}</span>${m.id === liveId ? '<span class="h-live">● 녹음 중</span>' : `<button class="icon-btn sm" data-del="${esc(m.id)}" title="삭제"><svg><use href="#i-trash"/></svg></button>`}</div>
+      <div class="h-sub">${m.startedAt.slice(11)} · ${fmt(m.durationMs)} · 화자 ${m.speakers}명 · 발화 ${m.count}개</div>
+      <div class="h-prev">${esc(m.preview)}</div>
+    </div>`;
+  }).join('');
+}
+$('#history-list').addEventListener('click', async (e) => {
+  const del = e.target.closest('[data-del]');
+  if (del) {
+    e.stopPropagation();
+    const ok = await api.ask('이 회의 기록을 삭제할까요?\n(녹취록·요약·녹음 파일이 함께 지워지며 되돌릴 수 없어요)', { title: '받아쓰기', kind: 'warning' });
+    if (ok) { await call('delete_session', { id: del.dataset.del }); renderHistory(); }
+    return;
+  }
+  const item = e.target.closest('.h-item');
+  if (!item) return;
+  const id = item.dataset.id;
+  if (S.liveDoc && id === S.liveDoc.id) { S.live = true; S.viewDoc = null; }
+  else { S.viewDoc = await call('load_session', { id }); S.live = false; }
+  closePanels();
+  renderDock();
+  renderDoc();
+  body.scrollTop = 0;
+});
+$('#btn-open-folder').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
+
+/* 설정 */
+const saveSettings = debounce(async () => {
+  try {
+    await api.invoke('save_settings', { settings: S.settings });
+    applyTheme();
+    renderDock();
+    renderSetup();
+  } catch (e) {
+    toast(String(e), 'error');
+  }
+}, 250);
+
+function setSeg(id, v) { $$(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === v)); }
+
+function renderSettings() {
+  const s = S.settings;
+  if (!s) return;
+  setSeg('seg-engine', s.engine);
+  $$('[data-engine]').forEach((el) => (el.hidden = el.dataset.engine !== s.engine));
+  $('#engine-desc').textContent = ENGINE_DESC[s.engine];
+  $('#opt-beam').checked = s.beamSize >= 2;
+  $('#opt-openai-model').value = s.openaiModel;
+  $('#opt-groq-model').value = s.groqModel;
+  $('#opt-custom-url').value = s.customUrl;
+  $('#opt-custom-model').value = s.customModel;
+  for (const [k, id] of [['openai', 'key-openai'], ['groq', 'key-groq'], ['custom', 'key-custom'], ['anthropic', 'key-anthropic'], ['llmCustom', 'key-llm-custom']]) {
+    const el = $(`#${id}`);
+    el.value = '';
+    el.placeholder = S.app.keys[k] ? '●●●●●●●● (저장됨 · 바꾸려면 입력)' : el.dataset.ph || el.placeholder;
+    el.dataset.ph = el.dataset.ph || el.placeholder;
+  }
+  renderModels();
+
+  $('#opt-diar').checked = s.diarization.enabled;
+  $('#opt-thr').value = s.diarization.threshold;
+  $('#thr-label').textContent = s.diarization.threshold.toFixed(2);
+  $('#opt-maxspk').value = String(s.diarization.maxSpeakers);
+
+  $('#opt-lang').value = s.language;
+  $('#opt-glossary').value = s.glossary;
+  api.invoke('list_devices').then((devs) => {
+    const sel = $('#opt-mic');
+    sel.innerHTML = '<option value="">기본 마이크</option>' + devs.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}${d.isDefault ? ' (기본)' : ''}</option>`).join('');
+    sel.value = s.micDevice || '';
+  }).catch(() => {});
+
+  setSeg('seg-llm', s.summary.provider);
+  $$('[data-llm]').forEach((el) => (el.hidden = el.dataset.llm !== s.summary.provider));
+  $('#opt-ollama-url').value = s.summary.ollamaUrl;
+  $('#opt-ollama-model').value = s.summary.ollamaModel;
+  $('#opt-llm-openai-model').value = s.summary.openaiModel;
+  $('#opt-anthropic-model').value = s.summary.anthropicModel;
+  $('#opt-llm-custom-url').value = s.summary.customUrl;
+  $('#opt-llm-custom-model').value = s.summary.customModel;
+
+  $('#opt-hotkey').value = s.hotkey || '없음';
+  $('#opt-top').checked = s.alwaysOnTop;
+  $('#opt-autostart').checked = S.app.autostart;
+  $('#opt-audio').checked = s.saveAudio;
+  $('#opt-unload').checked = s.unloadWhenIdle;
+  $('#opt-theme').value = s.theme;
+  $('#app-version').textContent = `v${S.app.version}`;
+}
+
+function renderModels() {
+  const box = $('#model-list');
+  if (!box || !S.app) return;
+  const s = S.settings;
+  const rows = S.app.models.map((m) => {
+    const dl = S.downloads[m.id];
+    const act = dl
+      ? `<button class="link" data-cancel>취소</button>`
+      : m.ready
+        ? `<span class="badge ok">설치됨</span><button class="icon-btn sm" data-delmodel="${m.id}" title="삭제"><svg><use href="#i-trash"/></svg></button>`
+        : `<button class="btn sm" data-dl="${m.id}">받기 · ${mb(m.size)}</button>`;
+    return `<div class="model ${s.localModel === m.id ? 'on' : ''}" data-model="${m.id}">
+      <span class="radio"></span>
+      <div><b>${esc(m.label)}</b><small>${esc(m.note)}</small></div>
+      <div class="m-act">${act}</div>
+      ${dl ? `<div class="progress"><i style="width:${(dl.done / Math.max(dl.total, 1)) * 100}%"></i></div>` : ''}
+    </div>`;
+  });
+  for (const f of S.app.customModels) {
+    rows.push(`<div class="model ${s.localModel === f ? 'on' : ''}" data-model="${esc(f)}"><span class="radio"></span><div><b>${esc(f)}</b><small>모델 폴더에 직접 넣은 모델</small></div><div class="m-act"><span class="badge ok">설치됨</span></div></div>`);
+  }
+  box.innerHTML = rows.join('');
+
+  const sm = $('#speaker-model');
+  const sdl = S.downloads['campplus-zh-en'];
+  sm.innerHTML = `<span>화자 인식 모델 <small style="color:var(--muted)">3D-Speaker CAM++ · 28MB</small></span>${
+    S.app.speakerModelReady ? '<span class="badge ok">설치됨</span>'
+      : sdl ? `<span class="badge">${Math.round((sdl.done / Math.max(sdl.total, 1)) * 100)}%</span>`
+        : '<button class="btn sm" data-dl="campplus-zh-en">받기</button>'}`;
+}
+
+$('#model-list').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-dl]')) return;
+  if (e.target.closest('[data-cancel]')) { S.dlQueue = []; return api.invoke('cancel_download'); }
+  const del = e.target.closest('[data-delmodel]');
+  if (del) {
+    const ok = await api.ask('이 모델 파일을 삭제할까요? 다시 쓰려면 새로 내려받아야 해요.', { title: '받아쓰기', kind: 'warning' });
+    if (ok) { await call('delete_model', { id: del.dataset.delmodel }); await refreshState(); renderSettings(); }
+    return;
+  }
+  const row = e.target.closest('[data-model]');
+  if (row) { S.settings.localModel = row.dataset.model; saveSettings(); renderModels(); }
+});
+
+function bindSeg(id, apply) {
+  $(`#${id}`).addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-v]');
+    if (!b) return;
+    apply(b.dataset.v);
+    saveSettings();
+    renderSettings();
+  });
+}
+bindSeg('seg-engine', (v) => (S.settings.engine = v));
+bindSeg('seg-llm', (v) => (S.settings.summary.provider = v));
+
+function bind(id, fn, ev = 'change') { $(`#${id}`).addEventListener(ev, (e) => { fn(e.target); saveSettings(); }); }
+bind('opt-beam', (t) => (S.settings.beamSize = t.checked ? 3 : 1));
+bind('opt-openai-model', (t) => (S.settings.openaiModel = t.value));
+bind('opt-groq-model', (t) => (S.settings.groqModel = t.value));
+bind('opt-custom-url', (t) => (S.settings.customUrl = t.value.trim()));
+bind('opt-custom-model', (t) => (S.settings.customModel = t.value.trim()));
+bind('opt-diar', (t) => { S.settings.diarization.enabled = t.checked; });
+bind('opt-thr', (t) => { S.settings.diarization.threshold = +t.value; $('#thr-label').textContent = (+t.value).toFixed(2); }, 'input');
+bind('opt-maxspk', (t) => (S.settings.diarization.maxSpeakers = +t.value));
+bind('opt-mic', (t) => (S.settings.micDevice = t.value || null));
+bind('opt-lang', (t) => (S.settings.language = t.value));
+bind('opt-glossary', (t) => (S.settings.glossary = t.value));
+bind('opt-ollama-url', (t) => (S.settings.summary.ollamaUrl = t.value.trim()));
+bind('opt-ollama-model', (t) => (S.settings.summary.ollamaModel = t.value.trim()));
+bind('opt-llm-openai-model', (t) => (S.settings.summary.openaiModel = t.value.trim()));
+bind('opt-anthropic-model', (t) => (S.settings.summary.anthropicModel = t.value.trim()));
+bind('opt-llm-custom-url', (t) => (S.settings.summary.customUrl = t.value.trim()));
+bind('opt-llm-custom-model', (t) => (S.settings.summary.customModel = t.value.trim()));
+bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
+bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
+bind('opt-unload', (t) => (S.settings.unloadWhenIdle = t.checked));
+bind('opt-theme', (t) => { S.settings.theme = t.value; applyTheme(); });
+$('#opt-autostart').addEventListener('change', (e) => call('set_autostart', { enabled: e.target.checked }).then(() => (S.app.autostart = e.target.checked)));
+
+for (const [id, name] of [['key-openai', 'openai'], ['key-groq', 'groq'], ['key-custom', 'custom'], ['key-anthropic', 'anthropic'], ['key-llm-custom', 'llm-custom']]) {
+  $(`#${id}`).addEventListener('change', async (e) => {
+    const v = e.target.value.trim();
+    if (!v) return;
+    await call('set_api_key', { name, value: v });
+    e.target.value = '';
+    await refreshState();
+    renderSettings();
+    toast('API 키를 안전하게 저장했어요');
+  });
+}
+
+$('#btn-test').addEventListener('click', async (e) => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  b.textContent = '확인 중…';
+  try { toast(await api.invoke('test_engine')); } catch (err) { toast(String(err), 'error'); }
+  b.disabled = false;
+  b.textContent = '연결 테스트';
+});
+
+// 단축키 입력
+let hotkeyCapturing = false;
+const hk = $('#opt-hotkey');
+function stopHotkeyCapture() { hotkeyCapturing = false; hk.classList.remove('capturing'); if (S.settings) hk.value = S.settings.hotkey || '없음'; }
+hk.addEventListener('click', () => { hotkeyCapturing = true; hk.classList.add('capturing'); hk.value = '조합키를 누르세요 (Esc 취소 · Backspace 해제)'; });
+hk.addEventListener('blur', stopHotkeyCapture);
+hk.addEventListener('keydown', (e) => {
+  if (!hotkeyCapturing) return;
+  e.preventDefault();
+  if (e.key === 'Escape') return stopHotkeyCapture();
+  if (e.key === 'Backspace') { S.settings.hotkey = ''; saveSettings(); return stopHotkeyCapture(); }
+  const mods = [];
+  if (e.ctrlKey) mods.push('Ctrl');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push('Super');
+  let key = '';
+  if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3);
+  else if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
+  else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
+  else if (['Space', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Pause'].includes(e.code)) key = e.code;
+  if (!key) return;
+  if (!mods.length && !/^F\d/.test(key)) { hk.value = 'Ctrl·Alt·Shift 와 함께 눌러 주세요'; return; }
+  S.settings.hotkey = [...mods, key].join('+');
+  saveSettings();
+  stopHotkeyCapture();
+  hk.blur();
+  toast(`단축키: ${S.settings.hotkey}`);
+});
+
+$('#btn-github').addEventListener('click', () => call('open_url', { url: 'https://github.com/jeiel85/badasugi' }));
+$('#btn-folder-sessions').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
+$('#btn-folder-models').addEventListener('click', () => call('open_folder', { kind: 'models' }));
+$('#btn-quit').addEventListener('click', () => call('quit_app'));
+
+/* ───────────── 시작 ───────────── */
+(async function init() {
+  await api.listen('bd://event', (e) => onEvent(e.payload));
+  await api.listen('bd://rec', (e) => onRec(e.payload));
+  await api.listen('bd://download', (e) => onDownload(e.payload));
+  await api.listen('bd://toast', (e) => toast(String(e.payload), 'error'));
+  await refreshState();
+  if (S.app.demo) loadDemo();
+  if (S.app.downloading) S.downloads[S.app.downloading] = { done: 0, total: 1 };
+  renderDock();
+  renderDoc();
+})();
+
+/* ───────────── 데모 · 브라우저 미리보기 ───────────── */
+function demoDoc() {
+  const lines = [
+    [0, 2100, 0, '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.'],
+    [7200, 16800, 1, '네, 결제 모듈은 개발이 끝났고 지금 테스트 서버에서 검증 중입니다. 금요일까지는 배포 가능할 것 같아요.'],
+    [17900, 24300, 2, '디자인은 온보딩 화면 두 개만 남았어요. 수요일까지 시안 드릴게요.'],
+    [25600, 33400, 0, '좋아요. 그럼 출시일은 15일로 잡고, 목요일에 한 번 더 점검합시다.'],
+    [34800, 45100, 1, '그 전에 키오스크 응답 속도 이슈는 꼭 짚고 넘어가야 할 것 같습니다. 인덱스를 추가해서 평균 2초에서 0.4초로 줄였어요.'],
+    [46300, 51200, 2, '오, 체감이 확 다르겠네요. 매장 피드백도 다시 받아볼게요.'],
+    [52800, 60500, 0, '네, 매장 피드백은 정리해서 금요일까지 공유 부탁드려요.'],
+  ];
+  return {
+    version: 1,
+    id: 'demo',
+    title: '앱 출시 일정 회의',
+    startedAt: '2026-11-12 14:30',
+    durationMs: 61000,
+    engine: '로컬 · large-v3-turbo-q5_0',
+    speakers: { 0: '김 팀장', 1: '이 개발', 2: '박 디자인' },
+    utterances: lines.map(([s, e, spk, text], i) => ({ id: i, startMs: s, endMs: e, speaker: spk, text, latencyMs: 1400 + ((i * 523) % 1700) })),
+    summary: '### 한 줄 요약\n다음 달 15일 앱 출시를 확정하고 목요일에 최종 점검한다.\n\n### 결정 사항\n- 출시일 **15일** 확정, 목요일 최종 점검\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일',
+    audioFile: null,
+  };
+}
+
+function loadDemo() {
+  S.liveDoc = demoDoc();
+  S.rec = 'recording';
+  S.timerStart = Date.now() - 61000;
+  S.pending.set(99, { startMs: 62000, endMs: 64000, speaker: 1 });
+  S.speaking = true;
+  renderDock();
+  setInterval(() => setLevel(0.02 + Math.random() * 0.12), 90);
+}
+
+function createMock() {
+  const handlers = {};
+  const st = {
+    settings: {
+      engine: 'local', localModel: 'large-v3-turbo-q5_0', beamSize: 1, threads: 0,
+      openaiModel: 'gpt-4o-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
+      source: 'mic', micDevice: null, language: 'ko', glossary: '',
+      diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true },
+      saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', alwaysOnTop: false, theme: 'system',
+      summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
+    },
+    rec: 'idle',
+    models: [
+      { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (q5)', note: '추천 · 빠르고 한국어 정확도가 높음', size: 574041195, ready: true },
+      { id: 'large-v3-turbo-q8_0', label: 'Large v3 Turbo (q8)', note: '조금 더 정확 · 메모리 더 사용', size: 874188075, ready: false },
+      { id: 'medium-q5_0', label: 'Medium (q5)', note: '중간 사양 PC', size: 539212467, ready: false },
+    ],
+    customModels: [], speakerModelReady: true,
+    keys: { openai: false, groq: false, custom: false, anthropic: false, llmCustom: false },
+    autostart: false, version: '0.1.0', current: null, elapsedMs: 0,
+    demo: new URLSearchParams(location.search).has('demo'),
+  };
+  return {
+    invoke: async (cmd, args) => {
+      if (cmd === 'get_state') return st;
+      if (cmd === 'save_settings') { st.settings = args.settings; return; }
+      if (cmd === 'list_devices') return [{ id: 'mic1', name: '마이크(Realtek Audio)', isDefault: true }];
+      if (cmd === 'list_sessions') return [{ id: 'demo', title: '앱 출시 일정 회의', startedAt: '2026-11-12 14:30', durationMs: 61000, count: 7, speakers: 3, preview: '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.' }];
+      if (cmd === 'load_session') return demoDoc();
+      if (cmd === 'session_text') return '데모';
+      if (cmd === 'toggle_recording') { const h = handlers['bd://rec']; st.rec = st.rec === 'idle' ? 'recording' : 'idle'; h && h({ payload: st.rec }); return; }
+      return null;
+    },
+    listen: async (ev, fn) => { handlers[ev] = fn; },
+    win: { minimize() {}, hide() {} },
+    save: async () => null,
+    ask: async (m) => confirm(m),
+  };
+}
