@@ -185,6 +185,16 @@ impl Segmenter {
         self.total + self.pending.len() as u64
     }
 
+    /// 이 위치(샘플) 앞의 오디오는 이미 내보낸 발화에 들어갔거나 버려졌다.
+    /// 앞으로 나올 발화는 모두 이 뒤에서 시작한다 (진행 중인 발화 · 앞 여유분 고려).
+    pub fn settled(&self) -> u64 {
+        if self.in_speech {
+            self.seg_start
+        } else {
+            self.total.saturating_sub(self.pre_roll.len() as u64)
+        }
+    }
+
     pub fn push(&mut self, samples: &[f32], out: &mut Vec<SpeechSegment>) -> Result<()> {
         self.pending.extend_from_slice(samples);
         let mut offset = 0;

@@ -268,7 +268,7 @@
     <div class="glow"><div class="grid-bg"></div></div>
     <div class="wrap hero-grid">
       <div>
-        <span class="eyebrow"><b>v0.1</b> Rust · 로컬 AI · 오픈소스</span>
+        <span class="eyebrow"><b>v0.2</b> Rust · 로컬 AI · 오픈소스</span>
         <h1>회의는 말로,<br /><span class="grad">기록은 받아쓰기가.</span></h1>
         <p class="lead">말하는 사람을 구분해 실시간으로 받아 적는 Windows 회의 전사 앱. 러스트로 만들어 가볍고, 로컬 AI로 인터넷 없이도 동작합니다. 트레이에서 한 번 누르면 시작이에요.</p>
         <div class="cta">
@@ -332,7 +332,7 @@
           <div>
             <div class="ic"><svg class="i"><use href="#i-users"/></svg></div>
             <h3>누가 말했는지 자동으로</h3>
-            <p>발화마다 목소리 특징(화자 임베딩)을 뽑아 실시간으로 사람을 구분합니다. 쉼 없이 말을 이어받아도 문장 안에서 화자가 바뀌는 지점을 찾아 나눠요. 이름을 누르면 "화자 1"을 "김 팀장"으로 바로 바꿀 수 있습니다.</p>
+            <p>발화마다 목소리 특징(화자 임베딩)을 뽑아 실시간으로 사람을 구분합니다. 쉼 없이 말을 이어받아도 문장 안에서 화자가 바뀌는 지점을 찾아 나눠요. 이름을 누르면 "화자 1"을 "김 팀장"으로 바로 바꾸고, 잘못 나뉜 화자는 한 번에 합칠 수 있어요.</p>
           </div>
           <div class="spk-demo">
             <div class="spk-line" style="--c:var(--c0)"><b>김 팀장</b><span>출시일은 15일로 잡고, 목요일에 한 번 더 점검합시다.</span></div>
@@ -358,7 +358,7 @@
         <div class="feat reveal" style="--g:rgba(192,123,255,.2)">
           <div class="ic"><svg class="i"><use href="#i-sparkles"/></svg></div>
           <h3>AI 회의록 요약</h3>
-          <p>한 줄 요약 · 결정 사항 · 할 일(담당자/기한)까지 정리. 로컬 LLM(Ollama, 한국어 특화 EXAONE)부터 Claude · OpenAI까지.</p>
+          <p>한 줄 요약 · 결정 사항 · 할 일(담당자/기한)에 회의 제목까지. 무료 등급이 있는 Groq · Gemini부터 Claude · OpenAI, PC 안에서만 도는 Ollama(EXAONE)까지.</p>
         </div>
         <div class="feat reveal" style="--g:rgba(56,189,248,.16)">
           <div class="ic"><svg class="i"><use href="#i-headset"/></svg></div>
@@ -378,6 +378,21 @@
             <div class="fmt"><b>.json</b><span>원본 데이터</span></div>
           </div>
         </div>
+        <div class="feat reveal" style="--g:rgba(52,211,153,.16)">
+          <div class="ic"><svg class="i"><use href="#i-download"/></svg></div>
+          <h3>녹음 파일도 끌어다 놓기</h3>
+          <p>휴대폰·Zoom으로 녹음해 둔 mp3 · m4a · mp4 · wav를 창에 놓으면 화자를 나눠 받아 적습니다.</p>
+        </div>
+        <div class="feat reveal" style="--g:rgba(251,191,36,.14)">
+          <div class="ic"><svg class="i"><use href="#i-check"/></svg></div>
+          <h3>필요한 건 다 있게</h3>
+          <p>오프 더 레코드 일시정지, 지난 회의 전체 검색, 녹취록 안 Ctrl+F, 글자 크기 조절, 마이크 무음·연결 끊김 알림.</p>
+        </div>
+        <div class="feat reveal" style="--g:rgba(139,125,255,.2)">
+          <div class="ic"><svg class="i"><use href="#i-bolt"/></svg></div>
+          <h3>알아서 최신 버전</h3>
+          <p>새 버전을 조용히 받아 두었다가, 쓰지 않을 때 서명을 확인하고 적용합니다. 다시 설치할 일이 없어요.</p>
+        </div>
       </div>
     </div>
   </section>
@@ -395,7 +410,7 @@
         <div class="step reveal"><div class="n">02</div><h4>발화 자르기</h4><p>32ms마다 말소리 여부를 판단해 말이 끝나는 즉시 한 덩어리로.</p><span class="tag">Silero VAD v6</span></div>
         <div class="step reveal"><div class="n">03</div><h4>화자 구분</h4><p>목소리 임베딩으로 누구인지 판별하고, 문장 안의 화자 전환도 찾아냅니다.</p><span class="tag">3D-Speaker CAM++</span></div>
         <div class="step reveal"><div class="n">04</div><h4>글자로 옮기기</h4><p>발화 길이에 맞춰 인코더를 줄여 짧은 말도 빠르게 인식합니다.</p><span class="tag">whisper.cpp · API</span></div>
-        <div class="step reveal"><div class="n">05</div><h4>정리하기</h4><p>환각·반복 제거, 자동 저장, 끝나면 AI 요약까지.</p><span class="tag">로컬 LLM · Claude</span></div>
+        <div class="step reveal"><div class="n">05</div><h4>정리하기</h4><p>환각·반복 제거, 자동 저장, 끝나면 AI 요약까지.</p><span class="tag">Groq · Gemini · Claude · Ollama</span></div>
       </div>
     </div>
   </section>
@@ -451,10 +466,13 @@
       </div>
       <div class="faq">
         <details class="reveal"><summary>정말 무료인가요?</summary><p>네. MIT 라이선스 오픈소스입니다. 로컬 모드는 비용이 전혀 들지 않고, API 모드를 쓸 때만 각 사에 사용량만큼 요금이 나갑니다.</p></details>
+        <details class="reveal"><summary>웹앱인가요, 설치 프로그램인가요?</summary><p>설치형 Windows 프로그램입니다. 설치하면 시작 메뉴·바탕 화면에 <b>받아쓰기</b>가 생기고 <code>badasugi.exe</code>로 실행돼요. 브라우저나 인터넷 없이 동작하며, 화면만 Windows에 기본으로 들어 있는 WebView2로 그려서 설치 파일이 13MB 정도로 가볍습니다.</p></details>
         <details class="reveal"><summary>어떤 PC에서 돌아가나요? GPU가 필요한가요?</summary><p>Windows 10/11 64비트, AVX2를 지원하는 CPU(2013년 이후 대부분)면 됩니다. GPU는 없어도 됩니다. 로컬 모드의 속도는 CPU 성능에 따라 달라서, 사양이 낮은 노트북이라면 Groq API(매우 빠르고 저렴)를 추천합니다.</p></details>
         <details class="reveal"><summary>설치하면 "Windows의 PC 보호" 경고가 떠요.</summary><p>코드 서명 인증서가 없는 개인 오픈소스 앱이라 SmartScreen이 경고합니다. <b>추가 정보 → 실행</b>을 누르면 설치됩니다. 걱정되면 소스를 직접 빌드할 수 있어요.</p></details>
         <details class="reveal"><summary>온라인 회의(Zoom · Teams · Meet)도 받아 적을 수 있나요?</summary><p>입력을 <b>마이크 + 시스템</b>으로 바꾸면 내 목소리와 상대방 목소리를 함께 받아 적습니다. 스피커 소리가 마이크로 다시 들어가면 중복될 수 있어 헤드셋을 권장합니다.</p></details>
-        <details class="reveal"><summary>화자 구분이 틀리면 어떻게 하나요?</summary><p>설정의 <b>구분 민감도</b>로 조절하세요. 한 사람이 여러 명으로 나뉘면 왼쪽(적게)으로, 여러 명이 한 사람으로 합쳐지면 오른쪽(많게)으로 옮기면 됩니다. 참석 인원을 알면 <b>최대 화자 수</b>를 지정하는 게 가장 정확합니다.</p></details>
+        <details class="reveal"><summary>AI 요약은 어떤 걸로 하나요? 앱에 들어 있나요?</summary><p>가볍게 유지하려고 LLM을 앱에 넣지 않았어요. 설정에서 <b>Groq · Gemini</b>(무료 등급), Claude, OpenAI, 또는 PC에 설치한 <b>Ollama</b>(인터넷 불필요) 중 하나를 고르면 됩니다. 키를 넣고 "연결 확인"을 누르면 쓸 수 있는 모델 목록까지 불러와요.</p></details>
+        <details class="reveal"><summary>업데이트는 어떻게 하나요?</summary><p>자동입니다. 새 버전을 백그라운드에서 받아 두었다가 녹음 중이 아닐 때 서명을 확인하고 적용해요. 창을 보고 있다면 위쪽 배너의 <b>지금 적용</b>을 누르면 됩니다.</p></details>
+        <details class="reveal"><summary>화자 구분이 틀리면 어떻게 하나요?</summary><p>받아 적은 뒤에도 화자 칩을 눌러 <b>다른 화자와 합치기</b>, 본문 화자 이름을 눌러 <b>이 문단의 화자 바꾸기</b>로 바로 고칠 수 있어요. 미리 조절하려면 설정의 <b>구분 민감도</b>를 쓰세요. 한 사람이 여러 명으로 나뉘면 왼쪽(적게)으로, 여러 명이 한 사람으로 합쳐지면 오른쪽(많게)으로 옮기면 됩니다. 참석 인원을 알면 <b>최대 화자 수</b>를 지정하는 게 가장 정확합니다.</p></details>
         <details class="reveal"><summary>macOS · Linux는 지원하나요?</summary><p>지금은 Windows만 공식 지원합니다. 코어 엔진은 크로스플랫폼(Rust)이라 추후 확장할 수 있도록 만들어 두었습니다.</p></details>
       </div>
 

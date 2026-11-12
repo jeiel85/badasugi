@@ -33,6 +33,22 @@ pub struct SessionDoc {
     pub utterances: Vec<Utterance>,
     pub summary: Option<String>,
     pub audio_file: Option<String>,
+    /// 합친 화자: 원래 번호 → 합쳐진 번호 (녹음 중 새로 들어오는 발화에도 적용)
+    pub speaker_map: BTreeMap<u32, u32>,
+    /// 자동으로 붙인 제목이면 요약 때 AI 가 제안한 제목으로 바꾼다
+    pub auto_title: bool,
+    /// 파일 받아쓰기라면 원본 파일 이름
+    pub source_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    #[serde(flatten)]
+    pub meta: SessionMeta,
+    /// 찾은 곳 앞뒤 문장
+    pub snippet: String,
+    pub hits: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,8 +81,21 @@ impl SessionDoc {
             title: format!("{} 회의", now.format("%m월 %d일 %H:%M")),
             started_at: now.format("%Y-%m-%d %H:%M").to_string(),
             engine,
+            auto_title: true,
             ..Default::default()
         }
+    }
+
+    /// 합친 화자를 따라가 최종 화자 번호를 돌려준다
+    pub fn resolve(&self, s: Option<u32>) -> Option<u32> {
+        let mut s = s?;
+        for _ in 0..16 {
+            match self.speaker_map.get(&s) {
+                Some(&t) if t != s => s = t,
+                _ => break,
+            }
+        }
+        Some(s)
     }
 
     pub fn speaker_name(&self, s: Option<u32>) -> String {
@@ -75,7 +104,22 @@ impl SessionDoc {
                 .speakers
                 .get(&n)
                 .cloned()
-                .unwrap_or_else(|| format!("화자 {}", n + 1)),
+                .unwrap_or_else(|| {
+                    // 사용자가 나눈 새 화자(100번부터)는 자동 화자 번호 뒤에 이어 붙인다
+                    if n >= 100 {
+                        let auto = self
+                            .utterances
+                            .iter()
+                            .filter_map(|u| u.speaker)
+                            .filter(|&s| s < 100)
+                            .map(|s| s + 1)
+                            .max()
+                            .unwrap_or(0);
+                        format!("화자 {}", auto + n - 99)
+                    } else {
+                        format!("화자 {}", n + 1)
+                    }
+                }),
             None => "발화".into(),
         }
     }
@@ -270,19 +314,87 @@ impl SessionStore {
     pub fn save_doc(&mut self, doc: SessionDoc) -> Result<()> {
         safe_id(&doc.id)?;
         if let Some(cur) = self.current.as_mut().filter(|c| c.id == doc.id) {
-            // 녹음 중인 기록이면 이름·요약만 반영 (발화는 계속 들어오는 중)
+            // 녹음 중인 기록: 화면에서 고친 것만 반영하고, 그 사이 새로 들어온 발화는 지킨다
             cur.title = doc.title.clone();
+            cur.auto_title = doc.auto_title;
             cur.speakers = doc.speakers.clone();
+            cur.speaker_map = doc.speaker_map.clone();
             cur.summary = doc.summary.clone();
-            for u in &doc.utterances {
-                if let Some(x) = cur.utterances.iter_mut().find(|x| x.id == u.id) {
+            let seen = doc.utterances.iter().map(|u| u.id).max();
+            cur.utterances.retain_mut(|x| match doc.utterances.iter().find(|u| u.id == x.id) {
+                Some(u) => {
                     x.text = u.text.clone();
+                    x.speaker = u.speaker;
+                    true
+                }
+                // 화면이 이미 알고 있던 발화인데 없으면 사용자가 지운 것
+                None => seen.is_none_or(|m| x.id > m),
+            });
+            let map = cur.speaker_map.clone();
+            if !map.is_empty() {
+                let resolved: Vec<Option<u32>> = cur.utterances.iter().map(|u| cur.resolve(u.speaker)).collect();
+                for (u, s) in cur.utterances.iter_mut().zip(resolved) {
+                    u.speaker = s;
                 }
             }
             self.dirty = true;
-            return self.flush();
+            return self.flush_any();
         }
         write_doc(&self.dir, &doc)
+    }
+
+    /// 발화를 모두 지운 경우에도 저장 (flush 는 빈 기록을 건너뛴다)
+    fn flush_any(&mut self) -> Result<()> {
+        let Some(doc) = self.current.as_ref() else {
+            return Ok(());
+        };
+        if doc.utterances.is_empty() {
+            let p = self.json_path(&doc.id);
+            if p.exists() {
+                write_doc(&self.dir, doc)?;
+            }
+            return Ok(());
+        }
+        self.flush()
+    }
+
+    /// 제목·녹취록 전체에서 찾기 (대소문자 무시)
+    pub fn search(&self, query: &str) -> Vec<SearchHit> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<SearchHit> = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .filter_map(|s| serde_json::from_str::<SessionDoc>(&s).ok())
+            .filter_map(|d| {
+                let in_title = d.title.to_lowercase().contains(&q);
+                let mut hits = 0;
+                let mut snippet = String::new();
+                for u in &d.utterances {
+                    if u.text.to_lowercase().contains(&q) {
+                        hits += 1;
+                        if snippet.is_empty() {
+                            snippet = format!("{} · {}", fmt_time(u.start_ms), around(&u.text, &q, 60));
+                        }
+                    }
+                }
+                if !in_title && hits == 0 {
+                    return None;
+                }
+                Some(SearchHit {
+                    meta: d.meta(),
+                    snippet,
+                    hits,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| b.meta.id.cmp(&a.meta.id));
+        out
     }
 
     pub fn delete(&mut self, id: &str) -> Result<()> {
@@ -297,7 +409,29 @@ impl SessionStore {
     }
 }
 
-fn safe_id(id: &str) -> Result<&str> {
+/// 찾은 낱말 주변 n 글자
+fn around(text: &str, q_lower: &str, n: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    let q: Vec<char> = q_lower.chars().collect();
+    // 소문자 변환으로 길이가 달라지는 드문 경우엔 앞부분만
+    if lower.len() != chars.len() || q.is_empty() {
+        return chars.iter().take(n).collect();
+    }
+    let pos = lower.windows(q.len()).position(|w| w == q.as_slice()).unwrap_or(0);
+    let start = pos.saturating_sub(n / 3);
+    let end = (start + n).min(chars.len());
+    let mut s: String = chars[start..end].iter().collect();
+    if start > 0 {
+        s.insert(0, '…');
+    }
+    if end < chars.len() {
+        s.push('…');
+    }
+    s
+}
+
+pub(crate) fn safe_id(id: &str) -> Result<&str> {
     if id.is_empty() || id.contains(['/', '\\', ':', '.']) {
         return Err(anyhow!("잘못된 기록 이름"));
     }

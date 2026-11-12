@@ -4,13 +4,16 @@
 //! 이 상태에서 whisper.cpp 처럼 여러 스레드가 동기화하며 계산하는 작업은 수십 배 느려지므로,
 //! 녹음 중에는 이 프로세스의 실행 속도 제한을 끈다.
 
-/// 프로세스 전체의 실행 속도 제한을 끄고 우선순위를 살짝 올린다.
+/// 프로세스 전체의 실행 속도 제한을 끈다.
+///
+/// 우선순위는 올리지 않는다: whisper 스레드는 바쁘게 기다리며(spin) 계산하므로, 우선순위를 올리면
+/// CPU 가 꽉 찼을 때 같이 쓰는 화상 회의 앱(Zoom·Teams)이 끊길 수 있다.
 pub fn disable_power_throttling() {
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Threading::{
-            GetCurrentProcess, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
-            ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+            GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_STATE,
         };
         let state = PROCESS_POWER_THROTTLING_STATE {
             Version: 1,
@@ -26,7 +29,6 @@ pub fn disable_power_throttling() {
         if ok == 0 {
             log::warn!("전력 제한 해제 실패");
         }
-        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
     }
 }
 

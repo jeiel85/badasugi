@@ -5,6 +5,7 @@
 
 pub mod asr;
 pub mod audio;
+pub mod decode;
 pub mod fbank;
 pub mod models;
 pub mod onnx;

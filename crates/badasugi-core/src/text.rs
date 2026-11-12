@@ -125,6 +125,21 @@ fn dedupe_sentences(s: &str) -> String {
 }
 
 /// 디코딩이 반복 루프에 빠진 결과인지 (다시 인식할지 판단)
+/// 한국어로 받아 적는데 한글이 하나도 없고 영문만 나온 경우 (줄인 인코더 창에서 가끔 생기는 엉뚱한 영어 출력)
+///
+/// "API 연동" 처럼 섞인 건 정상으로 보고, "OK" 같은 아주 짧은 영어도 넘긴다.
+pub fn is_wrong_script(s: &str, lang: &str) -> bool {
+    if lang != "ko" {
+        return false;
+    }
+    let hangul = s
+        .chars()
+        .filter(|c| ('\u{AC00}'..='\u{D7A3}').contains(c) || ('\u{3131}'..='\u{318E}').contains(c))
+        .count();
+    let latin = s.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    hangul == 0 && latin >= 3
+}
+
 pub fn is_degenerate(s: &str) -> bool {
     let parts = sentences(s);
     for w in parts.windows(2) {
@@ -182,6 +197,16 @@ fn collapse_repeats(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrong_script_only_for_korean_without_hangul() {
+        assert!(is_wrong_script("and then, it's", "ko"));
+        assert!(is_wrong_script("And.", "ko"));
+        assert!(!is_wrong_script("OK", "ko"));
+        assert!(!is_wrong_script("API 연동은 금요일까지", "ko"));
+        assert!(!is_wrong_script("and then", "en"));
+        assert!(!is_wrong_script("", "ko"));
+    }
 
     #[test]
     fn removes_hallucination() {

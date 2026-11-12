@@ -37,6 +37,10 @@ pub struct Settings {
     pub always_on_top: bool,
     /// "system" | "light" | "dark"
     pub theme: String,
+    /// 새 버전을 백그라운드에서 받아 두었다가, 녹음 중이 아니고 창이 숨겨져 있을 때 조용히 설치
+    pub auto_update: bool,
+    /// 마지막으로 실행한 버전 (업데이트 직후 안내용)
+    pub last_version: String,
 
     pub summary: SummarySettings,
 }
@@ -44,10 +48,12 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SummarySettings {
-    /// "ollama" | "openai" | "anthropic" | "custom"
+    /// "ollama" | "groq" | "gemini" | "openai" | "anthropic" | "custom"
     pub provider: String,
     pub ollama_url: String,
     pub ollama_model: String,
+    pub groq_model: String,
+    pub gemini_model: String,
     pub openai_model: String,
     pub anthropic_model: String,
     pub custom_url: String,
@@ -60,6 +66,9 @@ impl Default for SummarySettings {
             provider: "ollama".into(),
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "exaone3.5:7.8b".into(),
+            groq_model: "openai/gpt-oss-120b".into(),
+            // 항상 최신 Flash 를 가리키는 별칭
+            gemini_model: "gemini-flash-latest".into(),
             openai_model: "gpt-5-mini".into(),
             anthropic_model: "claude-opus-5-5".into(),
             custom_url: String::new(),
@@ -89,6 +98,8 @@ impl Default for Settings {
             hotkey: "Ctrl+Alt+R".into(),
             always_on_top: false,
             theme: "system".into(),
+            auto_update: true,
+            last_version: String::new(),
             summary: SummarySettings::default(),
         }
     }
@@ -123,7 +134,10 @@ impl Settings {
 
 const SERVICE: &str = "badasugi";
 
-/// API 키 저장소 키 이름: "openai" | "groq" | "custom" | "anthropic" | "llm-custom"
+/// API 키 저장소 키 이름
+pub const KEY_NAMES: &[&str] = &["openai", "groq", "custom", "anthropic", "gemini", "llm-custom"];
+
+/// API 키 저장소 (Windows 자격 증명 관리자)
 pub fn get_key(name: &str) -> Option<String> {
     keyring::Entry::new(SERVICE, name)
         .ok()?

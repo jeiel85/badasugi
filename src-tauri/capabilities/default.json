@@ -12,6 +12,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-toggle-maximize",
     "dialog:allow-save",
+    "dialog:allow-open",
     "dialog:allow-ask",
     "dialog:allow-message",
     "dialog:allow-confirm"

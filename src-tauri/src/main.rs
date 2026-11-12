@@ -4,9 +4,10 @@
 mod session;
 mod settings;
 mod summary;
+mod update;
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -24,33 +25,44 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
-use session::{SessionDoc, SessionMeta, SessionStore, Utterance};
+use session::{SearchHit, SessionDoc, SessionMeta, SessionStore, Utterance};
 use settings::Settings;
+use update::{UpdateStatus, Updates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum RecState {
+pub(crate) enum RecState {
     Idle,
     Starting,
     Recording,
     Stopping,
 }
 
-struct Paths {
+pub(crate) struct Paths {
+    pub config: PathBuf,
     settings: PathBuf,
     models: PathBuf,
     sessions: PathBuf,
 }
 
-struct AppState {
-    settings: Mutex<Settings>,
-    paths: Paths,
-    rec: Mutex<RecState>,
+pub(crate) struct AppState {
+    pub settings: Mutex<Settings>,
+    pub paths: Paths,
+    pub rec: Mutex<RecState>,
     pipeline: Mutex<Option<Pipeline>>,
-    store: Mutex<SessionStore>,
+    pub store: Mutex<SessionStore>,
     dl_cancel: Arc<AtomicBool>,
-    downloading: Mutex<Option<String>>,
+    pub downloading: Mutex<Option<String>>,
+    /// 진행 중인 요약 등 (업데이트 설치를 미룬다)
+    pub busy_ops: AtomicUsize,
+    /// 지금 세션이 파일 받아쓰기인지
+    file_mode: AtomicBool,
+    /// 업데이트 직후 첫 실행이면 이전 버전
+    updated_from: Mutex<Option<String>>,
+    /// 시작할 때 단축키 등록에 실패했다면 그 이유 (다른 앱이 쓰는 중 등)
+    hotkey_error: Mutex<Option<String>>,
     tray_toggle: Mutex<Option<MenuItem<Wry>>>,
+    tray_pause: Mutex<Option<MenuItem<Wry>>>,
     icon_idle: Image<'static>,
     icon_rec: Image<'static>,
     rec_started: Mutex<Option<Instant>>,
@@ -80,6 +92,7 @@ struct KeysDto {
     groq: bool,
     custom: bool,
     anthropic: bool,
+    gemini: bool,
     llm_custom: bool,
 }
 
@@ -99,6 +112,12 @@ struct StateDto {
     downloading: Option<String>,
     current: Option<SessionDoc>,
     elapsed_ms: u64,
+    paused: bool,
+    file_mode: bool,
+    update: Option<UpdateStatus>,
+    updated_from: Option<String>,
+    hotkey_error: Option<String>,
+    audio_exts: &'static [&'static str],
     demo: bool,
 }
 
@@ -126,6 +145,7 @@ fn get_state(app: AppHandle) -> StateDto {
             groq: settings::get_key("groq").is_some(),
             custom: settings::get_key("custom").is_some(),
             anthropic: settings::get_key("anthropic").is_some(),
+            gemini: settings::get_key("gemini").is_some(),
             llm_custom: settings::get_key("llm-custom").is_some(),
         },
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
@@ -139,6 +159,12 @@ fn get_state(app: AppHandle) -> StateDto {
             .lock()
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0),
+        paused: st.pipeline.lock().as_ref().is_some_and(|p| p.is_paused()),
+        file_mode: st.file_mode.load(Ordering::SeqCst),
+        update: app.state::<Updates>().status.lock().clone(),
+        updated_from: st.updated_from.lock().take(),
+        hotkey_error: st.hotkey_error.lock().take(),
+        audio_exts: badasugi_core::decode::AUDIO_EXTENSIONS,
         demo: std::env::var("BADASUGI_DEMO").is_ok(),
     };
     dto
@@ -164,7 +190,7 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
 
 #[tauri::command]
 fn set_api_key(name: String, value: String) -> CmdResult<()> {
-    if !["openai", "groq", "custom", "anthropic", "llm-custom"].contains(&name.as_str()) {
+    if !settings::KEY_NAMES.contains(&name.as_str()) {
         return Err("알 수 없는 키 이름".into());
     }
     settings::set_key(&name, &value).map_err(err)
@@ -363,10 +389,52 @@ fn set_rec(app: &AppHandle, state: RecState) {
     if let Some(item) = st.tray_toggle.lock().as_ref() {
         let _ = item.set_text(if recording { "녹음 중지" } else { "녹음 시작" });
     }
+    if let Some(item) = st.tray_pause.lock().as_ref() {
+        let _ = item.set_enabled(state == RecState::Recording);
+        let _ = item.set_text("일시정지");
+    }
     let _ = app.emit("bd://rec", state);
 }
 
+fn set_paused_inner(app: &AppHandle, paused: bool) -> CmdResult<()> {
+    let st = app.state::<AppState>();
+    let guard = st.pipeline.lock();
+    let p = guard.as_ref().ok_or("녹음 중이 아니에요")?;
+    p.set_paused(paused);
+    drop(guard);
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(if paused { "받아쓰기 — 일시정지" } else { "받아쓰기 — 녹음 중" }));
+        let _ = tray.set_icon(Some(if paused { st.icon_idle.clone() } else { st.icon_rec.clone() }));
+    }
+    if let Some(item) = st.tray_pause.lock().as_ref() {
+        let _ = item.set_text(if paused { "이어서 녹음" } else { "일시정지" });
+    }
+    let _ = app.emit("bd://paused", paused);
+    Ok(())
+}
+
+fn toggle_pause(app: &AppHandle) -> CmdResult<()> {
+    let paused = app
+        .state::<AppState>()
+        .pipeline
+        .lock()
+        .as_ref()
+        .map(|p| p.is_paused())
+        .ok_or("녹음 중이 아니에요")?;
+    set_paused_inner(app, !paused)
+}
+
+#[tauri::command]
+fn set_paused(app: AppHandle, paused: bool) -> CmdResult<()> {
+    set_paused_inner(&app, paused)
+}
+
 fn start_recording_inner(app: &AppHandle) -> CmdResult<()> {
+    start_session(app, None)
+}
+
+/// 녹음(마이크·시스템 소리) 또는 파일 받아쓰기를 시작한다
+fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
     let st = app.state::<AppState>();
     {
         let mut rec = st.rec.lock();
@@ -381,7 +449,13 @@ fn start_recording_inner(app: &AppHandle) -> CmdResult<()> {
         let s = st.settings.lock().clone();
         let engine = build_engine(&s, &st.paths)?;
         let mut doc = SessionDoc::new(engine.label());
-        let record_path = if s.save_audio {
+        if let Some(f) = file {
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("오디오 파일").to_string();
+            let stem = f.file_stem().and_then(|n| n.to_str()).unwrap_or("오디오 파일");
+            doc.title = stem.chars().take(60).collect();
+            doc.source_file = Some(name);
+        }
+        let record_path = if s.save_audio && file.is_none() {
             let p = st.store.lock().audio_path(&doc.id);
             doc.audio_file = p.file_name().and_then(|n| n.to_str()).map(str::to_string);
             Some(p)
@@ -406,7 +480,11 @@ fn start_recording_inner(app: &AppHandle) -> CmdResult<()> {
         badasugi_core::perf::disable_power_throttling();
         let app2 = app.clone();
         let sink: EventSink = Arc::new(move |ev| on_pipeline_event(&app2, ev));
-        Pipeline::start(cfg, sink).map_err(err)
+        st.file_mode.store(file.is_some(), Ordering::SeqCst);
+        match file {
+            Some(f) => Pipeline::start_file(f, cfg, sink).map_err(err),
+            None => Pipeline::start(cfg, sink).map_err(err),
+        }
     })();
 
     match result {
@@ -418,6 +496,7 @@ fn start_recording_inner(app: &AppHandle) -> CmdResult<()> {
         }
         Err(e) => {
             st.store.lock().current = None;
+            st.file_mode.store(false, Ordering::SeqCst);
             badasugi_core::perf::restore_power_throttling();
             set_rec(app, RecState::Idle);
             Err(e)
@@ -461,6 +540,16 @@ async fn toggle_recording(app: AppHandle) -> CmdResult<()> {
     toggle_recording_inner(&app)
 }
 
+/// 녹음 파일(mp3·m4a·wav…)을 받아 적는다. 진행 상황은 녹음과 같은 이벤트 + progress 로 온다.
+#[tauri::command]
+async fn transcribe_file(app: AppHandle, path: String) -> CmdResult<()> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err("파일을 찾을 수 없어요".into());
+    }
+    start_session(&app, Some(&p))
+}
+
 fn on_pipeline_event(app: &AppHandle, ev: Event) {
     let st = app.state::<AppState>();
     match &ev {
@@ -474,11 +563,12 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
         } => {
             let mut store = st.store.lock();
             if let Some(doc) = store.current.as_mut() {
+                let speaker = doc.resolve(*speaker);
                 doc.upsert(Utterance {
                     id: *id,
                     start_ms: *start_ms,
                     end_ms: *end_ms,
-                    speaker: *speaker,
+                    speaker,
                     text: text.clone(),
                 });
             }
@@ -491,6 +581,9 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             }
         }
         Event::Stopped => {
+            // 파일 받아쓰기는 끝까지 가면 저절로 멈춘다
+            drop(st.pipeline.lock().take());
+            st.file_mode.store(false, Ordering::SeqCst);
             {
                 let mut store = st.store.lock();
                 if let Err(e) = store.flush() {
@@ -511,7 +604,9 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             set_rec(app, RecState::Idle);
             if st.quit_after_stop.load(Ordering::SeqCst) {
                 app.exit(0);
+                return;
             }
+            update::maybe_install(app);
         }
         _ => {}
     }
@@ -523,6 +618,14 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
 #[tauri::command]
 fn list_sessions(app: AppHandle) -> Vec<SessionMeta> {
     app.state::<AppState>().store.lock().list()
+}
+
+#[tauri::command]
+async fn search_sessions(app: AppHandle, query: String) -> Vec<SearchHit> {
+    let dir = app.state::<AppState>().store.lock().dir.clone();
+    tauri::async_runtime::spawn_blocking(move || SessionStore::new(dir).search(&query))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -573,22 +676,80 @@ fn session_text(app: AppHandle, id: String, format: String) -> CmdResult<String>
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SummaryDto {
+    text: String,
+    /// 자동 제목이었다면 AI 가 붙인 새 제목
+    title: Option<String>,
+}
+
+struct BusyGuard<'a>(&'a AtomicUsize);
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
-async fn summarize(app: AppHandle, id: String) -> CmdResult<String> {
+async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
+    let st = app.state::<AppState>();
+    st.busy_ops.fetch_add(1, Ordering::SeqCst);
+    let _busy = BusyGuard(&st.busy_ops);
     let (cfg, doc) = {
-        let st = app.state::<AppState>();
         let cfg = st.settings.lock().summary.clone();
         let doc = st.store.lock().load(&id).map_err(err)?;
         (cfg, doc)
     };
-    let mut doc2 = doc.clone();
-    let text = tauri::async_runtime::spawn_blocking(move || summary::summarize(&cfg, &doc))
+    let doc2 = doc.clone();
+    let sum = tauri::async_runtime::spawn_blocking(move || summary::summarize(&cfg, &doc))
         .await
         .map_err(err)?
         .map_err(err)?;
-    doc2.summary = Some(text.clone());
-    let _ = app.state::<AppState>().store.lock().save_doc(doc2);
-    Ok(text)
+    // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
+    let loaded = st.store.lock().load(&id);
+    let mut latest = loaded.unwrap_or(doc2);
+    latest.summary = Some(sum.text.clone());
+    let title = sum.title.filter(|_| latest.auto_title);
+    if let Some(t) = &title {
+        latest.title = t.clone();
+        latest.auto_title = false;
+    }
+    let saved = st.store.lock().save_doc(latest);
+    saved.map_err(err)?;
+    Ok(SummaryDto { text: sum.text, title })
+}
+
+/// 요약 제공자 연결 확인 + 모델 목록
+#[tauri::command]
+async fn list_llm_models(app: AppHandle) -> CmdResult<Vec<String>> {
+    let cfg = app.state::<AppState>().settings.lock().summary.clone();
+    tauri::async_runtime::spawn_blocking(move || summary::list_models(&cfg))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+// ───────────────────────── 업데이트 ─────────────────────────
+
+/// 지금 확인 (자동 업데이트 설정과 상관없이 새 버전이 있으면 내려받아 둔다)
+#[tauri::command]
+async fn check_update(app: AppHandle) -> CmdResult<Option<String>> {
+    update::check(&app, true).await
+}
+
+/// 내려받아 둔 업데이트를 설치하고 다시 시작
+#[tauri::command]
+fn install_update(app: AppHandle) -> CmdResult<()> {
+    update::install(&app, false)
+}
+
+#[tauri::command]
+fn hide_window(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    update::maybe_install(&app);
 }
 
 #[tauri::command]
@@ -641,6 +802,7 @@ fn toggle_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         if w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) {
             let _ = w.hide();
+            update::maybe_install(app);
         } else {
             show_main(app);
         }
@@ -669,12 +831,15 @@ fn recording_icon(base: &Image<'_>) -> Image<'static> {
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "녹음 시작", true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause", "일시정지", false, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "창 열기", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "회의 기록 폴더", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&toggle, &show, &folder, &sep, &quit])?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&toggle, &pause, &sep2, &show, &folder, &sep, &quit])?;
     *app.state::<AppState>().tray_toggle.lock() = Some(toggle);
+    *app.state::<AppState>().tray_pause.lock() = Some(pause);
 
     TrayIconBuilder::with_id("main")
         .icon(app.state::<AppState>().icon_idle.clone())
@@ -690,6 +855,9 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                         let _ = app.emit("bd://toast", e);
                     }
                 });
+            }
+            "pause" => {
+                let _ = toggle_pause(app);
             }
             "show" => show_main(app),
             "folder" => {
@@ -712,36 +880,78 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 두 번째 실행에서 넘어온 명령 처리 (작업 스레드에서 호출)
+fn handle_forwarded(app: &AppHandle, argv: &[String]) {
+    // `badasugi.exe 회의.m4a` · 탐색기 "연결 프로그램" → 파일 받아쓰기
+    if let Some(file) = audio_arg(argv) {
+        show_main(app);
+        open_file_from_cli(app.clone(), file);
+        return;
+    }
+    let cmd = argv.iter().skip(1).find(|a| a.starts_with("--")).cloned();
+    let rec = *app.state::<AppState>().rec.lock();
+    let r = match cmd.as_deref() {
+        Some("--pause") => toggle_pause(app),
+        Some("--start") if rec == RecState::Idle => start_recording_inner(app),
+        Some("--stop") if rec == RecState::Recording => {
+            stop_recording_inner(app);
+            Ok(())
+        }
+        Some("--toggle") => toggle_recording_inner(app),
+        Some("--start") | Some("--stop") | Some("--minimized") => Ok(()),
+        _ => {
+            show_main(app);
+            Ok(())
+        }
+    };
+    if let Err(e) = r {
+        show_main(app);
+        let _ = app.emit("bd://toast", e);
+    }
+}
+
+/// 명령줄 인자 중 받아 적을 수 있는 오디오 파일
+fn audio_arg(argv: &[String]) -> Option<PathBuf> {
+    argv.iter().skip(1).filter(|a| !a.starts_with("--")).map(PathBuf::from).find(|p| {
+        p.is_file()
+            && p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| badasugi_core::decode::AUDIO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+    })
+}
+
+fn open_file_from_cli(app: AppHandle, file: PathBuf) {
+    std::thread::spawn(move || {
+        // 창(UI)이 이벤트를 받을 준비가 될 때까지 잠깐
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        if let Err(e) = start_session(&app, Some(&file)) {
+            show_main(&app);
+            let _ = app.emit("bd://toast", e);
+        }
+    });
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     tauri::Builder::default()
-        // 두 번째 실행은 이미 떠 있는 앱으로 전달된다: `badasugi --toggle | --start | --stop`
+        // 두 번째 실행은 이미 떠 있는 앱으로 전달된다: `badasugi --toggle | --start | --stop | --pause`
         // (Stream Deck · 배치 파일 · 바로 가기 등에서 녹음 제어)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            let cmd = argv.iter().skip(1).find(|a| a.starts_with("--")).cloned();
             let app = app.clone();
-            match cmd.as_deref() {
-                Some("--toggle") | Some("--start") | Some("--stop") => {
-                    std::thread::spawn(move || {
-                        let rec = *app.state::<AppState>().rec.lock();
-                        let r = match cmd.as_deref() {
-                            Some("--start") if rec == RecState::Idle => start_recording_inner(&app),
-                            Some("--stop") if rec == RecState::Recording => {
-                                stop_recording_inner(&app);
-                                Ok(())
-                            }
-                            Some("--toggle") => toggle_recording_inner(&app),
-                            _ => Ok(()),
-                        };
-                        if let Err(e) = r {
-                            show_main(&app);
-                            let _ = app.emit("bd://toast", e);
-                        }
-                    });
+            // 앱이 막 켜지는 중(setup 전)에 들어온 명령도 놓치지 않도록, 준비될 때까지 기다렸다가 처리
+            std::thread::spawn(move || {
+                for _ in 0..150 {
+                    if app.try_state::<AppState>().is_some() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                _ => show_main(&app),
-            }
+                if app.try_state::<AppState>().is_none() {
+                    return;
+                }
+                handle_forwarded(&app, &argv);
+            });
         }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -764,6 +974,15 @@ fn main() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // 창 크기·위치를 기억 (보이기 여부는 트레이 로직이 정한다)
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE | tauri_plugin_window_state::StateFlags::POSITION,
+                )
+                .build(),
+        )
         .setup(|app| {
             let handle = app.handle().clone();
             let path = app.path();
@@ -774,7 +993,19 @@ fn main() {
                 .map(|d| d.join("받아쓰기"))
                 .unwrap_or_else(|_| path.app_data_dir().unwrap_or_default().join("sessions"));
             let settings_path = config_dir.join("settings.json");
-            let settings = Settings::load(&settings_path);
+            let mut settings = Settings::load(&settings_path);
+            // 업데이트 직후 첫 실행인지 (안내 토스트용)
+            let version = app.package_info().version.to_string();
+            let updated_from = (!settings.last_version.is_empty() && settings.last_version != version)
+                .then(|| settings.last_version.clone());
+            if settings.last_version != version {
+                settings.last_version = version;
+                let _ = settings.save(&settings_path);
+            }
+            // 자동 업데이트로 다시 켜졌고 그 전에 창이 숨겨져 있었다면 계속 숨긴 채로
+            let marker = config_dir.join(update::START_HIDDEN_MARKER);
+            let start_hidden = marker.exists();
+            let _ = std::fs::remove_file(&marker);
 
             let icon_idle = Image::from_bytes(include_bytes!("../icons/tray.png"))?.to_owned();
             let icon_rec = recording_icon(&icon_idle);
@@ -782,6 +1013,7 @@ fn main() {
             app.manage(AppState {
                 settings: Mutex::new(settings.clone()),
                 paths: Paths {
+                    config: config_dir,
                     settings: settings_path,
                     models: models_dir,
                     sessions: sessions_dir.clone(),
@@ -791,24 +1023,36 @@ fn main() {
                 store: Mutex::new(SessionStore::new(sessions_dir)),
                 dl_cancel: Arc::new(AtomicBool::new(false)),
                 downloading: Mutex::new(None),
+                busy_ops: AtomicUsize::new(0),
+                file_mode: AtomicBool::new(false),
+                updated_from: Mutex::new(updated_from),
+                hotkey_error: Mutex::new(None),
                 tray_toggle: Mutex::new(None),
+                tray_pause: Mutex::new(None),
                 icon_idle,
                 icon_rec,
                 rec_started: Mutex::new(None),
                 quit_after_stop: AtomicBool::new(false),
             });
+            app.manage(Updates::default());
 
             setup_tray(&handle)?;
             if let Err(e) = register_hotkey(&handle, &settings.hotkey) {
                 log::warn!("{e}");
+                *app.state::<AppState>().hotkey_error.lock() =
+                    Some(format!("{e}\n다른 프로그램이 쓰고 있을 수 있어요. 설정에서 다른 조합으로 바꿔 주세요."));
             }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_always_on_top(settings.always_on_top);
-                let minimized = std::env::args().any(|a| a == "--minimized");
+                let minimized = start_hidden || std::env::args().any(|a| a == "--minimized");
                 if !minimized {
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
+            }
+            update::spawn_background(handle.clone());
+            if let Some(file) = audio_arg(&std::env::args().collect::<Vec<_>>()) {
+                open_file_from_cli(handle.clone(), file);
             }
             Ok(())
         })
@@ -817,6 +1061,7 @@ fn main() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                update::maybe_install(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -832,13 +1077,20 @@ fn main() {
             start_recording,
             stop_recording,
             toggle_recording,
+            set_paused,
+            transcribe_file,
             list_sessions,
+            search_sessions,
             load_session,
             save_session,
             delete_session,
             export_session,
             session_text,
             summarize,
+            list_llm_models,
+            check_update,
+            install_update,
+            hide_window,
             open_folder,
             open_url,
             quit_app,

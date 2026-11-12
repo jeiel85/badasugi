@@ -28,8 +28,11 @@ pub fn load(path: &Path) -> Result<Arc<WhisperContext>> {
         whisper_rs::install_logging_hooks();
     }
     let mut params = WhisperContextParameters::default();
-    // CPU 에서도 flash attention 이 20~30% 빠르다 (문제가 있으면 BADASUGI_FLASH_ATTN=0 으로 끔)
-    params.flash_attn(std::env::var("BADASUGI_FLASH_ATTN").map(|v| v != "0").unwrap_or(true));
+    // flash attention 은 끈다 (BADASUGI_FLASH_ATTN=1 로 켤 수 있음).
+    // ggml 의 flash attention 은 KV 를 256 단위로 채워 계산하는데, 인코더 창을 줄여 256 의 배수가 아니게 되면
+    // 채운 자리가 결과를 흐려 잡음 섞인 음성(m4a·실제 마이크)에서 엉뚱한 영어·반복이 나왔다.
+    // 이 CPU 에서는 줄인 창 기준으로 끄는 쪽이 오히려 더 빨랐다 (384 프레임: 8.5초 → 5.0초).
+    params.flash_attn(std::env::var("BADASUGI_FLASH_ATTN").map(|v| v == "1").unwrap_or(false));
     let ctx = WhisperContext::new_with_params(path, params).map_err(|e| anyhow!("whisper 모델 로드 실패: {e}"))?;
     let ctx = Arc::new(ctx);
     *cache = Some((path.to_path_buf(), ctx.clone()));
@@ -67,6 +70,20 @@ impl LocalWhisper {
             beam,
         })
     }
+}
+
+fn env_i32(name: &str, default: i32) -> i32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// 줄인 인코더 창의 최소 크기 (프레임, 50 = 1초)
+fn ctx_min() -> i32 {
+    env_i32("BADASUGI_CTX_MIN", 384).clamp(128, 1500)
+}
+
+/// 발화 길이에 더하는 여유 (프레임)
+fn ctx_margin() -> i32 {
+    env_i32("BADASUGI_CTX_MARGIN", 100).clamp(0, 1500)
 }
 
 fn params_template<'a>(threads: i32, beam: u32, req: &'a AsrRequest<'a>) -> FullParams<'a, 'a> {
@@ -135,7 +152,7 @@ impl Transcriber for LocalWhisper {
         // 짧은 발화에서 3~5배 빨라진다. 여유분(2초)과 최소 창(약 7.7초)이 모자라면
         // 모델이 문장 끝을 못 보고 같은 말을 반복하므로 실험으로 정한 값을 지킨다.
         let frames = (samples.len() as f64 / SAMPLE_RATE as f64 * 50.0).ceil() as i32;
-        let audio_ctx = (frames + 100).clamp(384, 1500);
+        let audio_ctx = (frames + ctx_margin()).clamp(ctx_min(), 1500);
         let reduced = audio_ctx < 1500 && std::env::var("BADASUGI_FULL_CTX").is_err();
 
         let mut params = params_template(self.threads, self.beam, req);
@@ -145,10 +162,16 @@ impl Transcriber for LocalWhisper {
         self.state.full(params, samples).map_err(|e| anyhow!("whisper 추론 실패: {e}"))?;
         let mut text = self.collect();
 
-        // 줄인 창에서 반복 루프에 빠졌으면 전체 창으로 한 번 더 (느리지만 드묾)
-        if reduced && crate::text::is_degenerate(&text) {
-            log::debug!("반복 감지 → 전체 창으로 재인식");
-            let params = params_template(self.threads, self.beam, req);
+        // 줄인 창에서 반복 루프에 빠졌거나, 한국어인데 엉뚱한 영어가 나왔으면 전체 창으로 한 번 더 (느리지만 드묾)
+        // (AAC(m4a) 녹음에서 특히 잘 생긴다)
+        if reduced && (crate::text::is_degenerate(&text) || crate::text::is_wrong_script(&text, req.language)) {
+            // 바로 30초 창으로 가면 이 CPU 에서 50초가 넘게 걸려 뒤 발화가 밀리므로, 창을 두 배로 늘려 한 번 더
+            let retry = (audio_ctx * 2).min(1500);
+            log::debug!("반복·언어 이상 감지 → 창 {audio_ctx} → {retry} 로 재인식: {text}");
+            let mut params = params_template(self.threads, self.beam, req);
+            if retry < 1500 {
+                params.set_audio_ctx(retry);
+            }
             self.state.full(params, samples).map_err(|e| anyhow!("whisper 추론 실패: {e}"))?;
             text = self.collect();
         }

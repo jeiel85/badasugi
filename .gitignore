@@ -4,3 +4,4 @@
 *.wav
 !crates/badasugi-core/assets/*.wav
 /.claude/
+/dist/

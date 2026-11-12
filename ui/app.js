@@ -9,13 +9,25 @@ const api = T ? {
   listen: T.event.listen,
   win: T.window.getCurrentWindow(),
   save: (o) => T.dialog.save(o),
+  open: (o) => T.dialog.open(o),
   ask: (m, o) => T.dialog.ask(m, o),
+  onDrop: (fn) => T.webview.getCurrentWebview().onDragDropEvent(fn),
 } : createMock();
 
 const COLORS = ['#7c6cff', '#0ea5e9', '#f59e0b', '#10b981', '#f43f5e', '#6366f1', '#14b8a6', '#f97316', '#a855f7', '#84cc16'];
 const spkColor = (s) => (s == null ? 'var(--muted)' : COLORS[s % COLORS.length]);
 const SOURCE_LABEL = { mic: '마이크', system: '시스템 소리', both: '마이크 + 시스템' };
 const SOURCE_ICON = { mic: '#i-mic', system: '#i-speaker', both: '#i-both' };
+const LLM_DESC = {
+  ollama: 'PC에 따로 설치한 <b>Ollama</b>로 요약해요 (앱에 들어 있지 않아요). 인터넷 없이 동작하지만 Ollama 설치와 모델(약 5GB)이 필요하고, PC 사양에 따라 몇 분 걸릴 수 있어요. <button class="link" data-url="https://ollama.com/download">Ollama 받기 ↗</button>',
+  groq: '<b>무료 등급</b>으로 바로 쓸 수 있고 매우 빨라요. 음성 인식용 Groq 키를 같이 써요. <button class="link" data-url="https://console.groq.com/keys">키 무료로 받기 ↗</button>',
+  gemini: 'Google Gemini — <b>무료 등급</b>이 있고 한국어 요약 품질이 좋아요. <button class="link" data-url="https://aistudio.google.com/apikey">키 무료로 받기 ↗</button>',
+  openai: 'OpenAI — 음성 인식용 OpenAI 키를 같이 써요. 사용한 만큼 과금돼요. <button class="link" data-url="https://platform.openai.com/api-keys">키 만들기 ↗</button>',
+  anthropic: 'Anthropic Claude — 긴 회의도 꼼꼼하게 정리해요. 사용한 만큼 과금돼요. <button class="link" data-url="https://console.anthropic.com/settings/keys">키 만들기 ↗</button>',
+  custom: 'LM Studio · vLLM · OpenRouter 같은 OpenAI 호환 서버를 써요.',
+};
+const LLM_PRIVACY = '<br>API를 쓰면 녹취록이 해당 서비스로 전송돼요.';
+
 const ENGINE_DESC = {
   local: '인터넷 없이 이 PC에서 인식합니다. 회의 내용이 밖으로 나가지 않아요. 첫 사용 때 모델을 한 번 내려받습니다.',
   openai: 'OpenAI gpt-4o-transcribe — 한국어 정확도가 가장 높습니다. 사용량만큼 과금됩니다.',
@@ -37,6 +49,13 @@ const S = {
   downloads: {},
   dlQueue: [],
   summarizing: false,
+  paused: false,
+  fileMode: false,
+  progress: null,
+  update: null,
+  updateDismissed: false,
+  findQ: '',
+  findIdx: 0,
 };
 const doc = () => (S.live ? S.liveDoc : S.viewDoc);
 
@@ -55,7 +74,25 @@ function esc(s) {
 }
 function speakerName(d, s) {
   if (s == null) return '발화';
-  return (d && d.speakers && d.speakers[s]) || `화자 ${s + 1}`;
+  return (d && d.speakers && d.speakers[s]) || `화자 ${s >= 100 ? s - 99 + maxAutoSpeaker(d) : s + 1}`;
+}
+// 사용자가 만든 새 화자(100번부터)는 자동 화자 번호 뒤에 이어 붙인다
+function maxAutoSpeaker(d) {
+  let m = 0;
+  for (const u of d?.utterances || []) if (u.speaker != null && u.speaker < 100) m = Math.max(m, u.speaker + 1);
+  return m;
+}
+// 합친 화자를 따라간다
+function resolveSpk(d, s) {
+  if (s == null || !d || !d.speakerMap) return s;
+  for (let i = 0; i < 16 && d.speakerMap[s] != null && d.speakerMap[s] !== s; i++) s = d.speakerMap[s];
+  return s;
+}
+function hl(text) {
+  const t = esc(text);
+  if (!S.findQ) return t;
+  const q = esc(S.findQ).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return t.replace(new RegExp(q, 'gi'), (m) => `<mark>${m}</mark>`);
 }
 let toastTimer;
 function toast(msg, kind = '') {
@@ -64,7 +101,7 @@ function toast(msg, kind = '') {
   t.className = `toast ${kind}`;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), kind === 'error' ? 5200 : 2600);
+  toastTimer = setTimeout(() => (t.hidden = true), kind === 'error' || kind === 'warn' ? 6500 : 2600);
 }
 async function call(cmd, args) {
   try {
@@ -126,10 +163,10 @@ function renderDoc() {
   if (editing) return;
   const d = doc();
   const items = [];
-  if (d) for (const u of d.utterances) items.push({ kind: 'u', ...u });
+  if (d) for (const u of d.utterances) items.push({ kind: 'u', ...u, speaker: resolveSpk(d, u.speaker) });
   if (S.live) {
-    for (const [id, p] of S.pending) items.push({ kind: 'p', id, ...p });
-    for (const [id, f] of S.failed) items.push({ kind: 'f', id, ...f });
+    for (const [id, p] of S.pending) items.push({ kind: 'p', id, ...p, speaker: resolveSpk(d, p.speaker) });
+    for (const [id, f] of S.failed) items.push({ kind: 'f', id, ...f, speaker: resolveSpk(d, f.speaker) });
   }
   items.sort((a, b) => a.startMs - b.startMs || a.id - b.id);
 
@@ -152,18 +189,19 @@ function renderDoc() {
   }
   tr.innerHTML = groups.map((g) => `
     <div class="group" style="--c:${spkColor(g.speaker)}">
-      <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
+      <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}" data-ids="${g.items.filter((x) => x.kind === 'u').map((x) => x.id).join(',')}" title="이름 바꾸기 · 화자 바꾸기">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
       ${g.items.map((it) => it.kind === 'u'
-        ? `<div class="u" data-id="${it.id}">${esc(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>`
+        ? `<div class="u" data-id="${it.id}">${hl(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>`
         : it.kind === 'p'
           ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
           : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
     </div>`).join('');
 
-  $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking);
+  $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking && !S.paused && !S.fileMode);
   renderMeta();
   renderSummary();
   updateActions();
+  if (S.findQ) { updateFind(false); return; }
   if (stick) body.scrollTop = body.scrollHeight;
   else if (S.live && S.rec === 'recording') $('#jump').hidden = false;
 }
@@ -174,12 +212,12 @@ function renderMeta() {
   const ti = $('#title-input');
   if (document.activeElement !== ti) ti.value = d.title || '';
   const spk = new Set();
-  for (const u of d.utterances) if (u.speaker != null) spk.add(u.speaker);
-  if (S.live) for (const p of S.pending.values()) if (p.speaker != null) spk.add(p.speaker);
+  for (const u of d.utterances) if (u.speaker != null) spk.add(resolveSpk(d, u.speaker));
+  if (S.live) for (const p of S.pending.values()) if (p.speaker != null) spk.add(resolveSpk(d, p.speaker));
   const box = $('#speakers');
   if (box.querySelector('input')) return;
   box.innerHTML = [...spk].sort((a, b) => a - b)
-    .map((s) => `<button class="spk-chip" data-spk="${s}" style="--c:${spkColor(s)}" title="이름 바꾸기"><i></i>${esc(speakerName(d, s))}</button>`)
+    .map((s) => `<button class="spk-chip" data-spk="${s}" style="--c:${spkColor(s)}" title="이름 바꾸기 · 다른 화자와 합치기"><i></i>${esc(speakerName(d, s))}</button>`)
     .join('');
 }
 
@@ -242,14 +280,28 @@ function renderSetup() {
 /* ───────────── 도크 ───────────── */
 function renderDock() {
   const app = $('#app');
-  app.classList.toggle('recording', S.rec === 'recording');
+  const rec = S.rec === 'recording';
+  app.classList.toggle('recording', rec);
   app.classList.toggle('busy', S.rec === 'starting' || S.rec === 'stopping');
+  app.classList.toggle('paused', rec && S.paused);
+  app.classList.toggle('filemode', S.rec !== 'idle' && S.fileMode);
   const src = S.settings?.source || 'mic';
-  $('#source-label').textContent = SOURCE_LABEL[src];
-  $('#btn-source use').setAttribute('href', SOURCE_ICON[src]);
+  const fileName = S.fileMode && S.rec !== 'idle' ? S.liveDoc?.sourceFile : null;
+  $('#source-label').textContent = fileName || SOURCE_LABEL[src];
+  $('#btn-source use').setAttribute('href', fileName ? '#i-file' : SOURCE_ICON[src]);
+  $('#btn-source').disabled = !!fileName;
+  const pb = $('#btn-pause');
+  pb.hidden = !rec;
+  pb.classList.toggle('on', S.paused);
+  pb.title = S.paused ? '이어서 받아쓰기' : '일시정지';
+  $('#btn-pause use').setAttribute('href', S.paused ? '#i-play' : '#i-pause');
+  $('#paused-tag').hidden = !(rec && S.paused);
+  $('#fprog').hidden = !(S.fileMode && S.rec !== 'idle');
+  renderProgress();
   $('#btn-pin').classList.toggle('on', !!S.settings?.alwaysOnTop);
   $('#hotkey-hint').textContent = S.settings?.hotkey || '단축키 없음';
-  const lbl = S.rec === 'stopping' ? '남은 발화를 정리하는 중…' : S.rec === 'starting' ? '준비하는 중…' : engineLabel();
+  const lbl = S.rec === 'stopping' ? '남은 발화를 정리하는 중…' : S.rec === 'starting' ? '준비하는 중…'
+    : S.fileMode && S.rec === 'recording' ? `파일 받아쓰기 · ${engineLabel()}` : engineLabel();
   $('#engine-label').textContent = lbl;
   tickTimer();
 }
@@ -267,7 +319,19 @@ function engineLabel() {
   return `${name} · ${model}${spk}`;
 }
 
+function renderProgress() {
+  const p = S.progress;
+  if (!S.fileMode || !p) { $('#fprog-bar').style.width = '0%'; return; }
+  const pct = p.totalMs ? Math.min(100, (p.doneMs / p.totalMs) * 100) : 0;
+  $('#fprog-bar').style.width = `${pct}%`;
+  $('#fprog').title = p.totalMs ? `${fmt(p.doneMs)} / ${fmt(p.totalMs)} (${Math.round(pct)}%)` : fmt(p.doneMs);
+}
+
 function tickTimer() {
+  if (S.fileMode && S.rec !== 'idle') {
+    $('#timer').textContent = S.progress ? fmt(S.progress.doneMs) : '00:00';
+    return;
+  }
   const d = doc();
   const ms = S.rec === 'recording' || S.rec === 'stopping' ? Date.now() - S.timerStart : d ? d.durationMs : 0;
   $('#timer').textContent = fmt(S.live || S.rec !== 'idle' ? ms : d?.durationMs);
@@ -296,6 +360,9 @@ async function refreshState() {
   S.app = await api.invoke('get_state');
   S.settings = S.app.settings;
   S.rec = S.app.rec;
+  S.paused = !!S.app.paused;
+  S.fileMode = !!S.app.fileMode;
+  if (S.app.update) S.update = S.app.update;
   applyTheme();
   if (S.app.current) S.liveDoc = S.app.current;
   if (S.rec === 'recording') S.timerStart = Date.now() - S.app.elapsedMs;
@@ -312,17 +379,25 @@ function onRec(state) {
     S.failed.clear();
     S.liveDoc = null;
     S.slowHinted = false;
+    S.paused = false;
+    S.progress = null;
   }
   if (state === 'recording' && prev !== 'recording') {
     S.timerStart = Date.now();
     api.invoke('get_state').then((st) => {
       S.app = st;
       S.liveDoc = st.current;
+      S.fileMode = !!st.fileMode;
+      renderDock();
       scheduleRender();
     });
   }
   if (state === 'idle') {
     S.speaking = false;
+    S.paused = false;
+    if (S.fileMode && prev !== 'idle' && S.liveDoc?.utterances.length) toast('파일 받아쓰기를 마쳤어요');
+    S.fileMode = false;
+    S.progress = null;
     resetLevel();
   }
   renderDock();
@@ -342,7 +417,7 @@ function onEvent(e) {
     case 'pending':
       S.pending.set(e.id, { startMs: e.startMs, endMs: e.endMs, speaker: e.speaker });
       // PC 가 받아 적는 속도보다 말이 빨라 대기열이 쌓이면 한 번만 안내
-      if (S.pending.size >= 4 && !S.slowHinted && S.settings?.engine === 'local') {
+      if (S.pending.size >= 4 && !S.slowHinted && !S.fileMode && S.settings?.engine === 'local') {
         S.slowHinted = true;
         toast('이 PC에선 인식이 말보다 느려 조금씩 밀리고 있어요.\n설정에서 가벼운 모델이나 Groq API를 쓰면 더 빨라요.');
       }
@@ -351,7 +426,7 @@ function onEvent(e) {
     case 'transcript':
       S.pending.delete(e.id);
       if (d) {
-        const u = { id: e.id, startMs: e.startMs, endMs: e.endMs, speaker: e.speaker, text: e.text, latencyMs: e.latencyMs };
+        const u = { id: e.id, startMs: e.startMs, endMs: e.endMs, speaker: resolveSpk(d, e.speaker), text: e.text, latencyMs: e.latencyMs };
         const i = d.utterances.findIndex((x) => x.id === e.id);
         if (i >= 0) d.utterances[i] = u; else d.utterances.push(u);
         d.durationMs = Math.max(d.durationMs || 0, e.endMs);
@@ -372,6 +447,14 @@ function onEvent(e) {
     }
     case 'status':
       toast(e.message);
+      break;
+    case 'warning':
+      toast(e.message, 'warn');
+      break;
+    case 'progress':
+      S.progress = { doneMs: e.doneMs, totalMs: e.totalMs };
+      renderProgress();
+      tickTimer();
       break;
     case 'error':
       toast(e.message, 'error');
@@ -422,7 +505,7 @@ $('#btn-rec').addEventListener('click', async () => {
 });
 
 $('#btn-min').addEventListener('click', () => api.win.minimize());
-$('#btn-close').addEventListener('click', () => api.win.hide());
+$('#btn-close').addEventListener('click', () => api.invoke('hide_window'));
 $('#btn-pin').addEventListener('click', () => {
   S.settings.alwaysOnTop = !S.settings.alwaysOnTop;
   saveSettings();
@@ -438,6 +521,7 @@ $('#title-input').addEventListener('change', (e) => {
   const d = doc();
   if (!d) return;
   d.title = e.target.value.trim() || d.title;
+  d.autoTitle = false;
   persistDoc(d);
 });
 $('#title-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
@@ -466,13 +550,69 @@ function startRename(spk) {
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
   inp.addEventListener('blur', () => done(true), { once: true });
 }
+// 화자 메뉴: 칩 → 이름 바꾸기 · 합치기 / 문단 이름 → 이름 바꾸기 · 이 문단 화자 바꾸기
+function knownSpeakers(d) {
+  const set = new Set();
+  for (const u of d.utterances) if (u.speaker != null) set.add(resolveSpk(d, u.speaker));
+  if (S.live) for (const p of S.pending.values()) if (p.speaker != null) set.add(resolveSpk(d, p.speaker));
+  return [...set].sort((a, b) => a - b);
+}
+function speakerMenu(anchor, spk, ids) {
+  const d = doc();
+  if (!d || spk === '' || spk == null) return;
+  spk = +spk;
+  const others = knownSpeakers(d).filter((s) => s !== spk);
+  const pop = $('#pop-spk');
+  const item = (s, action) => `<button data-act="${action}" data-to="${s}"><i style="--c:${spkColor(s)}"></i>${esc(speakerName(d, s))}</button>`;
+  let html = `<button data-act="rename"><svg><use href="#i-pencil"/></svg>이름 바꾸기</button>`;
+  if (ids) {
+    html += '<hr><div class="pop-title">이 문단의 화자를</div>' + others.map((s) => item(s, 'move')).join('')
+      + `<button data-act="move" data-to="new"><svg><use href="#i-mic"/></svg>새 화자로 나누기</button>`;
+  } else if (others.length) {
+    html += '<hr><div class="pop-title">다른 화자와 합치기 (같은 사람일 때)</div>' + others.map((s) => item(s, 'merge')).join('');
+  }
+  pop.innerHTML = html;
+  pop.dataset.spk = spk;
+  pop.dataset.ids = ids || '';
+  showPopover(pop, anchor, 'left', true);
+}
+$('#pop-spk').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act]');
+  const d = doc();
+  if (!b || !d) return;
+  const pop = $('#pop-spk');
+  const spk = +pop.dataset.spk;
+  hidePopovers();
+  if (b.dataset.act === 'rename') return startRename(spk);
+  if (b.dataset.act === 'merge') {
+    const to = +b.dataset.to;
+    d.speakerMap = d.speakerMap || {};
+    d.speakerMap[spk] = to;
+    for (const u of d.utterances) if (resolveSpk(d, u.speaker) === to) u.speaker = to;
+    if (d.speakers) delete d.speakers[spk];
+    toast(`'${speakerName(d, to)}'에 합쳤어요${S.rec !== 'idle' && S.live ? ' · 앞으로 들어오는 발화도 함께 적용돼요' : ''}`);
+  } else if (b.dataset.act === 'move') {
+    let to = b.dataset.to;
+    if (to === 'new') {
+      let n = 100;
+      const used = new Set(d.utterances.map((u) => u.speaker));
+      while (used.has(n)) n++;
+      to = n;
+    }
+    const ids = new Set(pop.dataset.ids.split(',').filter(Boolean).map(Number));
+    for (const u of d.utterances) if (ids.has(u.id)) u.speaker = +to;
+  }
+  persistDoc(d);
+  $('#speakers').innerHTML = '';
+  scheduleRender();
+});
 $('#speakers').addEventListener('click', (e) => {
   const c = e.target.closest('.spk-chip');
-  if (c && !c.querySelector('input')) startRename(c.dataset.spk);
+  if (c && !c.querySelector('input')) speakerMenu(c, c.dataset.spk, null);
 });
 $('#transcript').addEventListener('click', (e) => {
   const n = e.target.closest('.g-name');
-  if (n) startRename(n.dataset.spk);
+  if (n) speakerMenu(n, n.dataset.spk, n.dataset.ids || '');
 });
 
 // 발화 고치기 (더블클릭)
@@ -490,7 +630,11 @@ $('#transcript').addEventListener('dblclick', (e) => {
     el.contentEditable = 'false';
     editing = false;
     const v = el.innerText.trim();
-    if (save && v && v !== u.text) { u.text = v; persistDoc(d); }
+    if (save && !v) {
+      d.utterances = d.utterances.filter((x) => x.id !== u.id);
+      persistDoc(d);
+      toast('발화를 지웠어요');
+    } else if (save && v !== u.text) { u.text = v; persistDoc(d); }
     scheduleRender();
   };
   el.addEventListener('keydown', (k) => {
@@ -518,7 +662,7 @@ $('#btn-copy-summary').addEventListener('click', async () => {
 });
 $('#btn-fold-summary').addEventListener('click', () => $('#summary-card').classList.toggle('folded'));
 
-function showPopover(pop, anchor, align = 'left') {
+function showPopover(pop, anchor, align = 'left', below = false) {
   hidePopovers();
   pop.hidden = false;
   const a = anchor.getBoundingClientRect();
@@ -527,10 +671,12 @@ function showPopover(pop, anchor, align = 'left') {
   let left = align === 'right' ? a.right - p.width : a.left;
   left = Math.max(8, Math.min(left, appR.width - p.width - 8));
   pop.style.left = `${left}px`;
-  pop.style.top = `${a.top - p.height - 8}px`;
+  let top = below ? a.bottom + 6 : a.top - p.height - 8;
+  if (below && top + p.height > appR.height - 8) top = Math.max(8, a.top - p.height - 6);
+  pop.style.top = `${top}px`;
 }
 function hidePopovers() { $$('.popover').forEach((p) => (p.hidden = true)); }
-document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save')) hidePopovers(); });
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name')) hidePopovers(); });
 
 $('#btn-save').addEventListener('click', (e) => showPopover($('#pop-save'), e.currentTarget, 'right'));
 $('#pop-save').addEventListener('click', async (e) => {
@@ -572,8 +718,9 @@ $('#btn-summary').addEventListener('click', async () => {
   updateActions();
   body.scrollTop = 0;
   try {
-    const text = await api.invoke('summarize', { id: d.id });
-    d.summary = text;
+    const r = await api.invoke('summarize', { id: d.id });
+    d.summary = r.text;
+    if (r.title) { d.title = r.title; d.autoTitle = false; renderMeta(); }
   } catch (e) {
     toast(String(e), 'error');
   } finally {
@@ -586,6 +733,7 @@ $('#btn-summary').addEventListener('click', async () => {
 /* ───────────── 패널 ───────────── */
 function openPanel(name) {
   closePanels();
+  hidePopovers();
   $('#scrim').hidden = false;
   $(`#panel-${name}`).hidden = false;
   if (name === 'settings') renderSettings();
@@ -600,21 +748,43 @@ $('#btn-settings').addEventListener('click', () => openPanel('settings'));
 $('#btn-history').addEventListener('click', () => openPanel('history'));
 $('#scrim').addEventListener('click', closePanels);
 $$('[data-close]').forEach((b) => b.addEventListener('click', closePanels));
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !hotkeyCapturing) { closePanels(); hidePopovers(); } });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !hotkeyCapturing) {
+    if (!$('#findbar').hidden && $$('.panel').every((p) => p.hidden)) closeFind();
+    closePanels();
+    hidePopovers();
+  }
+  if (e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFind(); }
+  if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoom(1); }
+  if (e.ctrlKey && e.key === '-') { e.preventDefault(); zoom(-1); }
+  if (e.ctrlKey && e.key === '0') { e.preventDefault(); zoom(0); }
+});
+document.addEventListener('wheel', (e) => { if (e.ctrlKey) { e.preventDefault(); zoom(e.deltaY < 0 ? 1 : -1); } }, { passive: false });
 document.addEventListener('click', (e) => {
   const dl = e.target.closest('[data-dl]');
   if (dl) queueDownloads(dl.dataset.dl.split(','));
   if (e.target.closest('[data-open-settings]')) openPanel('settings');
+  const url = e.target.closest('[data-url]');
+  if (url) { e.preventDefault(); call('open_url', { url: url.dataset.url }); }
 });
 
 /* 기록 */
 async function renderHistory() {
-  const list = await call('list_sessions');
+  const q = $('#history-q').value.trim();
+  const list = q ? await call('search_sessions', { query: q }) : await call('list_sessions');
   const box = $('#history-list');
   if (!list.length) {
-    box.innerHTML = '<div class="h-empty">아직 회의 기록이 없어요.<br>녹음을 마치면 자동으로 저장돼요.</div>';
+    box.innerHTML = q
+      ? `<div class="h-empty">'${esc(q)}' 이(가) 들어간 기록이 없어요.</div>`
+      : '<div class="h-empty">아직 회의 기록이 없어요.<br>녹음을 마치면 자동으로 저장돼요.</div>';
     return;
   }
+  const mark = (t) => {
+    const e = esc(t);
+    if (!q) return e;
+    const re = new RegExp(esc(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    return e.replace(re, (m) => `<mark>${m}</mark>`);
+  };
   let day = '';
   const liveId = S.rec !== 'idle' ? S.liveDoc?.id : null;
   box.innerHTML = list.map((m) => {
@@ -622,9 +792,9 @@ async function renderHistory() {
     const head = dd !== day ? `<div class="h-day">${dd.replace(/-/g, '. ')}</div>` : '';
     day = dd;
     return `${head}<div class="h-item" role="button" data-id="${esc(m.id)}">
-      <div class="h-title"><span>${esc(m.title)}</span>${m.id === liveId ? '<span class="h-live">● 녹음 중</span>' : `<button class="icon-btn sm" data-del="${esc(m.id)}" title="삭제"><svg><use href="#i-trash"/></svg></button>`}</div>
+      <div class="h-title"><span>${mark(m.title)}${m.hits ? `<span class="h-badge">${m.hits}곳</span>` : ''}</span>${m.id === liveId ? '<span class="h-live">● 녹음 중</span>' : `<button class="icon-btn sm" data-del="${esc(m.id)}" title="삭제"><svg><use href="#i-trash"/></svg></button>`}</div>
       <div class="h-sub">${m.startedAt.slice(11)} · ${fmt(m.durationMs)} · 화자 ${m.speakers}명 · 발화 ${m.count}개</div>
-      <div class="h-prev">${esc(m.preview)}</div>
+      ${m.snippet ? `<div class="h-snip">${mark(m.snippet)}</div>` : `<div class="h-prev">${esc(m.preview)}</div>`}
     </div>`;
   }).join('');
 }
@@ -641,14 +811,170 @@ $('#history-list').addEventListener('click', async (e) => {
   const id = item.dataset.id;
   if (S.liveDoc && id === S.liveDoc.id) { S.live = true; S.viewDoc = null; }
   else { S.viewDoc = await call('load_session', { id }); S.live = false; }
+  const q = $('#history-q').value.trim();
   closePanels();
   renderDock();
   renderDoc();
   body.scrollTop = 0;
+  if (q) openFind(q);
 });
 $('#btn-open-folder').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
+$('#history-q').addEventListener('input', debounce(renderHistory, 220));
+$('#btn-import').addEventListener('click', () => pickFile());
+$('#btn-open-file').addEventListener('click', () => pickFile());
+
+/* ───────────── 파일 받아쓰기 ───────────── */
+const exts = () => S.app?.audioExts || ['wav', 'mp3', 'm4a', 'mp4', 'flac', 'ogg'];
+async function pickFile() {
+  if (S.rec !== 'idle') return toast('녹음을 마친 뒤에 파일을 불러올 수 있어요', 'error');
+  const path = await api.open({ multiple: false, directory: false, filters: [{ name: '오디오·영상', extensions: exts() }] });
+  if (path) startFile(Array.isArray(path) ? path[0] : path);
+}
+async function startFile(path) {
+  if (S.rec !== 'idle') return toast('녹음을 마친 뒤에 파일을 불러올 수 있어요', 'error');
+  const ext = String(path).split('.').pop().toLowerCase();
+  if (!exts().includes(ext)) return toast(`지원하지 않는 형식이에요 (${exts().join(' · ')})`, 'error');
+  closePanels();
+  S.live = true;
+  S.viewDoc = null;
+  S.fileMode = true;
+  try {
+    await api.invoke('transcribe_file', { path });
+    toast('파일을 받아 적고 있어요. 끝나면 자동으로 저장돼요.');
+  } catch (e) {
+    S.fileMode = false;
+    toast(String(e), 'error');
+    if (/모델|API 키/.test(String(e))) openPanel('settings');
+  }
+  renderDock();
+}
+if (api.onDrop) {
+  api.onDrop((e) => {
+    const t = e.payload.type;
+    if (t === 'enter' || t === 'over') $('#drop').hidden = S.rec !== 'idle';
+    else if (t === 'drop') { $('#drop').hidden = true; if (e.payload.paths?.length) startFile(e.payload.paths[0]); }
+    else $('#drop').hidden = true;
+  });
+}
+
+/* ───────────── 찾기 (Ctrl+F) ───────────── */
+function openFind(q) {
+  const bar = $('#findbar');
+  bar.hidden = false;
+  const inp = $('#find-input');
+  if (q != null) { inp.value = q; S.findQ = q; S.findIdx = 0; renderDoc(); }
+  inp.focus();
+  inp.select();
+}
+function closeFind() {
+  $('#findbar').hidden = true;
+  S.findQ = '';
+  $('#find-input').value = '';
+  renderDoc();
+}
+function updateFind(scroll) {
+  const marks = $$('#transcript mark');
+  const n = marks.length;
+  if (S.findIdx >= n) S.findIdx = 0;
+  $('#find-count').textContent = S.findQ ? (n ? `${S.findIdx + 1}/${n}` : '없음') : '';
+  marks.forEach((m, i) => m.classList.toggle('cur', i === S.findIdx));
+  // scrollIntoView 는 창 전체까지 밀어 올리므로 본문만 스크롤한다
+  if (scroll && n) {
+    const mr = marks[S.findIdx].getBoundingClientRect();
+    const br = body.getBoundingClientRect();
+    body.scrollTop += mr.top - br.top - body.clientHeight / 2;
+  }
+}
+function stepFind(dir) {
+  const n = $$('#transcript mark').length;
+  if (!n) return;
+  S.findIdx = (S.findIdx + dir + n) % n;
+  updateFind(true);
+}
+$('#btn-find').addEventListener('click', () => ($('#findbar').hidden ? openFind() : closeFind()));
+$('#find-input').addEventListener('input', debounce((e) => { S.findQ = e.target.value.trim(); S.findIdx = 0; renderDoc(); updateFind(true); }, 150));
+$('#find-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+  if (e.key === 'Escape') { e.stopPropagation(); closeFind(); }
+});
+$('#find-next').addEventListener('click', () => stepFind(1));
+$('#find-prev').addEventListener('click', () => stepFind(-1));
+$('#find-close').addEventListener('click', closeFind);
+
+/* ───────────── 글자 크기 (Ctrl +/-/0, Ctrl+휠) ───────────── */
+let fontPx = 15;
+try { fontPx = +localStorage.getItem('fontPx') || 15; } catch {}
+function zoom(dir) {
+  fontPx = dir === 0 ? 15 : Math.max(12, Math.min(24, fontPx + dir));
+  $('#transcript').style.setProperty('--fs', `${fontPx}px`);
+  try { localStorage.setItem('fontPx', String(fontPx)); } catch {}
+  if (dir !== 0 || fontPx !== 15) toast(`글자 크기 ${fontPx}px`);
+}
+$('#transcript').style.setProperty('--fs', `${fontPx}px`);
+
+/* ───────────── 일시정지 ───────────── */
+$('#btn-pause').addEventListener('click', () => call('set_paused', { paused: !S.paused }));
+function onPaused(p) {
+  S.paused = p;
+  if (p) { S.speaking = false; resetLevel(); }
+  renderDock();
+  scheduleRender();
+  toast(p ? '일시정지했어요. 이 동안의 소리는 받아 적지 않아요.' : '이어서 받아 적어요');
+}
+
+/* ───────────── 업데이트 ───────────── */
+function renderUpdate() {
+  const u = S.update;
+  const bar = $('#update-bar');
+  if (!u || S.updateDismissed && u.state === 'ready' || u.state === 'error') { bar.hidden = true; return; }
+  bar.hidden = false;
+  const btn = $('#btn-update-now');
+  if (u.state === 'downloading') {
+    const pct = u.total ? Math.round((u.done / u.total) * 100) : 0;
+    $('#update-label').textContent = `새 버전 v${u.version} 내려받는 중… ${pct ? `${pct}%` : ''}`;
+    btn.hidden = true;
+  } else if (u.state === 'ready') {
+    $('#update-label').textContent = `새 버전 v${u.version} 준비됨${u.notes ? ` · ${u.notes.split('\n')[0].replace(/^[#\-\s]+/, '')}` : ''}`;
+    btn.hidden = false;
+    btn.textContent = '지금 적용';
+  } else if (u.state === 'installing') {
+    $('#update-label').textContent = `v${u.version} 설치 중… 잠시 뒤 다시 열려요`;
+    btn.hidden = true;
+  } else {
+    bar.hidden = true;
+  }
+}
+function onUpdate(u) {
+  S.update = u;
+  if (u?.state === 'error') toast(u.message || '업데이트 확인 실패', 'error');
+  renderUpdate();
+}
+$('#btn-update-now').addEventListener('click', async () => {
+  if (S.rec !== 'idle') return toast('녹음을 마친 뒤에 적용할 수 있어요', 'error');
+  try { await api.invoke('install_update'); } catch (e) { toast(String(e), 'error'); }
+});
+$('#btn-update-later').addEventListener('click', () => { S.updateDismissed = true; renderUpdate(); });
+$('#btn-check-update').addEventListener('click', async (e) => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  b.textContent = '확인 중…';
+  try {
+    const v = await api.invoke('check_update');
+    if (v) { S.updateDismissed = false; toast(`새 버전 v${v}를 받았어요. 위의 '지금 적용'을 누르세요.`); closePanels(); }
+    else toast(`최신 버전이에요 (v${S.app.version})`);
+  } catch (err) { toast(String(err), 'error'); }
+  b.disabled = false;
+  b.textContent = '업데이트 확인';
+});
 
 /* 설정 */
+// [입력 칸 id, 저장 이름, get_state keys 필드]
+const KEY_INPUTS = [
+  ['key-openai', 'openai', 'openai'], ['key-openai-llm', 'openai', 'openai'],
+  ['key-groq', 'groq', 'groq'], ['key-groq-llm', 'groq', 'groq'],
+  ['key-custom', 'custom', 'custom'], ['key-anthropic', 'anthropic', 'anthropic'],
+  ['key-gemini', 'gemini', 'gemini'], ['key-llm-custom', 'llm-custom', 'llmCustom'],
+];
 const saveSettings = debounce(async () => {
   try {
     await api.invoke('save_settings', { settings: S.settings });
@@ -673,7 +999,7 @@ function renderSettings() {
   $('#opt-groq-model').value = s.groqModel;
   $('#opt-custom-url').value = s.customUrl;
   $('#opt-custom-model').value = s.customModel;
-  for (const [k, id] of [['openai', 'key-openai'], ['groq', 'key-groq'], ['custom', 'key-custom'], ['anthropic', 'key-anthropic'], ['llmCustom', 'key-llm-custom']]) {
+  for (const [k, id] of KEY_INPUTS.map(([id, , k]) => [k, id])) {
     const el = $(`#${id}`);
     el.value = '';
     el.placeholder = S.app.keys[k] ? '●●●●●●●● (저장됨 · 바꾸려면 입력)' : el.dataset.ph || el.placeholder;
@@ -696,8 +1022,11 @@ function renderSettings() {
 
   setSeg('seg-llm', s.summary.provider);
   $$('[data-llm]').forEach((el) => (el.hidden = el.dataset.llm !== s.summary.provider));
+  $('#llm-desc').innerHTML = (LLM_DESC[s.summary.provider] || '') + (['ollama', 'custom'].includes(s.summary.provider) ? '' : LLM_PRIVACY);
   $('#opt-ollama-url').value = s.summary.ollamaUrl;
   $('#opt-ollama-model').value = s.summary.ollamaModel;
+  $('#opt-llm-groq-model').value = s.summary.groqModel;
+  $('#opt-llm-gemini-model').value = s.summary.geminiModel;
   $('#opt-llm-openai-model').value = s.summary.openaiModel;
   $('#opt-anthropic-model').value = s.summary.anthropicModel;
   $('#opt-llm-custom-url').value = s.summary.customUrl;
@@ -708,6 +1037,7 @@ function renderSettings() {
   $('#opt-autostart').checked = S.app.autostart;
   $('#opt-audio').checked = s.saveAudio;
   $('#opt-unload').checked = s.unloadWhenIdle;
+  $('#opt-autoupdate').checked = s.autoUpdate;
   $('#opt-theme').value = s.theme;
   $('#app-version').textContent = `v${S.app.version}`;
 }
@@ -766,7 +1096,7 @@ function bindSeg(id, apply) {
   });
 }
 bindSeg('seg-engine', (v) => (S.settings.engine = v));
-bindSeg('seg-llm', (v) => (S.settings.summary.provider = v));
+bindSeg('seg-llm', (v) => { S.settings.summary.provider = v; $('#llm-models').innerHTML = ''; });
 
 function bind(id, fn, ev = 'change') { $(`#${id}`).addEventListener(ev, (e) => { fn(e.target); saveSettings(); }); }
 bind('opt-beam', (t) => (S.settings.beamSize = t.checked ? 3 : 1));
@@ -782,6 +1112,8 @@ bind('opt-lang', (t) => (S.settings.language = t.value));
 bind('opt-glossary', (t) => (S.settings.glossary = t.value));
 bind('opt-ollama-url', (t) => (S.settings.summary.ollamaUrl = t.value.trim()));
 bind('opt-ollama-model', (t) => (S.settings.summary.ollamaModel = t.value.trim()));
+bind('opt-llm-groq-model', (t) => (S.settings.summary.groqModel = t.value.trim()));
+bind('opt-llm-gemini-model', (t) => (S.settings.summary.geminiModel = t.value.trim()));
 bind('opt-llm-openai-model', (t) => (S.settings.summary.openaiModel = t.value.trim()));
 bind('opt-anthropic-model', (t) => (S.settings.summary.anthropicModel = t.value.trim()));
 bind('opt-llm-custom-url', (t) => (S.settings.summary.customUrl = t.value.trim()));
@@ -789,10 +1121,11 @@ bind('opt-llm-custom-model', (t) => (S.settings.summary.customModel = t.value.tr
 bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
 bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
 bind('opt-unload', (t) => (S.settings.unloadWhenIdle = t.checked));
+bind('opt-autoupdate', (t) => (S.settings.autoUpdate = t.checked));
 bind('opt-theme', (t) => { S.settings.theme = t.value; applyTheme(); });
 $('#opt-autostart').addEventListener('change', (e) => call('set_autostart', { enabled: e.target.checked }).then(() => (S.app.autostart = e.target.checked)));
 
-for (const [id, name] of [['key-openai', 'openai'], ['key-groq', 'groq'], ['key-custom', 'custom'], ['key-anthropic', 'anthropic'], ['key-llm-custom', 'llm-custom']]) {
+for (const [id, name] of KEY_INPUTS) {
   $(`#${id}`).addEventListener('change', async (e) => {
     const v = e.target.value.trim();
     if (!v) return;
@@ -803,6 +1136,20 @@ for (const [id, name] of [['key-openai', 'openai'], ['key-groq', 'groq'], ['key-
     toast('API 키를 안전하게 저장했어요');
   });
 }
+
+$('#btn-test-llm').addEventListener('click', async (e) => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  b.textContent = '확인 중…';
+  try {
+    await new Promise((r) => setTimeout(r, 300)); // 방금 바꾼 설정이 저장되도록
+    const models = await api.invoke('list_llm_models');
+    $('#llm-models').innerHTML = models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+    toast(models.length ? `연결 성공 · 모델 ${models.length}개 (모델 칸을 눌러 고를 수 있어요)` : '연결 성공');
+  } catch (err) { toast(String(err), 'error'); }
+  b.disabled = false;
+  b.textContent = '연결 확인 · 모델 목록 불러오기';
+});
 
 $('#btn-test').addEventListener('click', async (e) => {
   const b = e.currentTarget;
@@ -854,7 +1201,13 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://rec', (e) => onRec(e.payload));
   await api.listen('bd://download', (e) => onDownload(e.payload));
   await api.listen('bd://toast', (e) => toast(String(e.payload), 'error'));
+  await api.listen('bd://paused', (e) => onPaused(!!e.payload));
+  await api.listen('bd://update', (e) => onUpdate(e.payload));
   await refreshState();
+  $('#drop-exts').textContent = exts().join(' · ');
+  renderUpdate();
+  if (S.app.hotkeyError) setTimeout(() => toast(S.app.hotkeyError, 'warn'), 600);
+  if (S.app.updatedFrom) toast(`v${S.app.version}(으)로 업데이트했어요`);
   if (S.app.demo) loadDemo();
   if (S.app.downloading) S.downloads[S.app.downloading] = { done: 0, total: 1 };
   renderDock();
@@ -905,7 +1258,8 @@ function createMock() {
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true },
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', alwaysOnTop: false, theme: 'system',
-      summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
+      autoUpdate: true, lastVersion: '',
+      summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
     },
     rec: 'idle',
     models: [
@@ -914,8 +1268,10 @@ function createMock() {
       { id: 'medium-q5_0', label: 'Medium (q5)', note: '중간 사양 PC', size: 539212467, ready: false },
     ],
     customModels: [], speakerModelReady: true,
-    keys: { openai: false, groq: false, custom: false, anthropic: false, llmCustom: false },
-    autostart: false, version: '0.1.0', current: null, elapsedMs: 0,
+    keys: { openai: false, groq: false, custom: false, anthropic: false, gemini: false, llmCustom: false },
+    autostart: false, version: '0.2.0', current: null, elapsedMs: 0,
+    paused: false, fileMode: false, update: null, updatedFrom: null,
+    audioExts: ['wav', 'mp3', 'm4a', 'mp4', 'mov', 'aac', 'flac', 'ogg', 'oga'],
     demo: new URLSearchParams(location.search).has('demo'),
   };
   return {
@@ -923,6 +1279,7 @@ function createMock() {
       if (cmd === 'get_state') return st;
       if (cmd === 'save_settings') { st.settings = args.settings; return; }
       if (cmd === 'list_devices') return [{ id: 'mic1', name: '마이크(Realtek Audio)', isDefault: true }];
+      if (cmd === 'search_sessions') return [];
       if (cmd === 'list_sessions') return [{ id: 'demo', title: '앱 출시 일정 회의', startedAt: '2026-11-12 14:30', durationMs: 61000, count: 7, speakers: 3, preview: '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.' }];
       if (cmd === 'load_session') return demoDoc();
       if (cmd === 'session_text') return '데모';
@@ -932,6 +1289,7 @@ function createMock() {
     listen: async (ev, fn) => { handlers[ev] = fn; },
     win: { minimize() {}, hide() {} },
     save: async () => null,
+    open: async () => null,
     ask: async (m) => confirm(m),
   };
 }
