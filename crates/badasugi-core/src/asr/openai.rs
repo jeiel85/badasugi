@@ -58,6 +58,8 @@ impl ApiTranscriber {
             rb = rb.bearer_auth(&self.api_key);
         }
         let resp = rb.send()?;
+        // 공급자가 알려 주는 남은 한도 (설정 › API 사용량)
+        crate::usage::record_headers(&self.url, resp.headers());
         let status = resp.status();
         let body = resp.text()?;
         if !status.is_success() {

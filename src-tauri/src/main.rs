@@ -9,6 +9,7 @@ mod snap;
 mod status;
 mod summary;
 mod update;
+mod usage_book;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -65,6 +66,8 @@ pub(crate) struct AppState {
     pub file_pct: AtomicUsize,
     /// 이번 녹음에서 자동 저장 실패를 이미 알렸나 (한 번만 알림)
     save_warned: AtomicBool,
+    /// 지금 녹음이 쓰는 음성 인식 API 공급자 (로컬이면 None) — 사용량 집계용
+    api_provider: Mutex<Option<&'static str>>,
     /// 화면 스크립트가 끝까지 실행돼 준비됐는지 (자동 점검이 확인)
     pub ui_ready: AtomicBool,
     /// 녹음 중 지금 위치 (ms) — 다시 듣기 구간을 녹음 시간축에 맞추는 데 쓴다
@@ -461,6 +464,10 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> CmdResult<Pipeline> {
         let s = st.settings.lock().clone();
         let engine = build_engine(&s, &st.paths)?;
+        *st.api_provider.lock() = match &engine {
+            EngineConfig::Api { base_url, .. } => Some(badasugi_core::usage::provider_of(base_url)),
+            _ => None,
+        };
         let mut doc = SessionDoc::new(engine.label());
         if let Some(f) = file {
             let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("오디오 파일").to_string();
@@ -622,6 +629,19 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 }
             }
         }
+        Event::Pending { start_ms, end_ms, .. } => {
+            let provider = *st.api_provider.lock();
+            if let Some(p) = provider {
+                app.state::<usage_book::UsageBook>()
+                    .stt(p, end_ms.saturating_sub(*start_ms) as f64 / 1000.0);
+            }
+        }
+        Event::Failed { .. } => {
+            let provider = *st.api_provider.lock();
+            if let Some(p) = provider {
+                app.state::<usage_book::UsageBook>().stt_failed(p);
+            }
+        }
         Event::Progress { done_ms, total_ms } if *total_ms > 0 => {
             let pct = (done_ms * 100 / total_ms).min(100) as usize + 1;
             if st.file_pct.swap(pct, Ordering::SeqCst) != pct {
@@ -690,6 +710,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 }
             }
             *st.rec_started.lock() = None;
+            app.state::<usage_book::UsageBook>().save();
             if st.settings.lock().unload_when_idle {
                 badasugi_core::asr::whisper::unload();
             }
@@ -892,6 +913,11 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
         .await
         .map_err(err)?
         .map_err(err)?;
+    {
+        let book = app.state::<usage_book::UsageBook>();
+        book.summary(&sum.provider, sum.in_tokens, sum.out_tokens);
+        book.save();
+    }
     // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
     let loaded = st.store.lock().load(&id);
     let mut latest = loaded.unwrap_or(doc2);
@@ -1069,6 +1095,14 @@ fn on_display_change(app: &AppHandle) {
 }
 
 /// 화면 스크립트가 시작을 끝냈다는 신호 (스크립트 오류로 화면이 비면 오지 않는다)
+/// 설정 › API 사용량: 이 앱으로 쓴 양(오늘 · 이번 달) + 공급자가 알려 준 남은 한도
+#[tauri::command]
+fn get_usage(app: AppHandle) -> usage_book::UsageReport {
+    let book = app.state::<usage_book::UsageBook>();
+    book.save();
+    book.report()
+}
+
 #[tauri::command]
 fn ui_ready(app: AppHandle) {
     app.state::<AppState>().ui_ready.store(true, Ordering::SeqCst);
@@ -1346,6 +1380,7 @@ fn main() {
                 ),
             };
             let settings_path = config_dir.join("settings.json");
+            let config_dir_for_usage = config_dir.clone();
             let mut settings = Settings::load(&settings_path);
             if smoke {
                 settings.save_audio = true;
@@ -1383,6 +1418,7 @@ fn main() {
                 file_mode: AtomicBool::new(false),
                 file_pct: AtomicUsize::new(0),
                 save_warned: AtomicBool::new(false),
+                api_provider: Mutex::new(None),
                 ui_ready: AtomicBool::new(false),
                 live_pos_ms: AtomicU64::new(0),
                 echo: Mutex::new(Vec::new()),
@@ -1395,6 +1431,7 @@ fn main() {
                 quit_after_stop: AtomicBool::new(false),
             });
             app.manage(Updates::default());
+            app.manage(usage_book::UsageBook::load(config_dir_for_usage.join("usage.json")));
             app.manage(status::Status::new(tray_base));
             log::info!(
                 "받아쓰기 {} 시작 — 엔진 {}, 모델 {}, 언어 {}, 입력 {:?}, 화자 구분 {}, 녹음 저장 {}, 미니 창 {}{}",
@@ -1481,6 +1518,7 @@ fn main() {
             set_mini,
             set_playback,
             ui_ready,
+            get_usage,
             open_folder,
             open_url,
             quit_app,

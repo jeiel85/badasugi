@@ -1378,6 +1378,68 @@ function renderSettings() {
   $('#opt-autoupdate').checked = s.autoUpdate;
   $('#opt-theme').value = s.theme;
   $('#app-version').textContent = `v${S.app.version}`;
+  renderUsage();
+}
+
+/* API 사용량 */
+const PROVIDER = {
+  groq: { name: 'Groq', url: 'https://console.groq.com/docs/rate-limits', link: '한도 안내 ↗' },
+  openai: { name: 'OpenAI', url: 'https://platform.openai.com/usage', link: '사용량 · 잔액 ↗' },
+  anthropic: { name: 'Claude', url: 'https://console.anthropic.com/settings/usage', link: '사용량 · 잔액 ↗' },
+  gemini: { name: 'Gemini', url: 'https://aistudio.google.com/apikey', link: '키 · 사용량 ↗' },
+  custom: { name: '사용자 지정 서버', url: '', link: '' },
+};
+const LIMIT_LABEL = { requests: '요청', tokens: '토큰', 'input-tokens': '입력 토큰', 'output-tokens': '출력 토큰', 'audio-seconds': '오디오(초)' };
+const n0 = (v) => Number(v || 0).toLocaleString('ko-KR');
+function minutes(secs) { return secs >= 60 ? `${(secs / 60).toFixed(1)}분` : `${Math.round(secs)}초`; }
+function tallyText(t) {
+  if (!t) return '없음';
+  const parts = [];
+  if (t.sttRequests) parts.push(`음성 인식 ${minutes(t.sttSecs)} (${n0(t.sttRequests)}회${t.sttFailures ? ` · 실패 ${n0(t.sttFailures)}` : ''})`);
+  if (t.sumRequests) parts.push(`요약 ${n0(t.sumRequests)}회 (토큰 ${n0(t.sumInTokens)} / ${n0(t.sumOutTokens)})`);
+  return parts.join(' · ') || '없음';
+}
+// 응답 헤더 → "요청 1,999 / 2,000 남음 · 토큰 … (3분 전, 재설정 7.2s)"
+function limitsText(rate) {
+  if (!rate) return '';
+  const g = {};
+  let retry = '';
+  for (const [k, v] of rate.items) {
+    let m = k.match(/^x-ratelimit-(limit|remaining|reset)-(.+)$/);
+    if (!m) { const a = k.match(/^anthropic-ratelimit-(.+)-(limit|remaining|reset)$/); if (a) m = [k, a[2], a[1]]; }
+    if (m) (g[m[2]] = g[m[2]] || {})[m[1]] = v;
+    else if (k === 'retry-after') retry = v;
+  }
+  const parts = Object.entries(g).filter(([, x]) => x.remaining != null).map(([name, x]) =>
+    `${LIMIT_LABEL[name] || name} ${n0(x.remaining)}${x.limit ? ` / ${n0(x.limit)}` : ''} 남음${x.reset ? ` (재설정 ${x.reset})` : ''}`);
+  if (retry) parts.push(`한도 초과 — ${retry}초 뒤 다시`);
+  if (!parts.length) return '';
+  const ago = Math.max(0, Math.round(Date.now() / 1000 - rate.at));
+  const when = ago < 60 ? '방금' : ago < 3600 ? `${Math.round(ago / 60)}분 전` : `${Math.round(ago / 3600)}시간 전`;
+  return `${parts.join(' · ')} <small>(${when} 기준)</small>`;
+}
+async function renderUsage() {
+  const box = $('#usage-box');
+  if (!box) return;
+  let r;
+  try { r = await api.invoke('get_usage'); } catch { r = null; }
+  if (!r) { box.innerHTML = '<div class="usage-empty">사용량을 불러오지 못했어요</div>'; return; }
+  const ids = [...new Set([...Object.keys(r.month || {}), ...Object.keys(r.today || {}), ...(r.rates || []).map((x) => x.provider)])];
+  if (!ids.length) {
+    box.innerHTML = '<div class="usage-empty">아직 API 를 쓴 기록이 없어요. 로컬 엔진과 Ollama 는 사용량이 없어요.</div>';
+    return;
+  }
+  box.innerHTML = ids.map((id) => {
+    const p = PROVIDER[id] || { name: id, url: '', link: '' };
+    const rate = (r.rates || []).find((x) => x.provider === id);
+    const lim = limitsText(rate);
+    return `<div class="usage-card">
+      <div class="usage-head"><b>${esc(p.name)}</b>${p.url ? `<button class="link" data-url="${p.url}">${esc(p.link)}</button>` : ''}</div>
+      <div class="usage-row"><span>오늘</span><span>${esc(tallyText(r.today?.[id]))}</span></div>
+      <div class="usage-row"><span>이번 달</span><span>${esc(tallyText(r.month?.[id]))}</span></div>
+      ${lim ? `<div class="usage-row"><span>남은 한도</span><span>${lim}</span></div>` : ''}
+    </div>`;
+  }).join('');
 }
 
 function renderModels() {
@@ -1532,6 +1594,7 @@ $('#btn-github').addEventListener('click', () => call('open_url', { url: 'https:
 $('#btn-folder-sessions').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
 $('#btn-folder-models').addEventListener('click', () => call('open_folder', { kind: 'models' }));
 $('#btn-folder-logs').addEventListener('click', () => call('open_folder', { kind: 'logs' }));
+$('#btn-usage-refresh').addEventListener('click', () => renderUsage());
 $('#btn-quit').addEventListener('click', () => call('quit_app'));
 
 /* ───────────── 시작 ───────────── */
@@ -1642,6 +1705,11 @@ function createMock() {
       if (cmd === 'save_settings') { st.settings = args.settings; return; }
       if (cmd === 'list_devices') return [{ id: 'mic1', name: '마이크(Realtek Audio)', isDefault: true }];
       if (cmd === 'search_sessions') return [];
+      if (cmd === 'get_usage') return {
+        today: { groq: { sttSecs: 754, sttRequests: 96, sttFailures: 1, sumRequests: 1, sumInTokens: 4210, sumOutTokens: 612 } },
+        month: { groq: { sttSecs: 9120, sttRequests: 1180, sttFailures: 3, sumRequests: 9, sumInTokens: 38120, sumOutTokens: 5410 }, gemini: { sttSecs: 0, sttRequests: 0, sttFailures: 0, sumRequests: 2, sumInTokens: 15200, sumOutTokens: 1900 } },
+        rates: [{ provider: 'groq', at: Math.floor(Date.now() / 1000) - 180, items: [['x-ratelimit-limit-requests', '2000'], ['x-ratelimit-remaining-requests', '1904'], ['x-ratelimit-reset-requests', '1h9m7.2s'], ['x-ratelimit-limit-tokens', '6000'], ['x-ratelimit-remaining-tokens', '5560'], ['x-ratelimit-reset-tokens', '4.4s']] }],
+      };
       if (cmd === 'session_audio') return demoWavUrl();
       if (cmd === 'set_mini') { st.settings.miniMode = args.mini; handlers['bd://mini'] && handlers['bd://mini']({ payload: args.mini }); return; }
       if (cmd === 'list_sessions') return [{ id: 'demo', title: '앱 출시 일정 회의', startedAt: '2026-11-12 14:30', durationMs: 61000, count: 7, speakers: 3, preview: '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.' }];

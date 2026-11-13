@@ -31,10 +31,14 @@ const OPENAI_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2026-10-21";
 
-/// 요약 결과: 본문 + (모델이 제안한) 회의 제목
+/// 요약 결과: 본문 + (모델이 제안한) 회의 제목 + 사용량 (설정 › API 사용량)
 pub struct Summary {
     pub text: String,
     pub title: Option<String>,
+    /// "groq" · "gemini" · "openai" · "anthropic" · "custom" · "ollama"
+    pub provider: String,
+    pub in_tokens: u64,
+    pub out_tokens: u64,
 }
 
 fn transcript_prompt(doc: &SessionDoc) -> String {
@@ -94,18 +98,28 @@ pub fn summarize(cfg: &SummarySettings, doc: &SessionDoc) -> Result<Summary> {
         bail!("요약할 내용이 없습니다");
     }
     let user = transcript_prompt(doc);
-    let raw = match cfg.provider.as_str() {
-        "ollama" => ollama(cfg, &user)?,
-        "anthropic" => anthropic(cfg, &user)?,
+    let (raw, provider, in_tokens, out_tokens) = match cfg.provider.as_str() {
+        "ollama" => (ollama(cfg, &user)?, "ollama".to_string(), 0, 0),
+        "anthropic" => {
+            let (t, i, o) = anthropic(cfg, &user)?;
+            (t, "anthropic".to_string(), i, o)
+        }
         _ => match openai_like(cfg)? {
-            Some((base, key, model)) => openai_compat(&base, key.as_deref(), &model, &user)?,
+            Some((base, key, model)) => {
+                let (t, i, o) = openai_compat(&base, key.as_deref(), &model, &user)?;
+                (t, badasugi_core::usage::provider_of(&base).to_string(), i, o)
+            }
             None => bail!("알 수 없는 요약 제공자: {}", cfg.provider),
         },
     };
     if raw.trim().is_empty() {
         bail!("요약 결과가 비어 있습니다");
     }
-    Ok(split_title(&raw))
+    let mut out = split_title(&raw);
+    out.provider = provider;
+    out.in_tokens = in_tokens;
+    out.out_tokens = out_tokens;
+    Ok(out)
 }
 
 /// 맨 앞 "### 제목" 섹션을 떼어 제목으로 쓴다
@@ -147,6 +161,9 @@ fn split_title(raw: &str) -> Summary {
     Summary {
         text: rest.join("\n").trim().to_string(),
         title,
+        provider: String::new(),
+        in_tokens: 0,
+        out_tokens: 0,
     }
 }
 
@@ -183,7 +200,8 @@ fn ollama(cfg: &SummarySettings, user: &str) -> Result<String> {
     Ok(v["message"]["content"].as_str().unwrap_or_default().trim().to_string())
 }
 
-fn openai_compat(base: &str, key: Option<&str>, model: &str, user: &str) -> Result<String> {
+/// (본문, 입력 토큰, 출력 토큰)
+fn openai_compat(base: &str, key: Option<&str>, model: &str, user: &str) -> Result<(String, u64, u64)> {
     if base.trim().is_empty() {
         bail!("요약 API 주소를 입력해 주세요");
     }
@@ -203,6 +221,7 @@ fn openai_compat(base: &str, key: Option<&str>, model: &str, user: &str) -> Resu
         rb = rb.bearer_auth(k);
     }
     let resp = rb.send()?;
+    badasugi_core::usage::record_headers(&url, resp.headers());
     let status = resp.status();
     let text = resp.text()?;
     if !status.is_success() {
@@ -212,11 +231,13 @@ fn openai_compat(base: &str, key: Option<&str>, model: &str, user: &str) -> Resu
     if v["choices"][0]["finish_reason"].as_str() == Some("content_filter") {
         bail!("모델이 요약을 거절했습니다 (콘텐츠 필터)");
     }
-    Ok(v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .trim()
-        .to_string())
+    let body = v["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string();
+    let usage = &v["usage"];
+    Ok((
+        body,
+        usage["prompt_tokens"].as_u64().unwrap_or(0),
+        usage["completion_tokens"].as_u64().unwrap_or(0),
+    ))
 }
 
 /// 서버측 거절 폴백을 지원하는 모델
@@ -231,7 +252,8 @@ fn anthropic_key() -> Result<String> {
     get_key("anthropic").ok_or_else(|| anyhow!("Anthropic API 키를 설정 › AI 요약에서 입력해 주세요"))
 }
 
-fn anthropic(cfg: &SummarySettings, user: &str) -> Result<String> {
+/// (본문, 입력 토큰, 출력 토큰)
+fn anthropic(cfg: &SummarySettings, user: &str) -> Result<(String, u64, u64)> {
     let key = anthropic_key()?;
     let model = if cfg.anthropic_model.trim().is_empty() {
         "claude-opus-5-5"
@@ -256,6 +278,7 @@ fn anthropic(cfg: &SummarySettings, user: &str) -> Result<String> {
         rb = rb.header("anthropic-beta", "server-side-fallback-2026-07-01");
     }
     let resp = rb.json(&body).send()?;
+    badasugi_core::usage::record_headers(ANTHROPIC_URL, resp.headers());
     let status = resp.status();
     let text = resp.text()?;
     if !status.is_success() {
@@ -276,7 +299,12 @@ fn anthropic(cfg: &SummarySettings, user: &str) -> Result<String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(out.join("").trim().to_string())
+    let usage = &v["usage"];
+    Ok((
+        out.join("").trim().to_string(),
+        usage["input_tokens"].as_u64().unwrap_or(0),
+        usage["output_tokens"].as_u64().unwrap_or(0),
+    ))
 }
 
 /// 연결 확인 겸 사용할 수 있는 모델 목록 (설정 화면 자동 완성용)

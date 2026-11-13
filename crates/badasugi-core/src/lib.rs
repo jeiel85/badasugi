@@ -14,6 +14,7 @@ pub mod pipeline;
 pub mod resample;
 pub mod speaker;
 pub mod text;
+pub mod usage;
 pub mod vad;
 pub mod wav;
 
