@@ -3,13 +3,17 @@
 //! | 상태 | 트레이 아이콘 점 | 작업 표시줄 |
 //! |---|---|---|
 //! | 대기 | 없음 | 없음 |
-//! | 새 버전 준비됨 (대기 중) | 초록 점 | 없음 |
+//! | 새 버전 준비됨 (대기 중) | 초록 점 | 초록 배지 |
 //! | 시작 중 · 정리 중 | 파란 고리 | 파란 배지 (정리 중엔 흐르는 막대) |
 //! | 녹음 중 | 빨간 점 | 빨간 배지 |
 //! | 일시정지 | 노란 점 + 멈춤 표시 | 노란 배지 |
 //! | 파일 받아쓰기 | 파란 고리 | 진행 막대 (일시정지면 노란 막대) |
 //!
 //! 툴팁에는 녹음 경과 시간 · 파일 진행률을 1초마다 보여 준다.
+//!
+//! 창을 숨기면(트레이로) 작업 표시줄 단추가 없어지면서 배지 · 진행 막대도 함께 지워지고,
+//! 다시 보일 때 새로 생긴 단추는 비어 있다(tao 가 다시 얹어 주지 않음). 그래서 창을 보일 때마다
+//! [`reapply_taskbar`] 로 지금 상태를 다시 얹는다.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -90,8 +94,11 @@ fn overlay(color: [u8; 3], glyph: Glyph) -> Image<'static> {
 }
 
 struct Last {
-    kind: Option<Kind>,
+    /// 트레이 아이콘에 마지막으로 그린 상태
+    tray: Option<Kind>,
     tip: String,
+    /// 작업 표시줄 단추에 마지막으로 얹은 상태 (None = 다시 얹어야 함)
+    bar: Option<Kind>,
     progress: Option<u64>,
 }
 
@@ -101,6 +108,7 @@ pub struct Status {
     busy: Image<'static>,
     rec: Image<'static>,
     paused: Image<'static>,
+    badge_update: Image<'static>,
     badge_busy: Image<'static>,
     badge_rec: Image<'static>,
     badge_paused: Image<'static>,
@@ -115,12 +123,14 @@ impl Status {
             rec: tray_icon(&base, RED, Glyph::Solid),
             paused: tray_icon(&base, AMBER, Glyph::Pause),
             idle: base,
+            badge_update: overlay(GREEN, Glyph::Solid),
             badge_busy: overlay(BLUE, Glyph::Ring),
             badge_rec: overlay(RED, Glyph::Solid),
             badge_paused: overlay(AMBER, Glyph::Pause),
             last: Mutex::new(Last {
-                kind: None,
+                tray: None,
                 tip: String::new(),
+                bar: None,
                 progress: None,
             }),
         }
@@ -180,16 +190,22 @@ pub fn refresh(app: &AppHandle) {
 
     // 바뀐 것만 고르고 잠금은 바로 푼다. 트레이·창 호출은 메인 스레드가 아닌 곳에서 부르면 메인 스레드를 기다리는데,
     // 잠금을 쥔 채 기다리면 같은 잠금을 기다리는 메인 스레드와 서로 멈춘다(교착).
-    let (kind_changed, tip_changed, progress_changed) = {
+    let (tray_changed, tip_changed, bar_changed, progress_changed) = {
         let mut last = status.last.lock();
-        let changed = (last.kind != Some(kind), last.tip != tip, last.progress != progress);
-        last.kind = Some(kind);
+        let changed = (
+            last.tray != Some(kind),
+            last.tip != tip,
+            last.bar != Some(kind),
+            last.progress != progress,
+        );
+        last.tray = Some(kind);
         last.tip = tip.clone();
+        last.bar = Some(kind);
         last.progress = progress;
         changed
     };
     if let Some(tray) = app.tray_by_id("main") {
-        if kind_changed {
+        if tray_changed {
             let icon = match kind {
                 Kind::Idle => &status.idle,
                 Kind::Update => &status.update,
@@ -204,17 +220,19 @@ pub fn refresh(app: &AppHandle) {
         }
     }
     if let Some(w) = app.get_webview_window("main") {
-        if kind_changed {
+        if bar_changed {
             let badge = match kind {
                 Kind::Rec => Some(status.badge_rec.clone()),
                 Kind::Paused => Some(status.badge_paused.clone()),
                 Kind::Busy => Some(status.badge_busy.clone()),
+                // 미니 창에선 업데이트 배너가 보이지 않으니 작업 표시줄에도 트레이와 같은 초록 점
+                Kind::Update => Some(status.badge_update.clone()),
                 // 파일은 진행 막대로 보여 준다
-                Kind::File | Kind::Idle | Kind::Update => None,
+                Kind::File | Kind::Idle => None,
             };
             let _ = w.set_overlay_icon(badge);
         }
-        if kind_changed || progress_changed {
+        if bar_changed || progress_changed {
             let state = match (kind, rec) {
                 (_, RecState::Stopping) => ProgressBarState {
                     status: Some(ProgressBarStatus::Indeterminate),
@@ -236,6 +254,15 @@ pub fn refresh(app: &AppHandle) {
             let _ = w.set_progress_bar(state);
         }
     }
+}
+
+/// 창을 다시 보일 때 부른다 — 숨기는 동안 지워진 작업 표시줄 배지 · 진행 막대를 지금 상태로 다시 얹는다
+pub fn reapply_taskbar(app: &AppHandle) {
+    if let Some(status) = app.try_state::<Status>() {
+        // 단추에 얹은 상태만 잊으면 다음 refresh 가 배지 · 진행 막대를 모두 다시 얹는다
+        status.last.lock().bar = None;
+    }
+    refresh(app);
 }
 
 /// 녹음 중에는 1초마다 툴팁의 경과 시간을 고친다
@@ -272,6 +299,7 @@ mod tests {
             ("6badge_busy", &s.badge_busy),
             ("7badge_rec", &s.badge_rec),
             ("8badge_paused", &s.badge_paused),
+            ("9badge_update", &s.badge_update),
         ] {
             std::fs::write(format!("{dir}/{name}_{}.rgba", img.width()), img.rgba()).unwrap();
         }
