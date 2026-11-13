@@ -140,6 +140,27 @@ pub fn is_wrong_script(s: &str, lang: &str) -> bool {
     hangul == 0 && latin >= 3
 }
 
+/// 다시 듣기 메아리: `candidate` 의 글자쌍(띄어쓰기·문장부호 제외) 중 방금 재생한 문장들에 들어 있는 비율 (0~1).
+///
+/// 녹음 중 다시 들은 소리가 스피커·시스템 소리로 다시 녹음돼 받아 적힌 문장을 골라내는 데 쓴다.
+/// 두 번째 인식이 조금 달라도(띄어쓰기·조사) 높게 나오고, 실제 회의 말이 섞이면 낮아진다.
+pub fn echo_ratio(candidate: &str, played: &[String]) -> f32 {
+    fn bigrams(s: &str) -> Vec<(char, char)> {
+        let chars: Vec<char> = s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect();
+        chars.windows(2).map(|w| (w[0], w[1])).collect()
+    }
+    let cand = bigrams(candidate);
+    if cand.len() < 2 {
+        return 0.0;
+    }
+    let pool: std::collections::HashSet<(char, char)> = played.iter().flat_map(|p| bigrams(p)).collect();
+    if pool.is_empty() {
+        return 0.0;
+    }
+    let hit = cand.iter().filter(|b| pool.contains(b)).count();
+    hit as f32 / cand.len() as f32
+}
+
 pub fn is_degenerate(s: &str) -> bool {
     let parts = sentences(s);
     for w in parts.windows(2) {
@@ -197,6 +218,21 @@ fn collapse_repeats(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn echo_of_replayed_sentence_is_recognised() {
+        let played = vec!["금요일까지 배포가 가능할 것 같습니다.".to_string(), "좋습니다.".to_string()];
+        // 다시 들은 소리를 또 받아 적은 것 (띄어쓰기·끝맺음이 조금 달라도)
+        assert!(echo_ratio("금요일까지 배포가 가능할 것 같습니다", &played) > 0.95);
+        assert!(echo_ratio("금요일까지 배포 가능할 것 같아요.", &played) > 0.6);
+        // 실제 회의 말은 낮다
+        assert!(echo_ratio("그럼 다음 안건으로 넘어가겠습니다.", &played) < 0.3);
+        // 메아리와 실제 말이 섞이면 절반쯤 → 지우지 않는다
+        assert!(echo_ratio("금요일까지 배포요? 그건 다음 회의에서 다시 정하죠.", &played) < 0.6);
+        // 너무 짧으면 판단하지 않는다
+        assert_eq!(echo_ratio("네", &played), 0.0);
+        assert_eq!(echo_ratio("좋습니다.", &[]), 0.0);
+    }
 
     #[test]
     fn repeated_short_utterance_is_fixed_by_clean() {

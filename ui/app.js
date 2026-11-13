@@ -1063,6 +1063,14 @@ function renderPlayer() {
   if (!P.seeking) $('#pl-seek').value = dur ? Math.round((audio.currentTime / dur) * 1000) : 0;
   $('#pl-rate').textContent = `${audio.playbackRate}×`;
 }
+// 녹음 중에 다시 들으면, 재생하는 문장을 백엔드에 알려 그 소리가 다시 받아 적히면 버리게 한다
+function notePlayback(playing, u) {
+  if (!P.live) return;
+  if (playing && u && P.notedId === u.id) return;
+  if (playing && u) P.notedId = u.id;
+  if (!playing) P.notedId = null;
+  api.invoke('set_playback', { playing, texts: playing && u ? [u.text] : [] }).catch(() => {});
+}
 function markPlaying(follow) {
   $$('#transcript .u.playing').forEach((el) => el.classList.remove('playing'));
   const d = doc();
@@ -1072,6 +1080,7 @@ function markPlaying(follow) {
   const el = u && $(`#transcript .u[data-id="${u.id}"]`);
   if (!el) return;
   el.classList.add('playing');
+  if (!audio.paused) notePlayback(true, u);
   // 이어 듣는 중이면 지금 문장이 보이게 따라간다
   if (follow && P.followId !== u.id) {
     P.followId = u.id;
@@ -1112,12 +1121,13 @@ async function playUtterance(id) {
   P.wantPlay = false;
   P.gen++;
   await ensureFresh(u.endMs / 1000 + 0.3);
+  notePlayback(true, u);
   audio.currentTime = Math.max(0, u.startMs / 1000 - 0.15);
   P.until = u.endMs / 1000 + 0.2;
   audio.play().catch((e) => toast(`재생할 수 없어요: ${e.message || e}`, 'error'));
 }
 audio.addEventListener('play', () => { P.started = true; cancelAnimationFrame(P.raf); P.raf = requestAnimationFrame(tick); });
-audio.addEventListener('pause', () => { renderPlayer(); markPlaying(false); });
+audio.addEventListener('pause', () => { renderPlayer(); markPlaying(false); notePlayback(false); });
 audio.addEventListener('timeupdate', checkUntil); // 창이 숨겨져 rAF 가 멈춰도 문장 끝에서 멈추게
 audio.addEventListener('loadedmetadata', renderPlayer);
 audio.addEventListener('ended', async () => {

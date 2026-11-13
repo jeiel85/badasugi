@@ -9,7 +9,7 @@ mod summary;
 mod update;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -63,6 +63,10 @@ pub(crate) struct AppState {
     pub file_pct: AtomicUsize,
     /// 이번 녹음에서 자동 저장 실패를 이미 알렸나 (한 번만 알림)
     save_warned: AtomicBool,
+    /// 녹음 중 지금 위치 (ms) — 다시 듣기 구간을 녹음 시간축에 맞추는 데 쓴다
+    live_pos_ms: AtomicU64,
+    /// 녹음 중 다시 들은 구간들 (그 소리가 다시 받아 적히면 버린다)
+    echo: Mutex<Vec<EchoWindow>>,
     /// 업데이트 직후 첫 실행이면 이전 버전
     updated_from: Mutex<Option<String>>,
     /// 시작할 때 단축키 등록에 실패했다면 그 이유 (다른 앱이 쓰는 중 등)
@@ -489,6 +493,8 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         st.file_mode.store(file.is_some(), Ordering::SeqCst);
         st.file_pct.store(0, Ordering::SeqCst);
         st.save_warned.store(false, Ordering::SeqCst);
+        st.live_pos_ms.store(0, Ordering::SeqCst);
+        st.echo.lock().clear();
         match file {
             Some(f) => Pipeline::start_file(f, cfg, sink).map_err(err),
             None => Pipeline::start(cfg, sink).map_err(err),
@@ -570,6 +576,13 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             text,
             ..
         } => {
+            // 녹음 중 다시 들은 소리가 스피커·시스템 소리로 다시 녹음돼 받아 적힌 것이면 버린다
+            let now = st.live_pos_ms.load(Ordering::Relaxed);
+            if is_echo(&st.echo.lock(), *start_ms, *end_ms, text, now) {
+                log::info!("다시 듣기 메아리로 보고 버림: {text}");
+                let _ = app.emit("bd://event", &Event::Discarded { id: *id });
+                return;
+            }
             let mut store = st.store.lock();
             if let Some(doc) = store.current.as_mut() {
                 let speaker = doc.resolve(*speaker);
@@ -598,6 +611,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             }
         }
         Event::Level { position_ms, .. } => {
+            st.live_pos_ms.store(*position_ms, Ordering::Relaxed);
             if let Some(mut store) = st.store.try_lock() {
                 if let Some(doc) = store.current.as_mut() {
                     doc.duration_ms = doc.duration_ms.max(*position_ms);
@@ -683,6 +697,53 @@ async fn search_sessions(app: AppHandle, query: String) -> Vec<SearchHit> {
     tauri::async_runtime::spawn_blocking(move || SessionStore::new(dir).search(&query))
         .await
         .unwrap_or_default()
+}
+
+/// 녹음 중 다시 들은 구간 (녹음 시간축)과 그때 재생한 문장들
+struct EchoWindow {
+    from_ms: u64,
+    /// 아직 재생 중이면 None
+    to_ms: Option<u64>,
+    texts: Vec<String>,
+}
+
+/// 메아리로 볼 글자쌍 일치율
+const ECHO_RATIO: f32 = 0.6;
+
+/// 이 발화가 다시 듣기 구간에 녹음됐고, 그때 재생한 문장과 거의 같으면 메아리
+fn is_echo(windows: &[EchoWindow], start_ms: u64, end_ms: u64, text: &str, now_ms: u64) -> bool {
+    windows.iter().any(|w| {
+        // 소리가 스피커에서 나와 다시 녹음되기까지·발화 끝맺음까지 여유를 둔다
+        let to = w.to_ms.unwrap_or(now_ms) + 2_500;
+        let from = w.from_ms.saturating_sub(500);
+        end_ms >= from && start_ms <= to && badasugi_core::text::echo_ratio(text, &w.texts) >= ECHO_RATIO
+    })
+}
+
+/// 화면이 녹음 중 다시 듣기를 시작·계속·멈출 때 알려 준다 (재생 중인 문장들과 함께)
+#[tauri::command]
+fn set_playback(app: AppHandle, playing: bool, texts: Vec<String>) {
+    let st = app.state::<AppState>();
+    if *st.rec.lock() != RecState::Recording || st.file_mode.load(Ordering::SeqCst) {
+        return;
+    }
+    let now = st.live_pos_ms.load(Ordering::Relaxed);
+    let mut echo = st.echo.lock();
+    let open = echo.last_mut().filter(|w| w.to_ms.is_none());
+    match (playing, open) {
+        (true, Some(w)) => w.texts.extend(texts),
+        (true, None) => echo.push(EchoWindow {
+            from_ms: now,
+            to_ms: None,
+            texts,
+        }),
+        (false, Some(w)) => w.to_ms = Some(now),
+        (false, None) => {}
+    }
+    // 오래 녹음해도 쌓이지 않게 최근 것만
+    if echo.len() > 50 {
+        echo.remove(0);
+    }
 }
 
 /// 기록의 음성 파일 경로 (다시 듣기). 화면이 읽을 수 있게 그 파일 하나만 허용한다.
@@ -1273,6 +1334,8 @@ fn main() {
                 file_mode: AtomicBool::new(false),
                 file_pct: AtomicUsize::new(0),
                 save_warned: AtomicBool::new(false),
+                live_pos_ms: AtomicU64::new(0),
+                echo: Mutex::new(Vec::new()),
                 updated_from: Mutex::new(updated_from),
                 hotkey_error: Mutex::new(None),
                 tray_toggle: Mutex::new(None),
@@ -1349,6 +1412,7 @@ fn main() {
             install_update,
             hide_window,
             set_mini,
+            set_playback,
             open_folder,
             open_url,
             quit_app,
@@ -1373,5 +1437,32 @@ mod tests {
         // 드라이브 없는 루트 경로(현재 드라이브 기준)도 막는다
         assert!(!is_local_disk(Path::new(r"\attacker\share\a.mp3")));
         assert!(!is_local_disk(Path::new(r"relative\a.mp3")));
+    }
+}
+
+#[cfg(test)]
+mod echo_tests {
+    use super::{is_echo, EchoWindow};
+
+    fn w(from: u64, to: Option<u64>, t: &str) -> EchoWindow {
+        EchoWindow {
+            from_ms: from,
+            to_ms: to,
+            texts: vec![t.to_string()],
+        }
+    }
+
+    #[test]
+    fn drops_only_matching_text_inside_the_playback_window() {
+        let ws = [w(60_000, Some(64_000), "금요일까지 배포가 가능할 것 같습니다.")];
+        // 재생하던 동안 녹음된 같은 말 → 메아리
+        assert!(is_echo(&ws, 60_800, 63_900, "금요일까지 배포가 가능할 것 같습니다", 70_000));
+        // 같은 시간대의 다른 말 → 남긴다
+        assert!(!is_echo(&ws, 61_000, 63_000, "그럼 다음 안건으로 넘어가죠.", 70_000));
+        // 재생 전에 실제로 했던 같은 말 → 남긴다
+        assert!(!is_echo(&ws, 15_000, 18_000, "금요일까지 배포가 가능할 것 같습니다.", 70_000));
+        // 아직 재생 중(끝 모름)이면 지금까지를 구간으로
+        let open = [w(60_000, None, "좋습니다. 그럼 시작하죠.")];
+        assert!(is_echo(&open, 61_000, 62_500, "좋습니다 그럼 시작하죠", 62_600));
     }
 }
