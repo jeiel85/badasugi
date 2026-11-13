@@ -854,7 +854,7 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
     let _ = s.save(&st.paths.settings);
     *st.settings.lock() = s;
     if let Some(item) = st.tray_mini.lock().as_ref() {
-        let _ = item.set_text(if mini { "큰 창으로" } else { "미니 창으로" });
+        let _ = item.set_text(if mini { "창 위치 복구" } else { "미니 창으로" });
     }
     let _ = app.emit("bd://mini", mini);
     Ok(())
@@ -949,7 +949,7 @@ fn toggle_main(app: &AppHandle) {
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "녹음 시작", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "일시정지", false, None::<&str>)?;
-    let mini_text = if app.state::<AppState>().settings.lock().mini_mode { "큰 창으로" } else { "미니 창으로" };
+    let mini_text = if app.state::<AppState>().settings.lock().mini_mode { "창 위치 복구" } else { "미니 창으로" };
     let mini = MenuItem::with_id(app, "mini", mini_text, true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "창 열기", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "회의 기록 폴더", true, None::<&str>)?;
