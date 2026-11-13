@@ -22,7 +22,7 @@ use serde::Serialize;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WindowEvent, Wry};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WindowEvent, Wry};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
@@ -811,17 +811,23 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
             let _ = w.unmaximize();
         }
         if !s.mini_mode {
-            if let (Ok(p), Ok(sz)) = (w.outer_position(), w.inner_size()) {
-                s.full_bounds = Some([p.x, p.y, sz.width as i32, sz.height as i32]);
+            // 크기는 배율과 상관없는 논리 픽셀로 기억한다 (원격 100% ↔ 노트북 125% 를 오가도 같은 크기)
+            if let (Ok(p), Ok(sz), Ok(sf)) = (w.outer_position(), w.inner_size(), w.scale_factor()) {
+                let lw = (sz.width as f64 / sf).round() as i32;
+                let lh = (sz.height as f64 / sf).round() as i32;
+                s.full_bounds = Some([p.x, p.y, lw, lh]);
             }
         }
         let _ = w.set_min_size(None::<tauri::Size>);
         let _ = w.set_resizable(false);
         let _ = w.set_size(LogicalSize::new(MINI_SIZE.0, MINI_SIZE.1));
         let _ = w.set_always_on_top(true);
-        match s.mini_pos.filter(|p| on_screen(app, p[0], p[1])) {
+        // 시계 위에 붙여 두었으면 지금 화면(배율·해상도) 기준으로 다시 붙이고,
+        // 다른 곳에 두었으면 그 자리로 — 단 화면 밖으로 나간 부분은 안으로 들인다
+        match s.mini_pos.filter(|p| !s.mini_docked && on_screen(app, p[0], p[1])) {
             Some([x, y]) => {
                 let _ = w.set_position(PhysicalPosition::new(x, y));
+                snap::keep_inside(&w);
             }
             None => snap::dock_bottom_right(&w),
         }
@@ -839,8 +845,10 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
         let _ = w.set_min_size(Some(LogicalSize::new(FULL_MIN.0, FULL_MIN.1)));
         match s.full_bounds.filter(|b| on_screen(app, b[0], b[1])) {
             Some([x, y, bw, bh]) => {
-                let _ = w.set_size(PhysicalSize::new(bw.max(1) as u32, bh.max(1) as u32));
+                let _ = w.set_size(LogicalSize::new(bw.max(FULL_MIN.0 as i32) as f64, bh.max(FULL_MIN.1 as i32) as f64));
                 let _ = w.set_position(PhysicalPosition::new(x, y));
+                // 다른 배율·해상도에서 저장한 크기라 화면을 넘을 수 있다
+                snap::keep_inside(&w);
             }
             None => {
                 let _ = w.set_size(LogicalSize::new(420.0, 680.0));
@@ -874,11 +882,40 @@ fn on_move_end(app: &AppHandle) {
     let Some(w) = app.get_webview_window("main") else {
         return;
     };
+    let docked = snap::docked_bottom_right(&w);
     if let Ok(p) = w.outer_position() {
         let mut s = st.settings.lock();
         s.mini_pos = Some([p.x, p.y]);
+        s.mini_docked = docked;
         let _ = s.save(&st.paths.settings);
     }
+}
+
+/// 배율(DPI) · 해상도 · 작업 표시줄이 바뀌었을 때 (원격 접속 ↔ 노트북 화면, 모니터 연결 등)
+/// 창 크기가 새 배율로 바뀐 뒤 자리를 다시 잡는다: 시계 위에 붙은 미니 창은 다시 붙이고, 나머지는 화면 안으로.
+fn on_display_change(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let h = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let Some(w) = h.get_webview_window("main") else {
+                return;
+            };
+            if w.is_maximized().unwrap_or(false) || w.is_minimized().unwrap_or(false) {
+                return;
+            }
+            let (mini, docked) = {
+                let s = h.state::<AppState>().settings.lock().clone();
+                (s.mini_mode, s.mini_docked)
+            };
+            if mini && docked {
+                snap::dock_bottom_right(&w);
+            } else {
+                snap::keep_inside(&w);
+            }
+        });
+    });
 }
 
 #[tauri::command]
@@ -1184,7 +1221,8 @@ fn main() {
                 let _ = w.set_always_on_top(settings.always_on_top);
                 // 끌어 옮길 때 화면 가장자리·작업 표시줄에 자석처럼 붙게
                 let h = handle.clone();
-                snap::install(&w, Box::new(move || on_move_end(&h)));
+                let h2 = handle.clone();
+                snap::install(&w, Box::new(move || on_move_end(&h)), Box::new(move || on_display_change(&h2)));
                 if settings.mini_mode {
                     let _ = set_mini_inner(&handle, true, true);
                 }

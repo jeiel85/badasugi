@@ -45,7 +45,9 @@ pub struct Settings {
     pub mini_mode: bool,
     /// 미니 창 위치 (물리 픽셀)
     pub mini_pos: Option<[i32; 2]>,
-    /// 미니 창으로 바꾸기 전 큰 창 위치·크기 (물리 픽셀 x, y, 너비, 높이)
+    /// 미니 창이 작업 영역 오른쪽 아래(시계 위)에 붙어 있음 — 배율·해상도가 바뀌어도 그 자리로 다시 붙인다
+    pub mini_docked: bool,
+    /// 미니 창으로 바꾸기 전 큰 창 위치(물리 픽셀 x, y)·크기(논리 픽셀 너비, 높이)
     pub full_bounds: Option<[i32; 4]>,
 
     pub summary: SummarySettings,
@@ -108,6 +110,7 @@ impl Default for Settings {
             last_version: String::new(),
             mini_mode: false,
             mini_pos: None,
+            mini_docked: true,
             full_bounds: None,
             summary: SummarySettings::default(),
         }
