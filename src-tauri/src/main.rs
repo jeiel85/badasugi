@@ -1165,6 +1165,8 @@ fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+    // 숨겨져 있던 창은 작업 표시줄 단추가 새로 생기면서 배지 · 진행 막대가 비어 있다
+    status::reapply_taskbar(app);
     update::check_if_stale(app);
 }
 

@@ -2,7 +2,9 @@
 //!
 //! - 앱 시작 20초 뒤, 그리고 6시간마다 확인
 //! - "자동 업데이트" 가 켜져 있으면 새 버전을 백그라운드에서 미리 받아 두고,
-//!   녹음·요약·모델 다운로드 중이 아니고 창이 숨겨져 있을 때(트레이) 조용히 설치 → 앱이 저절로 다시 켜진다
+//!   녹음·요약·모델 다운로드 중이 아니고 창이 숨겨져 있을 때(트레이 · 최소화 · 미니 창) 조용히 설치 → 앱이 저절로 다시 켜진다
+//! - 설치 조건은 녹음을 멈추거나 창을 숨길 때 바로 보고, 그 밖의 경우(요약이 끝남 · 미니 창으로 바꿈 · 최소화)도
+//!   놓치지 않게 준비된 업데이트가 있는 동안 1분마다 다시 본다
 //! - 창이 보이는 동안에는 상단 배너로 알리고, 누르면 바로 설치
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,10 +27,17 @@ pub struct Updates {
     pub status: Mutex<Option<UpdateStatus>>,
     /// 마지막으로 서버에 물어본 때
     last_check: Mutex<Option<Instant>>,
+    /// 자동 설치를 앞두고 잠깐 기다리는 중 — 여러 곳에서 겹쳐 불려도 한 번만 설치하게
+    arming: AtomicBool,
+    /// 자동 설치가 실패한 적 있음 — 1분마다 다시 시도하지는 않는다 (창을 숨기는 등 다른 계기로는 다시 시도)
+    auto_failed: AtomicBool,
 }
 
 /// 창을 열 때 이만큼 지났으면 한 번 더 확인한다 (6시간 주기를 기다리지 않게)
 const STALE: Duration = Duration::from_secs(30 * 60);
+
+/// 준비된 업데이트를 지금 설치해도 되는지 다시 보는 간격
+const RETRY: Duration = Duration::from_secs(60);
 
 /// 창을 열었을 때: 확인한 지 30분이 넘었으면 백그라운드에서 새 버전을 확인
 pub fn check_if_stale(app: &AppHandle) {
@@ -76,6 +85,7 @@ impl Updates {
 
 /// 백그라운드 확인 루프
 pub fn spawn_background(app: AppHandle) {
+    spawn_retry(app.clone());
     let _ = std::thread::Builder::new().name("bd-update".into()).spawn(move || {
         std::thread::sleep(Duration::from_secs(20));
         loop {
@@ -85,6 +95,19 @@ pub fn spawn_background(app: AppHandle) {
                 }
             }
             std::thread::sleep(Duration::from_secs(6 * 3600));
+        }
+    });
+}
+
+/// 준비된 업데이트가 있으면 1분마다 '지금 설치해도 되나' 다시 본다.
+/// 녹음 중지 · 창 숨기기는 그때 바로 보지만, 요약 · 모델 다운로드가 끝났을 때나 미니 창으로 바꿨을 때 ·
+/// 최소화했을 때는 따로 알려 주는 곳이 없어 준비된 업데이트가 계속 남아 있었다.
+fn spawn_retry(app: AppHandle) {
+    let _ = std::thread::Builder::new().name("bd-update-apply".into()).spawn(move || loop {
+        std::thread::sleep(RETRY);
+        let updates = app.state::<Updates>();
+        if updates.is_ready() && !updates.auto_failed.load(Ordering::SeqCst) {
+            maybe_install(&app);
         }
     });
 }
@@ -201,6 +224,10 @@ pub fn maybe_install(app: &AppHandle) {
     if app.state::<Updates>().ready.lock().is_none() || !idle(app) || !(window_hidden(app) || mini_mode(app)) {
         return;
     }
+    // 이미 기다리는 중이면 그쪽에 맡긴다 (창 숨기기와 1분 확인이 겹쳐도 설치는 한 번)
+    if app.state::<Updates>().arming.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let app = app.clone();
     std::thread::spawn(move || {
         // 숨기자마자 다시 여는 경우를 위해 잠깐 기다렸다가 한 번 더 확인
@@ -209,8 +236,10 @@ pub fn maybe_install(app: &AppHandle) {
         if idle(&app) && (hidden || mini_mode(&app)) {
             if let Err(e) = install(&app, hidden) {
                 log::warn!("자동 업데이트 설치 실패: {e}");
+                app.state::<Updates>().auto_failed.store(true, Ordering::SeqCst);
             }
         }
+        app.state::<Updates>().arming.store(false, Ordering::SeqCst);
     });
 }
 
