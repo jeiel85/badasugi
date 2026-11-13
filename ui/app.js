@@ -935,20 +935,56 @@ $('#transcript').style.setProperty('--fs', `${fontPx}px`);
 const audio = new Audio();
 audio.preload = 'metadata';
 // key: 지금 재생할 수 있는 기록 id · until: 문장 하나만 들을 때 멈출 위치(초)
-const P = { key: null, src: null, until: null, curId: null, started: false, raf: 0, seeking: false, followId: null };
+// live: 녹음 중인 기록 (파일이 계속 자라므로 필요할 때 다시 읽는다) · wantPlay: 이어 듣는 중
+const P = { key: null, src: null, until: null, curId: null, started: false, raf: 0, seeking: false, followId: null, live: false, wantPlay: false, reloading: null };
 let playClick;
 
+const isLiveRec = () => S.live && S.rec !== 'idle' && !S.fileMode;
 function playableKey() {
   const d = doc();
-  if (!d) return null;
-  // 실시간 녹음 중에는 녹음 파일이 아직 닫히지 않아 들을 수 없다 (파일 받아쓰기는 원본을 바로 들을 수 있음)
-  if (S.live && S.rec !== 'idle' && !S.fileMode) return null;
-  return d.id;
+  return d ? d.id : null;
+}
+// 자라는 녹음 파일을 다시 읽는다 (듣던 위치·재생 상태 유지)
+function reloadSrc() {
+  if (!P.src) return Promise.resolve();
+  if (P.reloading) return P.reloading;
+  const t = audio.currentTime;
+  const wasPlaying = !audio.paused;
+  const rate = audio.playbackRate;
+  P.reloading = new Promise((resolve) => {
+    let to;
+    const done = () => {
+      audio.removeEventListener('loadedmetadata', done);
+      clearTimeout(to);
+      const dur = Number.isFinite(audio.duration) ? audio.duration : t;
+      try { audio.currentTime = Math.min(t, dur); } catch { /* 아직 못 옮김 */ }
+      audio.playbackRate = rate;
+      if (wasPlaying) audio.play().catch(() => {});
+      resolve();
+    };
+    to = setTimeout(done, 2000);
+    audio.addEventListener('loadedmetadata', done);
+    audio.src = `${P.src}?v=${Date.now()}`;
+  }).finally(() => { P.reloading = null; renderPlayer(); });
+  return P.reloading;
+}
+// 녹음 중이면, 들으려는 곳까지 파일에 담겨 있도록 다시 읽는다
+async function ensureFresh(needSec) {
+  if (!P.live) return;
+  const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+  if (needSec > dur - 0.2) await reloadSrc();
 }
 async function syncAudio() {
   const key = playableKey();
-  if (key === P.key) return;
+  const live = !!key && isLiveRec();
+  if (key === P.key) {
+    // 녹음이 막 끝났으면 완성된 파일로 다시 읽는다
+    if (P.live !== live) { P.live = live; if (!live) reloadSrc(); }
+    return;
+  }
   P.key = key;
+  P.live = live;
+  P.wantPlay = false;
   P.src = null;
   P.until = null;
   P.started = false;
@@ -1005,18 +1041,27 @@ function tick() {
   markPlaying(P.until == null);
   if (!audio.paused) P.raf = requestAnimationFrame(tick);
 }
-function togglePlay() {
+async function togglePlay() {
   if (!P.src) return;
-  if (audio.paused) { P.until = null; audio.play().catch((e) => toast(`재생할 수 없어요: ${e.message || e}`, 'error')); }
-  else audio.pause();
+  if (audio.paused) {
+    P.until = null;
+    P.wantPlay = true;
+    await ensureFresh(audio.currentTime + 2);
+    audio.play().catch((e) => toast(`재생할 수 없어요: ${e.message || e}`, 'error'));
+  } else {
+    P.wantPlay = false;
+    audio.pause();
+  }
 }
-function playUtterance(id) {
+async function playUtterance(id) {
   const u = doc()?.utterances.find((x) => x.id === id);
   if (!u || !P.src) return;
   // 듣고 있는 문장을 다시 누르면 멈춤
   if (!audio.paused && P.until != null && P.curId === id) { audio.pause(); return; }
   P.curId = id;
   P.followId = id;
+  P.wantPlay = false;
+  await ensureFresh(u.endMs / 1000 + 0.3);
   audio.currentTime = Math.max(0, u.startMs / 1000 - 0.15);
   P.until = u.endMs / 1000 + 0.2;
   audio.play().catch((e) => toast(`재생할 수 없어요: ${e.message || e}`, 'error'));
@@ -1025,7 +1070,26 @@ audio.addEventListener('play', () => { P.started = true; cancelAnimationFrame(P.
 audio.addEventListener('pause', () => { renderPlayer(); markPlaying(false); });
 audio.addEventListener('timeupdate', checkUntil); // 창이 숨겨져 rAF 가 멈춰도 문장 끝에서 멈추게
 audio.addEventListener('loadedmetadata', renderPlayer);
-audio.addEventListener('ended', () => { P.until = null; renderPlayer(); });
+audio.addEventListener('ended', async () => {
+  P.until = null;
+  renderPlayer();
+  // 녹음 중에 이어 듣다 끝(지금 시각)에 닿으면, 새로 녹음된 만큼 다시 읽어 계속 따라간다
+  while (P.live && P.wantPlay && P.src) {
+    const t = audio.currentTime;
+    await new Promise((r) => setTimeout(r, 700));
+    if (!P.live || !P.wantPlay) break;
+    await reloadSrc();
+    if ((Number.isFinite(audio.duration) ? audio.duration : 0) > t + 0.3) {
+      audio.currentTime = t;
+      audio.play().catch(() => {});
+      break;
+    }
+  }
+});
+// 녹음 중 멈춰 있을 때도 전체 길이·재생 막대가 늘어나게
+setInterval(() => {
+  if (P.live && P.src && audio.paused && !P.reloading && !P.seeking && !document.hidden) reloadSrc();
+}, 4000);
 audio.addEventListener('error', () => {
   if (!P.src) return;
   P.src = null;
@@ -1036,6 +1100,7 @@ $('#pl-play').addEventListener('click', togglePlay);
 $('#pl-seek').addEventListener('input', (e) => {
   P.seeking = true;
   P.until = null;
+  P.wantPlay = !audio.paused;
   P.started = true;
   const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
   audio.currentTime = (+e.target.value / 1000) * dur;

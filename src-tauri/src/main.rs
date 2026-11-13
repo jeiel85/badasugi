@@ -636,18 +636,11 @@ async fn search_sessions(app: AppHandle, query: String) -> Vec<SearchHit> {
 
 /// 기록의 음성 파일 경로 (다시 듣기). 화면이 읽을 수 있게 그 파일 하나만 허용한다.
 ///
-/// - 실시간 녹음: 기록 폴더의 `<id>.wav` (녹음 중에는 파일이 아직 닫히지 않아 재생할 수 없음 → 없음)
+/// - 실시간 녹음: 기록 폴더의 `<id>.wav` (녹음 중에도 1초마다 헤더를 고쳐 써서 그때까지 들을 수 있다)
 /// - 파일 받아쓰기: 원본 파일
 #[tauri::command]
 fn session_audio(app: AppHandle, id: String) -> CmdResult<Option<String>> {
     let st = app.state::<AppState>();
-    let live_recording = {
-        let store = st.store.lock();
-        store.current.as_ref().is_some_and(|c| c.id == id) && !st.file_mode.load(Ordering::SeqCst)
-    };
-    if live_recording {
-        return Ok(None);
-    }
     let (doc, dir) = {
         let store = st.store.lock();
         (store.load(&id).map_err(err)?, store.dir.clone())

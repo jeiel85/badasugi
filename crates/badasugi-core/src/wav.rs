@@ -46,8 +46,12 @@ pub fn encode_pcm16(samples: &[f32]) -> Result<Vec<u8>> {
 }
 
 /// 세션 녹음 파일 (16 kHz 모노 PCM16)
+///
+/// 1초마다 헤더를 고쳐 써서(체크포인트) 녹음 중에도 언제나 올바른 WAV 로 읽힌다.
+/// → 녹음 중 다시 듣기가 되고, 앱이 갑자기 꺼져도 마지막 1초 전까지는 남는다.
 pub struct WavRecorder {
     writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+    last_flush: std::time::Instant,
 }
 
 impl WavRecorder {
@@ -61,14 +65,21 @@ impl WavRecorder {
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
+        let mut writer = hound::WavWriter::create(path, spec)?;
+        writer.flush()?;
         Ok(Self {
-            writer: hound::WavWriter::create(path, spec)?,
+            writer,
+            last_flush: std::time::Instant::now(),
         })
     }
 
     pub fn write(&mut self, samples: &[f32]) {
         for &s in samples {
             let _ = self.writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+        }
+        if self.last_flush.elapsed() >= std::time::Duration::from_secs(1) {
+            let _ = self.writer.flush();
+            self.last_flush = std::time::Instant::now();
         }
     }
 
