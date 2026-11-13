@@ -1194,7 +1194,10 @@ function renderUpdate() {
     $('#update-label').textContent = `새 버전 v${u.version} 내려받는 중… ${pct ? `${pct}%` : ''}`;
     btn.hidden = true;
   } else if (u.state === 'ready') {
-    $('#update-label').textContent = `새 버전 v${u.version} 준비됨${u.notes ? ` · ${u.notes.split('\n')[0].replace(/^[#\-\s]+/, '')}` : ''}`;
+    // 릴리스 노트에서 제목 줄은 건너뛰고 첫 항목의 이름만 ("- 🎧 **다시 듣기** — …" → "🎧 다시 듣기")
+    const first = (u.notes || '').split('\n').map((l) => l.trim()).find((l) => /^[-*]\s/.test(l)) || '';
+    const what = first.replace(/^[-*]\s+/, '').replace(/\*\*/g, '').split(' — ')[0].trim();
+    $('#update-label').textContent = `새 버전 v${u.version} 준비됨${what ? ` · ${what}` : ''}`;
     btn.hidden = false;
     btn.textContent = '지금 적용';
   } else if (u.state === 'installing') {
