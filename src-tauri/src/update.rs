@@ -3,8 +3,8 @@
 //! - 앱 시작 20초 뒤, 그리고 6시간마다 확인
 //! - "자동 업데이트" 가 켜져 있으면 새 버전을 백그라운드에서 미리 받아 두고,
 //!   녹음·요약·모델 다운로드 중이 아니고 창이 숨겨져 있을 때(트레이 · 최소화 · 미니 창) 조용히 설치 → 앱이 저절로 다시 켜진다
-//! - 설치 조건은 녹음을 멈추거나 창을 숨길 때 바로 보고, 그 밖의 경우(요약이 끝남 · 미니 창으로 바꿈 · 최소화)도
-//!   놓치지 않게 준비된 업데이트가 있는 동안 1분마다 다시 본다
+//! - 설치 조건은 녹음을 멈추거나 창을 숨길 때 바로 보고, 그 밖의 경우(요약이 끝남 · 미니 창으로 바꿈)도
+//!   놓치지 않게 준비된 업데이트가 있는 동안 1분마다 다시 본다 (이때 최소화만 한 창은 쓰는 중으로 본다)
 //! - 창이 보이는 동안에는 상단 배너로 알리고, 누르면 바로 설치
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,8 +29,8 @@ pub struct Updates {
     last_check: Mutex<Option<Instant>>,
     /// 자동 설치를 앞두고 잠깐 기다리는 중 — 여러 곳에서 겹쳐 불려도 한 번만 설치하게
     arming: AtomicBool,
-    /// 자동 설치가 실패한 적 있음 — 1분마다 다시 시도하지는 않는다 (창을 숨기는 등 다른 계기로는 다시 시도)
-    auto_failed: AtomicBool,
+    /// 자동 설치가 마지막으로 실패한 때 — 그 뒤 잠깐은 1분 재시도를 쉰다 (창을 숨기는 등 다른 계기로는 다시 시도)
+    auto_failed_at: Mutex<Option<Instant>>,
 }
 
 /// 창을 열 때 이만큼 지났으면 한 번 더 확인한다 (6시간 주기를 기다리지 않게)
@@ -38,6 +38,9 @@ const STALE: Duration = Duration::from_secs(30 * 60);
 
 /// 준비된 업데이트를 지금 설치해도 되는지 다시 보는 간격
 const RETRY: Duration = Duration::from_secs(60);
+
+/// 자동 설치가 실패하면 1분 재시도를 이만큼 쉰다 (백신 검사 · 파일 잠금 같은 일시적 실패를 다시 시도하되, 1분마다 되풀이하지 않게)
+const RETRY_AFTER_FAIL: Duration = Duration::from_secs(30 * 60);
 
 /// 창을 열었을 때: 확인한 지 30분이 넘었으면 백그라운드에서 새 버전을 확인
 pub fn check_if_stale(app: &AppHandle) {
@@ -100,13 +103,17 @@ pub fn spawn_background(app: AppHandle) {
 }
 
 /// 준비된 업데이트가 있으면 1분마다 '지금 설치해도 되나' 다시 본다.
-/// 녹음 중지 · 창 숨기기는 그때 바로 보지만, 요약 · 모델 다운로드가 끝났을 때나 미니 창으로 바꿨을 때 ·
-/// 최소화했을 때는 따로 알려 주는 곳이 없어 준비된 업데이트가 계속 남아 있었다.
+/// 녹음 중지 · 창 숨기기는 그때 바로 보지만, 요약 · 모델 다운로드가 끝났을 때나 미니 창으로 바꿨을 때는
+/// 따로 알려 주는 곳이 없어 준비된 업데이트가 계속 남아 있었다.
+///
+/// 최소화만 해 둔 창은 여기서 설치하지 않는다 — 다시 듣기 재생 · 문장 고치기 도중에 잠깐 내려 둔 것일 수 있다
+/// (최소화한 채 녹음을 멈추는 등 다른 계기로는 전처럼 설치).
 fn spawn_retry(app: AppHandle) {
     let _ = std::thread::Builder::new().name("bd-update-apply".into()).spawn(move || loop {
         std::thread::sleep(RETRY);
         let updates = app.state::<Updates>();
-        if updates.is_ready() && !updates.auto_failed.load(Ordering::SeqCst) {
+        let resting = updates.auto_failed_at.lock().is_some_and(|t| t.elapsed() < RETRY_AFTER_FAIL);
+        if updates.is_ready() && !resting && (window_closed(&app) || mini_mode(&app)) {
             maybe_install(&app);
         }
     });
@@ -216,6 +223,11 @@ fn window_hidden(app: &AppHandle) -> bool {
         .unwrap_or(true)
 }
 
+/// 창을 닫아 트레이로 숨겼는가 (최소화는 아님)
+fn window_closed(app: &AppHandle) -> bool {
+    app.get_webview_window("main").map(|w| !w.is_visible().unwrap_or(true)).unwrap_or(true)
+}
+
 /// 준비된 업데이트가 있고, 쓰고 있지 않을 때(트레이로 숨겨진 상태) 조용히 설치
 pub fn maybe_install(app: &AppHandle) {
     if !app.state::<AppState>().settings.lock().auto_update {
@@ -236,7 +248,7 @@ pub fn maybe_install(app: &AppHandle) {
         if idle(&app) && (hidden || mini_mode(&app)) {
             if let Err(e) = install(&app, hidden) {
                 log::warn!("자동 업데이트 설치 실패: {e}");
-                app.state::<Updates>().auto_failed.store(true, Ordering::SeqCst);
+                *app.state::<Updates>().auto_failed_at.lock() = Some(Instant::now());
             }
         }
         app.state::<Updates>().arming.store(false, Ordering::SeqCst);
@@ -270,9 +282,17 @@ pub fn install(app: &AppHandle, start_hidden: bool) -> Result<(), String> {
     );
     // Windows: 설치 프로그램을 띄우고 이 프로세스는 종료된다 (설치가 끝나면 새 버전이 저절로 켜짐)
     let r = update.install(&bytes).map_err(|e| format!("업데이트 설치 실패: {e}"));
-    // 여기까지 왔다면 실패한 것
+    // 여기까지 왔다면 실패한 것 — 받아 둔 업데이트는 그대로이니 배너도 '준비됨'으로 되돌려 '지금 적용'으로 다시 시도할 수 있게
     let _ = std::fs::remove_file(&marker);
+    let ready = UpdateStatus {
+        state: "ready",
+        version: update.version.clone(),
+        notes: update.body.clone().unwrap_or_default(),
+        done: 0,
+        total: 0,
+        message: None,
+    };
     *app.state::<Updates>().ready.lock() = Some((update, bytes));
-    set_status(app, None);
+    set_status(app, Some(ready));
     r
 }

@@ -259,9 +259,8 @@ pub fn refresh(app: &AppHandle) {
 /// 창을 다시 보일 때 부른다 — 숨기는 동안 지워진 작업 표시줄 배지 · 진행 막대를 지금 상태로 다시 얹는다
 pub fn reapply_taskbar(app: &AppHandle) {
     if let Some(status) = app.try_state::<Status>() {
-        let mut last = status.last.lock();
-        last.bar = None;
-        last.progress = None;
+        // 단추에 얹은 상태만 잊으면 다음 refresh 가 배지 · 진행 막대를 모두 다시 얹는다
+        status.last.lock().bar = None;
     }
     refresh(app);
 }
