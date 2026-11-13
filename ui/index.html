@@ -17,6 +17,7 @@
       <div class="tb-actions">
         <button class="icon-btn" id="btn-find" title="녹취록에서 찾기 (Ctrl+F)"><svg><use href="#i-search"/></svg></button>
         <button class="icon-btn" id="btn-history" title="회의 기록"><svg><use href="#i-history"/></svg></button>
+        <button class="icon-btn" id="btn-mini" title="미니 창 — 녹음 버튼만 작업 표시줄 시계 위에 띄우기"><svg><use href="#i-mini"/></svg></button>
         <button class="icon-btn" id="btn-pin" title="항상 위에 표시"><svg><use href="#i-pin"/></svg></button>
         <button class="icon-btn" id="btn-settings" title="설정"><svg><use href="#i-settings"/></svg></button>
         <span class="tb-sep"></span>
@@ -108,8 +109,11 @@
         <button class="icon-btn" id="btn-copy" title="전체 복사"><svg><use href="#i-copy"/></svg></button>
         <button class="icon-btn" id="btn-save" title="파일로 저장"><svg><use href="#i-download"/></svg></button>
         <button class="icon-btn accent" id="btn-summary" title="AI 회의 요약"><svg><use href="#i-sparkles"/></svg></button>
+        <button class="icon-btn mini-only" id="btn-expand" title="큰 창으로 (더블클릭해도 돼요)"><svg><use href="#i-expand"/></svg></button>
+        <button class="icon-btn mini-only" id="btn-mini-hide" title="트레이로 숨기기"><svg><use href="#i-x"/></svg></button>
       </div>
       <div class="engine-label" id="engine-label"></div>
+      <div class="mini-cap" id="mini-cap"></div>
     </footer>
 
     <!-- 팝오버 메뉴 -->
@@ -317,6 +321,8 @@
       <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></symbol>
       <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+      <symbol id="i-mini" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><rect x="11.5" y="12.5" width="7.5" height="5" rx="1.2" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-expand" viewBox="0 0 24 24"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></symbol>
       <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1.5"/><rect x="14" y="4" width="4" height="16" rx="1.5"/></symbol>
       <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15a1 1 0 0 0 1.5.9l12-7.5a1 1 0 0 0 0-1.7l-12-7.5A1 1 0 0 0 7 4.5z"/></symbol>
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>

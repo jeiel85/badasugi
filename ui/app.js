@@ -56,6 +56,7 @@ const S = {
   updateDismissed: false,
   findQ: '',
   findIdx: 0,
+  mini: false,
 };
 const doc = () => (S.live ? S.liveDoc : S.viewDoc);
 
@@ -201,6 +202,7 @@ function renderDoc() {
   renderMeta();
   renderSummary();
   updateActions();
+  renderMiniCap();
   if (S.findQ) { updateFind(false); return; }
   if (stick) body.scrollTop = body.scrollHeight;
   else if (S.live && S.rec === 'recording') $('#jump').hidden = false;
@@ -298,6 +300,7 @@ function renderDock() {
   $('#paused-tag').hidden = !(rec && S.paused);
   $('#fprog').hidden = !(S.fileMode && S.rec !== 'idle');
   renderProgress();
+  renderMiniCap();
   $('#btn-pin').classList.toggle('on', !!S.settings?.alwaysOnTop);
   $('#hotkey-hint').textContent = S.settings?.hotkey || '단축키 없음';
   const lbl = S.rec === 'stopping' ? '남은 발화를 정리하는 중…' : S.rec === 'starting' ? '준비하는 중…'
@@ -361,6 +364,7 @@ async function refreshState() {
   S.settings = S.app.settings;
   S.rec = S.app.rec;
   S.paused = !!S.app.paused;
+  setMini(!!S.settings.miniMode);
   S.fileMode = !!S.app.fileMode;
   if (S.app.update) S.update = S.app.update;
   applyTheme();
@@ -412,6 +416,7 @@ function onEvent(e) {
       if (S.speaking !== e.speaking) {
         S.speaking = e.speaking;
         $('#listening').hidden = !(S.live && S.speaking);
+        renderMiniCap();
       }
       break;
     case 'pending':
@@ -693,6 +698,14 @@ $('#pop-save').addEventListener('click', async (e) => {
 });
 
 $('#btn-source').addEventListener('click', (e) => {
+  if (S.mini) {
+    const order = ['mic', 'system', 'both'];
+    S.settings.source = order[(order.indexOf(S.settings.source) + 1) % order.length];
+    saveSettings();
+    renderDock();
+    toast(`입력: ${SOURCE_LABEL[S.settings.source]}${S.rec !== 'idle' ? ' (다음 녹음부터)' : ''}`);
+    return;
+  }
   $$('#pop-source button').forEach((b) => b.classList.toggle('on', b.dataset.source === S.settings.source));
   showPopover($('#pop-source'), e.currentTarget);
 });
@@ -911,6 +924,40 @@ function zoom(dir) {
   if (dir !== 0 || fontPx !== 15) toast(`글자 크기 ${fontPx}px`);
 }
 $('#transcript').style.setProperty('--fs', `${fontPx}px`);
+
+/* ───────────── 미니 창 ───────────── */
+// 미니 창에서는 도크 빈 곳을 잡고 끌어 옮긴다 (큰 창에서는 더블클릭 최대화를 막으려고 끈다)
+const DRAG_TARGETS = ['.dock', '.dock-mid', '.dock-row', '#timer', '#meter', '#mini-cap', '#paused-tag', '#fprog'];
+function setMini(on) {
+  S.mini = on;
+  $('#app').classList.toggle('mini', on);
+  for (const sel of DRAG_TARGETS) {
+    const el = $(sel);
+    if (el) on ? el.setAttribute('data-tauri-drag-region', '') : el.removeAttribute('data-tauri-drag-region');
+  }
+  if (on) { closePanels(); hidePopovers(); $('#findbar').hidden = true; S.findQ = ''; }
+  renderDock();
+  scheduleRender();
+}
+function renderMiniCap() {
+  const cap = $('#mini-cap');
+  if (!S.mini || !cap) return;
+  const d = S.live ? S.liveDoc : null;
+  const last = d?.utterances?.[d.utterances.length - 1];
+  if (S.rec === 'recording' && S.paused) cap.textContent = '일시정지 중 — 이 동안은 받아 적지 않아요';
+  else if (last && S.rec !== 'idle') cap.innerHTML = `<b>${esc(speakerName(d, resolveSpk(d, last.speaker)))}</b>${esc(last.text)}`;
+  else if (S.rec === 'starting') cap.textContent = '준비하는 중…';
+  else if (S.rec === 'stopping') cap.textContent = '남은 발화를 정리하는 중…';
+  else if (S.rec === 'recording') cap.textContent = S.speaking ? '듣는 중…' : '말씀하시면 받아 적어요';
+  else cap.textContent = `${S.settings?.hotkey || ''} 로 녹음 · 더블클릭하면 큰 창`;
+}
+$('#btn-mini').addEventListener('click', () => call('set_mini', { mini: true }));
+$('#btn-expand').addEventListener('click', () => call('set_mini', { mini: false }));
+$('#btn-mini-hide').addEventListener('click', () => api.invoke('hide_window'));
+// 미니 창 도크 빈 곳 더블클릭 → 큰 창 (끌기와 겹치지 않게 mousedown 의 두 번째 클릭으로 판단)
+$('.dock').addEventListener('mousedown', (e) => {
+  if (S.mini && e.detail === 2 && e.target.closest('[data-tauri-drag-region]')) call('set_mini', { mini: false });
+});
 
 /* ───────────── 일시정지 ───────────── */
 $('#btn-pause').addEventListener('click', () => call('set_paused', { paused: !S.paused }));
@@ -1202,6 +1249,7 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://download', (e) => onDownload(e.payload));
   await api.listen('bd://toast', (e) => toast(String(e.payload), 'error'));
   await api.listen('bd://paused', (e) => onPaused(!!e.payload));
+  await api.listen('bd://mini', (e) => setMini(!!e.payload));
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await refreshState();
   $('#drop-exts').textContent = exts().join(' · ');
@@ -1258,7 +1306,7 @@ function createMock() {
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true },
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', alwaysOnTop: false, theme: 'system',
-      autoUpdate: true, lastVersion: '',
+      autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
     },
     rec: 'idle',
@@ -1280,6 +1328,7 @@ function createMock() {
       if (cmd === 'save_settings') { st.settings = args.settings; return; }
       if (cmd === 'list_devices') return [{ id: 'mic1', name: '마이크(Realtek Audio)', isDefault: true }];
       if (cmd === 'search_sessions') return [];
+      if (cmd === 'set_mini') { st.settings.miniMode = args.mini; handlers['bd://mini'] && handlers['bd://mini']({ payload: args.mini }); return; }
       if (cmd === 'list_sessions') return [{ id: 'demo', title: '앱 출시 일정 회의', startedAt: '2026-11-12 14:30', durationMs: 61000, count: 7, speakers: 3, preview: '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.' }];
       if (cmd === 'load_session') return demoDoc();
       if (cmd === 'session_text') return '데모';

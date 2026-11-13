@@ -149,6 +149,11 @@ fn idle(app: &AppHandle) -> bool {
     rec == RecState::Idle && st.busy_ops.load(Ordering::SeqCst) == 0 && st.downloading.lock().is_none()
 }
 
+/// 미니 창은 늘 떠 있으므로, 쓰고 있지 않으면(대기 중) 숨겨진 창처럼 업데이트해도 된다
+fn mini_mode(app: &AppHandle) -> bool {
+    app.state::<AppState>().settings.lock().mini_mode
+}
+
 fn window_hidden(app: &AppHandle) -> bool {
     app.get_webview_window("main")
         .map(|w| !w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false))
@@ -160,15 +165,16 @@ pub fn maybe_install(app: &AppHandle) {
     if !app.state::<AppState>().settings.lock().auto_update {
         return;
     }
-    if app.state::<Updates>().ready.lock().is_none() || !idle(app) || !window_hidden(app) {
+    if app.state::<Updates>().ready.lock().is_none() || !idle(app) || !(window_hidden(app) || mini_mode(app)) {
         return;
     }
     let app = app.clone();
     std::thread::spawn(move || {
         // 숨기자마자 다시 여는 경우를 위해 잠깐 기다렸다가 한 번 더 확인
         std::thread::sleep(Duration::from_secs(8));
-        if idle(&app) && window_hidden(&app) {
-            if let Err(e) = install(&app, true) {
+        let hidden = window_hidden(&app);
+        if idle(&app) && (hidden || mini_mode(&app)) {
+            if let Err(e) = install(&app, hidden) {
                 log::warn!("자동 업데이트 설치 실패: {e}");
             }
         }

@@ -41,6 +41,12 @@ pub struct Settings {
     pub auto_update: bool,
     /// 마지막으로 실행한 버전 (업데이트 직후 안내용)
     pub last_version: String,
+    /// 미니 창(녹음 도크만, 항상 위) 모드
+    pub mini_mode: bool,
+    /// 미니 창 위치 (물리 픽셀)
+    pub mini_pos: Option<[i32; 2]>,
+    /// 미니 창으로 바꾸기 전 큰 창 위치·크기 (물리 픽셀 x, y, 너비, 높이)
+    pub full_bounds: Option<[i32; 4]>,
 
     pub summary: SummarySettings,
 }
@@ -100,6 +106,9 @@ impl Default for Settings {
             theme: "system".into(),
             auto_update: true,
             last_version: String::new(),
+            mini_mode: false,
+            mini_pos: None,
+            full_bounds: None,
             summary: SummarySettings::default(),
         }
     }

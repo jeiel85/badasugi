@@ -350,3 +350,21 @@ mark.cur { background: var(--warn); color: #111; }
 .source:disabled { cursor: default; background: none; }
 .source:disabled .chev { display: none; }
 .source span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+
+/* ── 미니 창: 녹음 도크만 (작업 표시줄 시계 위) ── */
+.mini-only, .mini-cap { display: none; }
+.app.mini > :not(.dock):not(.toast):not(.drop) { display: none !important; }
+.app.mini .dock { flex: 1; border-top: 0; padding: 6px 6px 20px 10px; gap: 10px; grid-template-columns: auto 1fr auto; }
+.app.mini .rec { width: 44px; height: 44px; box-shadow: 0 3px 10px rgba(109, 93, 252, .3); }
+.app.mini .rec svg { width: 19px; height: 19px; }
+.app.mini .rec .ic-stop { width: 14px; height: 14px; }
+.app.mini .timer { font-size: 18px; }
+.app.mini .dock-mid { gap: 1px; }
+.app.mini .dock-actions { gap: 0; }
+.app.mini .dock-actions .icon-btn { width: 30px; height: 30px; }
+.app.mini #btn-save, .app.mini #btn-summary, .app.mini .engine-label { display: none; }
+.app.mini .mini-only { display: grid; }
+.app.mini .mini-cap { display: block; position: absolute; left: 10px; right: 10px; bottom: 4px; font-size: 11px; line-height: 1.4; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini-cap b { color: var(--text-2); font-weight: 700; margin-right: 4px; }
+.app.mini .toast { top: 4px; bottom: auto; padding: 5px 10px; font-size: 11.5px; max-width: calc(100% - 12px); }
+.app.mini .source .chev { display: none; }

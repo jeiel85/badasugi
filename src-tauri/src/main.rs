@@ -3,6 +3,7 @@
 
 mod session;
 mod settings;
+mod snap;
 mod summary;
 mod update;
 
@@ -20,7 +21,7 @@ use serde::Serialize;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, WindowEvent, Wry};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WindowEvent, Wry};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
@@ -63,6 +64,7 @@ pub(crate) struct AppState {
     hotkey_error: Mutex<Option<String>>,
     tray_toggle: Mutex<Option<MenuItem<Wry>>>,
     tray_pause: Mutex<Option<MenuItem<Wry>>>,
+    tray_mini: Mutex<Option<MenuItem<Wry>>>,
     icon_idle: Image<'static>,
     icon_rec: Image<'static>,
     rec_started: Mutex<Option<Instant>>,
@@ -175,10 +177,20 @@ fn get_state(app: AppHandle) -> StateDto {
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
     let st = app.state::<AppState>();
-    let old_hotkey = st.settings.lock().hotkey.clone();
+    let mut settings = settings;
+    let old_hotkey = {
+        // 창 모드·위치·버전은 앱(백엔드)이 관리한다 — 화면이 들고 있던 옛 값으로 덮어쓰지 않게
+        let cur = st.settings.lock();
+        settings.mini_mode = cur.mini_mode;
+        settings.mini_pos = cur.mini_pos;
+        settings.full_bounds = cur.full_bounds;
+        settings.last_version = cur.last_version.clone();
+        cur.hotkey.clone()
+    };
     settings.save(&st.paths.settings).map_err(err)?;
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.set_always_on_top(settings.always_on_top);
+        // 미니 창은 늘 위에
+        let _ = w.set_always_on_top(settings.always_on_top || settings.mini_mode);
     }
     let new_hotkey = settings.hotkey.clone();
     *st.settings.lock() = settings;
@@ -744,6 +756,102 @@ fn install_update(app: AppHandle) -> CmdResult<()> {
     update::install(&app, false)
 }
 
+// ───────────────────────── 미니 창 ─────────────────────────
+
+/// 미니 창 크기 (논리 픽셀)
+const MINI_SIZE: (f64, f64) = (372.0, 84.0);
+/// 큰 창 최소 크기 (tauri.conf.json 과 같게)
+const FULL_MIN: (f64, f64) = (360.0, 460.0);
+
+/// 이 점이 어느 모니터 안에 있나 (모니터를 뗀 뒤 엉뚱한 곳에 뜨지 않게)
+fn on_screen(app: &AppHandle, x: i32, y: i32) -> bool {
+    app.available_monitors()
+        .map(|ms| {
+            ms.iter().any(|m| {
+                let (p, s) = (m.position(), m.size());
+                x + 40 >= p.x && x + 40 < p.x + s.width as i32 && y + 20 >= p.y && y + 20 < p.y + s.height as i32
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// 미니 창(녹음 도크만 · 항상 위 · 작업 표시줄 시계 위) ↔ 큰 창
+fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
+    let w = app.get_webview_window("main").ok_or("창을 찾을 수 없어요")?;
+    let st = app.state::<AppState>();
+    let mut s = st.settings.lock().clone();
+    if mini {
+        if !s.mini_mode {
+            if let (Ok(p), Ok(sz)) = (w.outer_position(), w.inner_size()) {
+                s.full_bounds = Some([p.x, p.y, sz.width as i32, sz.height as i32]);
+            }
+        }
+        let _ = w.unmaximize();
+        let _ = w.set_min_size(None::<tauri::Size>);
+        let _ = w.set_resizable(false);
+        let _ = w.set_size(LogicalSize::new(MINI_SIZE.0, MINI_SIZE.1));
+        let _ = w.set_always_on_top(true);
+        match s.mini_pos.filter(|p| on_screen(app, p[0], p[1])) {
+            Some([x, y]) => {
+                let _ = w.set_position(PhysicalPosition::new(x, y));
+            }
+            None => snap::dock_bottom_right(&w),
+        }
+        if !startup {
+            show_main(app);
+        }
+    } else {
+        if s.mini_mode {
+            if let Ok(p) = w.outer_position() {
+                s.mini_pos = Some([p.x, p.y]);
+            }
+        }
+        let _ = w.set_resizable(true);
+        let _ = w.set_min_size(Some(LogicalSize::new(FULL_MIN.0, FULL_MIN.1)));
+        match s.full_bounds.filter(|b| on_screen(app, b[0], b[1])) {
+            Some([x, y, bw, bh]) => {
+                let _ = w.set_size(PhysicalSize::new(bw.max(1) as u32, bh.max(1) as u32));
+                let _ = w.set_position(PhysicalPosition::new(x, y));
+            }
+            None => {
+                let _ = w.set_size(LogicalSize::new(420.0, 680.0));
+                let _ = w.center();
+            }
+        }
+        let _ = w.set_always_on_top(s.always_on_top);
+        show_main(app);
+    }
+    s.mini_mode = mini;
+    let _ = s.save(&st.paths.settings);
+    *st.settings.lock() = s;
+    if let Some(item) = st.tray_mini.lock().as_ref() {
+        let _ = item.set_text(if mini { "큰 창으로" } else { "미니 창으로" });
+    }
+    let _ = app.emit("bd://mini", mini);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mini(app: AppHandle, mini: bool) -> CmdResult<()> {
+    set_mini_inner(&app, mini, false)
+}
+
+/// 창을 끌어 옮기고 놓았을 때: 미니 창 위치를 기억
+fn on_move_end(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    if !st.settings.lock().mini_mode {
+        return;
+    }
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Ok(p) = w.outer_position() {
+        let mut s = st.settings.lock();
+        s.mini_pos = Some([p.x, p.y]);
+        let _ = s.save(&st.paths.settings);
+    }
+}
+
 #[tauri::command]
 fn hide_window(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -832,14 +940,17 @@ fn recording_icon(base: &Image<'_>) -> Image<'static> {
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "녹음 시작", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "일시정지", false, None::<&str>)?;
+    let mini_text = if app.state::<AppState>().settings.lock().mini_mode { "큰 창으로" } else { "미니 창으로" };
+    let mini = MenuItem::with_id(app, "mini", mini_text, true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "창 열기", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "회의 기록 폴더", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&toggle, &pause, &sep2, &show, &folder, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &pause, &sep2, &show, &mini, &folder, &sep, &quit])?;
     *app.state::<AppState>().tray_toggle.lock() = Some(toggle);
     *app.state::<AppState>().tray_pause.lock() = Some(pause);
+    *app.state::<AppState>().tray_mini.lock() = Some(mini);
 
     TrayIconBuilder::with_id("main")
         .icon(app.state::<AppState>().icon_idle.clone())
@@ -860,6 +971,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 let _ = toggle_pause(app);
             }
             "show" => show_main(app),
+            "mini" => {
+                let now = app.state::<AppState>().settings.lock().mini_mode;
+                if let Err(e) = set_mini_inner(app, !now, false) {
+                    let _ = app.emit("bd://toast", e);
+                }
+            }
             "folder" => {
                 let _ = open_folder(app.clone(), "sessions".into());
             }
@@ -892,6 +1009,17 @@ fn handle_forwarded(app: &AppHandle, argv: &[String]) {
     let rec = *app.state::<AppState>().rec.lock();
     let r = match cmd.as_deref() {
         Some("--pause") => toggle_pause(app),
+        Some("--mini") => {
+            // 창 조작은 메인 스레드에서 (크기를 바꾼 직후 위치를 계산하므로)
+            let h = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let now = h.state::<AppState>().settings.lock().mini_mode;
+                if let Err(e) = set_mini_inner(&h, !now, false) {
+                    let _ = h.emit("bd://toast", e);
+                }
+            });
+            Ok(())
+        }
         Some("--start") if rec == RecState::Idle => start_recording_inner(app),
         Some("--stop") if rec == RecState::Recording => {
             stop_recording_inner(app);
@@ -1029,6 +1157,7 @@ fn main() {
                 hotkey_error: Mutex::new(None),
                 tray_toggle: Mutex::new(None),
                 tray_pause: Mutex::new(None),
+                tray_mini: Mutex::new(None),
                 icon_idle,
                 icon_rec,
                 rec_started: Mutex::new(None),
@@ -1044,6 +1173,12 @@ fn main() {
             }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_always_on_top(settings.always_on_top);
+                // 끌어 옮길 때 화면 가장자리·작업 표시줄에 자석처럼 붙게
+                let h = handle.clone();
+                snap::install(&w, Box::new(move || on_move_end(&h)));
+                if settings.mini_mode {
+                    let _ = set_mini_inner(&handle, true, true);
+                }
                 let minimized = start_hidden || std::env::args().any(|a| a == "--minimized");
                 if !minimized {
                     let _ = w.show();
@@ -1091,6 +1226,7 @@ fn main() {
             check_update,
             install_update,
             hide_window,
+            set_mini,
             open_folder,
             open_url,
             quit_app,
