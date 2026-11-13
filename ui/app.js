@@ -130,10 +130,11 @@ function md(src) {
   let html = '', list = false;
   for (const raw of String(src).split('\n')) {
     const line = raw.trimEnd();
-    const li = line.match(/^\s*[-*]\s+(\[[ xX]\]\s+)?(.*)$/);
+    const li = line.match(/^(\s*)[-*]\s+(\[[ xX]\]\s+)?(.*)$/);
     if (li) {
       if (!list) { html += '<ul>'; list = true; }
-      html += li[1] ? `<li class="task"><span>${inline(li[2])}</span></li>` : `<li>${inline(li[2])}</li>`;
+      const sub = li[1].replace(/\t/g, '  ').length >= 2 ? ' sub' : '';
+      html += li[2] ? `<li class="task${sub}"><span>${inline(li[3])}</span></li>` : `<li${sub ? ' class="sub"' : ''}>${inline(li[3])}</li>`;
       continue;
     }
     if (list) { html += '</ul>'; list = false; }
@@ -805,6 +806,7 @@ $('#btn-history').addEventListener('click', () => openPanel('history'));
 $('#scrim').addEventListener('click', closePanels);
 $$('[data-close]').forEach((b) => b.addEventListener('click', closePanels));
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#update-modal').hidden) { closeUpdateModal(); return; }
   if (e.key === 'Escape' && !hotkeyCapturing) {
     if (!$('#findbar').hidden && $$('.panel').every((p) => p.hidden)) closeFind();
     closePanels();
@@ -1270,7 +1272,7 @@ function renderUpdate() {
     const what = first.replace(/^[-*]\s+/, '').replace(/\*\*/g, '').split(' — ')[0].trim();
     $('#update-label').textContent = `새 버전 v${u.version} 준비됨${what ? ` · ${what}` : ''}`;
     btn.hidden = false;
-    btn.textContent = '지금 적용';
+    btn.textContent = '자세히 보기';
   } else if (u.state === 'installing') {
     $('#update-label').textContent = `v${u.version} 설치 중… 잠시 뒤 다시 열려요`;
     btn.hidden = true;
@@ -1280,12 +1282,47 @@ function renderUpdate() {
 }
 function onUpdate(u) {
   S.update = u;
+  if (!$('#update-modal').hidden) {
+    // 팝업이 열린 채 상태가 바뀌면: 준비 끝 → 적용 버튼 살림, 실패 · 사라짐 → 닫기 (오류는 아래 토스트로)
+    if (u?.state === 'ready') { $('#um-apply').disabled = false; $('#um-apply').textContent = '지금 적용'; }
+    else if (!u || u.state === 'error') closeUpdateModal();
+  }
   if (u?.state === 'error') toast(u.message || '업데이트 확인 실패', 'error');
   renderUpdate();
 }
-$('#btn-update-now').addEventListener('click', async () => {
+// 업데이트 팝업: 지금 버전 이후 바뀐 내용을 버전별로 보여 주고, 확인한 뒤 적용
+async function openUpdateModal() {
+  const u = S.update;
+  if (!u || !['ready', 'downloading', 'available'].includes(u.state)) return;
+  const m = $('#update-modal');
+  $('#um-title').textContent = `새 버전 v${u.version}`;
+  $('#um-sub').textContent = `지금 v${S.app?.version || ''} → v${u.version}`;
+  $('#um-body').innerHTML = '<div class="md"><div class="loading"><span class="dot"></span>바뀐 내용을 불러오는 중…</div></div>';
+  const apply = $('#um-apply');
+  apply.disabled = u.state !== 'ready';
+  apply.textContent = u.state === 'ready' ? '지금 적용' : '내려받는 중…';
+  m.hidden = false;
+  let list = [];
+  try { list = await api.invoke('update_notes'); } catch { /* 아래에서 대신 */ }
+  if (!list?.length && u.notes) list = [{ version: u.version, date: '', notes: u.notes }];
+  if (m.hidden) return;
+  // 각 노트 첫 줄의 "## 받아쓰기 vX" 제목은 버전 머리글과 겹치므로 뺀다
+  const body = (n) => md(String(n || '').replace(/^\s*#{1,3}\s*받아쓰기[^\n]*\n/, ''));
+  $('#um-body').innerHTML = list.length
+    ? list.map((v) => `<section class="um-ver"><div class="um-vh"><b>v${esc(v.version)}</b>${v.date ? `<small>${esc(v.date)}</small>` : ''}</div><div class="md">${body(v.notes)}</div></section>`).join('')
+    : '<p class="um-empty">바뀐 내용 정보를 불러오지 못했어요. 적용하면 최신 버전으로 바뀌어요.</p>';
+}
+function closeUpdateModal() { $('#update-modal').hidden = true; }
+$('#btn-update-now').addEventListener('click', openUpdateModal);
+$('#update-label').addEventListener('click', openUpdateModal);
+$$('[data-um-close]').forEach((b) => b.addEventListener('click', closeUpdateModal));
+$('#update-modal').addEventListener('mousedown', (e) => { if (e.target.id === 'update-modal') closeUpdateModal(); });
+$('#um-apply').addEventListener('click', async () => {
   if (S.rec !== 'idle') return toast('녹음을 마친 뒤에 적용할 수 있어요', 'error');
-  try { await api.invoke('install_update'); } catch (e) { toast(String(e), 'error'); }
+  const b = $('#um-apply');
+  b.disabled = true;
+  b.textContent = '적용하는 중…';
+  try { await api.invoke('install_update'); } catch (e) { toast(String(e), 'error'); b.disabled = false; b.textContent = '지금 적용'; }
 });
 $('#btn-update-later').addEventListener('click', () => { S.updateDismissed = true; renderUpdate(); });
 $('#btn-check-update').addEventListener('click', async (e) => {
@@ -1705,6 +1742,10 @@ function createMock() {
       if (cmd === 'save_settings') { st.settings = args.settings; return; }
       if (cmd === 'list_devices') return [{ id: 'mic1', name: '마이크(Realtek Audio)', isDefault: true }];
       if (cmd === 'search_sessions') return [];
+      if (cmd === 'update_notes') return [
+        { version: '0.3.1', date: '2026-11-13', notes: '## 받아쓰기 v0.3.1\n\n### 새 기능\n- 📊 **API 사용량** — 설정에 공급자별 사용량이 생겼어요.\n  - **오늘 · 이번 달**: 음성 인식 분량 · 요약 토큰\n  - **남은 한도**: 공급자가 알려 주는 남은 요청 · 토큰' },
+        { version: '0.3.0', date: '2026-11-13', notes: '## 받아쓰기 v0.3.0\n\n### 새 기능\n- 🩺 **진단 로그** — 문제가 생겼을 때 원인을 찾을 수 있게 기록해요.\n- 🔑 **API 키 받는 방법 안내**\n\n### 개선\n- 🎤 마이크 소리가 거의 안 들어올 때 알려 줍니다' },
+      ];
       if (cmd === 'get_usage') return {
         today: { groq: { sttSecs: 754, sttRequests: 96, sttFailures: 1, sumRequests: 1, sumInTokens: 4210, sumOutTokens: 612 } },
         month: { groq: { sttSecs: 9120, sttRequests: 1180, sttFailures: 3, sumRequests: 9, sumInTokens: 38120, sumOutTokens: 5410 }, gemini: { sttSecs: 0, sttRequests: 0, sttFailures: 0, sumRequests: 2, sumInTokens: 15200, sumOutTokens: 1900 } },

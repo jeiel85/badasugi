@@ -296,3 +296,103 @@ pub fn install(app: &AppHandle, start_hidden: bool) -> Result<(), String> {
     set_status(app, Some(ready));
     r
 }
+
+// ───────────────────────── 바뀐 내용 (업데이트 팝업) ─────────────────────────
+
+const RELEASES_API: &str = "https://api.github.com/repos/jeiel85/badasugi/releases?per_page=30";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionNotes {
+    pub version: String,
+    /// "2026-11-13"
+    pub date: String,
+    pub notes: String,
+}
+
+fn ver(s: &str) -> Option<(u64, u64, u64)> {
+    let mut it = s.trim().trim_start_matches('v').split(['.', '-']).map(|p| p.parse::<u64>().ok());
+    Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
+}
+
+/// GitHub 릴리스 목록(JSON)에서 지금 버전보다 새롭고 받을 버전 이하인 것만, 최신순으로
+fn parse_releases(json: &str, current: &str, latest: Option<&str>) -> Vec<VersionNotes> {
+    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return Vec::new();
+    };
+    let (Some(cur), max) = (ver(current), latest.and_then(ver)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<((u64, u64, u64), VersionNotes)> = list
+        .iter()
+        .filter(|r| !r["draft"].as_bool().unwrap_or(false) && !r["prerelease"].as_bool().unwrap_or(false))
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            let v = ver(tag)?;
+            (v > cur && max.is_none_or(|m| v <= m)).then(|| {
+                (
+                    v,
+                    VersionNotes {
+                        version: tag.trim_start_matches('v').to_string(),
+                        date: r["published_at"].as_str().unwrap_or("").chars().take(10).collect(),
+                        notes: r["body"].as_str().unwrap_or("").to_string(),
+                    },
+                )
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.into_iter().map(|(_, n)| n).collect()
+}
+
+/// 지금 버전 이후 바뀐 내용 (버전별). 못 받으면 업데이트에 함께 온 최신 버전 내용만
+pub fn release_notes(app: &AppHandle) -> Vec<VersionNotes> {
+    let current = app.package_info().version.to_string();
+    let latest = app.state::<Updates>().status.lock().clone();
+    let fetched = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(concat!("badasugi/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()
+        .and_then(|c| c.get(RELEASES_API).header("Accept", "application/vnd.github+json").send().ok())
+        .filter(|r| r.status().is_success())
+        .and_then(|r| r.text().ok())
+        .map(|t| parse_releases(&t, &current, latest.as_ref().map(|s| s.version.as_str())))
+        .unwrap_or_default();
+    if !fetched.is_empty() {
+        return fetched;
+    }
+    latest
+        .filter(|s| !s.notes.trim().is_empty())
+        .map(|s| {
+            vec![VersionNotes {
+                version: s.version,
+                date: String::new(),
+                notes: s.notes,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_releases;
+
+    #[test]
+    fn notes_between_current_and_latest_newest_first() {
+        let json = r#"[
+          {"tag_name":"v0.3.2","body":"c","published_at":"2026-11-14T01:00:00Z","draft":false,"prerelease":false},
+          {"tag_name":"v0.3.1","body":"b","published_at":"2026-11-13T07:00:00Z","draft":false,"prerelease":false},
+          {"tag_name":"v0.3.0","body":"a","published_at":"2026-11-13T06:00:00Z","draft":false,"prerelease":false},
+          {"tag_name":"v0.2.9","body":"old","published_at":"2026-11-13T05:00:00Z","draft":false,"prerelease":false},
+          {"tag_name":"v0.4.0-beta","body":"beta","published_at":"","draft":false,"prerelease":true}
+        ]"#;
+        let n = parse_releases(json, "0.2.9", Some("0.3.1"));
+        let v: Vec<&str> = n.iter().map(|x| x.version.as_str()).collect();
+        assert_eq!(v, ["0.3.1", "0.3.0"]);
+        assert_eq!(n[0].date, "2026-11-13");
+        // 받을 버전을 모르면 지금보다 새 정식 버전 전부
+        assert_eq!(parse_releases(json, "0.3.0", None).len(), 2);
+        assert!(parse_releases("not json", "0.2.9", None).is_empty());
+    }
+}

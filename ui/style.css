@@ -282,8 +282,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 4px 0 0; }
 .model-mini { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--text-2); }
 .about-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 12.5px; color: var(--muted); }
 
-/* 토스트 */
-.toast { position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%); max-width: calc(100% - 32px); padding: 9px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-lg); z-index: 40; animation: toast-in .18s ease-out; white-space: pre-line; text-align: center; }
+/* 토스트 — 업데이트 팝업(.modal 45) 위에 둬서 팝업에서 적용이 막히거나 실패한 이유가 가려지지 않게 */
+.toast { position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%); max-width: calc(100% - 32px); padding: 9px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-lg); z-index: 48; animation: toast-in .18s ease-out; white-space: pre-line; text-align: center; }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
 .toast.error { background: var(--rec); color: #fff; }
 
@@ -414,3 +414,28 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .usage-row small { color: var(--muted); font-size: 11px; }
 .usage-empty { font-size: 12px; color: var(--muted); }
 .settings h4 .usage-refresh { float: right; font-size: 11.5px; font-weight: 600; letter-spacing: 0; }
+
+/* 업데이트 배너를 조금 더 눈에 띄게 + 눌러서 자세히 */
+.update-bar { padding: 8px 6px 8px 12px; font-size: 13px; }
+.update-bar #update-label { cursor: pointer; }
+.update-bar #update-label:hover { text-decoration: underline; }
+
+/* 업데이트 팝업 */
+.modal { position: absolute; inset: 0; z-index: 45; display: grid; place-items: center; padding: 16px; background: rgba(10, 10, 20, .38); animation: fade .15s; }
+.modal-card { width: min(100%, 400px); max-height: 100%; display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: var(--shadow-lg); animation: pop .16s ease-out; overflow: hidden; }
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 14px 10px 10px 16px; border-bottom: 1px solid var(--line); }
+.modal-head b { display: block; font-size: 15px; letter-spacing: -0.02em; }
+.modal-head small { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
+.modal-body { overflow-y: auto; padding: 4px 16px 10px; user-select: text; }
+.um-ver { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.um-ver:last-child { border-bottom: 0; }
+.um-vh { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.um-vh b { font-size: 13.5px; color: var(--accent); }
+.um-vh small { font-size: 11.5px; color: var(--muted); }
+.um-ver .md { font-size: 13px; }
+.um-empty { font-size: 13px; color: var(--text-2); }
+.modal-foot { padding: 10px 16px 14px; border-top: 1px solid var(--line); }
+.modal-foot small { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 10px; line-height: 1.5; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-actions .btn.ghost { margin-top: 0; }
+.md li.sub { margin-left: 18px; list-style-type: circle; }
