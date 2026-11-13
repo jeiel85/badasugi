@@ -23,6 +23,29 @@ pub struct Updates {
     ready: Mutex<Option<(Update, Vec<u8>)>>,
     busy: AtomicBool,
     pub status: Mutex<Option<UpdateStatus>>,
+    /// 마지막으로 서버에 물어본 때
+    last_check: Mutex<Option<Instant>>,
+}
+
+/// 창을 열 때 이만큼 지났으면 한 번 더 확인한다 (6시간 주기를 기다리지 않게)
+const STALE: Duration = Duration::from_secs(30 * 60);
+
+/// 창을 열었을 때: 확인한 지 30분이 넘었으면 백그라운드에서 새 버전을 확인
+pub fn check_if_stale(app: &AppHandle) {
+    let Some(updates) = app.try_state::<Updates>() else {
+        return;
+    };
+    let stale = updates.last_check.lock().is_none_or(|t| t.elapsed() > STALE);
+    let auto = app.try_state::<AppState>().is_some_and(|st| st.settings.lock().auto_update);
+    if !stale || !auto || updates.ready.lock().is_some() {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new().name("bd-update-now".into()).spawn(move || {
+        if let Err(e) = tauri::async_runtime::block_on(check(&app, false)) {
+            log::info!("업데이트 확인 실패: {e}");
+        }
+    });
 }
 
 #[derive(Clone, Serialize)]
@@ -98,6 +121,7 @@ pub async fn check(app: &AppHandle, manual: bool) -> Result<Option<String>, Stri
 }
 
 async fn check_inner(app: &AppHandle, manual: bool) -> Result<Option<String>, String> {
+    *app.state::<Updates>().last_check.lock() = Some(Instant::now());
     let app2 = app.clone();
     let updater = app
         .updater_builder()

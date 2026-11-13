@@ -390,3 +390,7 @@ mark.cur { background: var(--warn); color: #111; }
   .titlebar .icon-btn { width: 30px; }
   .tb-sep { margin: 0 2px; }
 }
+
+/* 미니 창: 일시정지 중에는 멈춘 소리 막대 대신 '일시정지' 표시만 (버튼이 늘어 자리가 빠듯) */
+.app.mini.paused .meter { display: none; }
+.app.mini .dock-row { gap: 8px; min-width: 0; }

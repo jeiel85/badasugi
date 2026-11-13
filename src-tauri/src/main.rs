@@ -933,6 +933,7 @@ fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+    update::check_if_stale(app);
 }
 
 fn toggle_main(app: &AppHandle) {

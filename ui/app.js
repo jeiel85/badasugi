@@ -1154,6 +1154,7 @@ function renderMiniCap() {
 $('#btn-mini').addEventListener('click', () => call('set_mini', { mini: true }));
 $('#btn-expand').addEventListener('click', () => call('set_mini', { mini: false }));
 $('#btn-mini-hide').addEventListener('click', () => api.invoke('hide_window'));
+$('#btn-mini-min').addEventListener('click', () => api.win.minimize());
 // 더블클릭으로 창 모드 바꾸기 (끌기와 겹치지 않게 mousedown 의 두 번째 클릭으로 판단)
 // - 미니 창: 도크 빈 곳 → 원래 창 위치·크기로 복구
 // - 큰 창: 제목 줄 · 도크 빈 곳 → 미니 창
