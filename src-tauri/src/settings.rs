@@ -28,7 +28,7 @@ pub struct Settings {
     /// 용어집 (고유명사·전문용어) — 인식 정확도를 올린다
     pub glossary: String,
     pub diarization: DiarizationConfig,
-    /// 회의 녹음(WAV)도 함께 저장
+    /// 회의 녹음도 함께 저장 (Ogg Opus, 1시간 약 11 MB)
     pub save_audio: bool,
     /// 녹음이 끝나면 로컬 모델을 메모리에서 내림 (대기 중 가볍게)
     pub unload_when_idle: bool,

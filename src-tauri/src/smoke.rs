@@ -8,9 +8,10 @@
 //! - 결과: `<BADASUGI_HOME>/smoke-report.json`, 종료 코드 0 = 통과 / 1 = 실패
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::session::{SessionDoc, SessionStore};
@@ -66,6 +67,73 @@ pub fn spawn(app: AppHandle) {
     });
 }
 
+/// 화면이 녹음 파일을 읽어 본 결과 (`smoke_probe` 로 돌아온다)
+#[derive(Deserialize)]
+pub struct Probe {
+    ok: bool,
+    /// 초. 화면이 길이를 모르면 -1
+    duration: f64,
+    detail: String,
+}
+
+static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+
+/// 화면이 녹음 파일을 읽어 본 결과를 알려 준다 (점검 모드에서만 받는다)
+#[tauri::command]
+pub fn smoke_probe(result: Probe) {
+    if enabled() {
+        *PROBE.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+    }
+}
+
+/// 화면(WebView2)이 기록의 녹음 파일을 다시 듣기와 같은 길(session_audio → asset 프로토콜 → <audio>)로
+/// 실제로 열어 길이(초)를 알아내는지 본다.
+fn probe_playback(app: &AppHandle, id: &str) -> Result<f64, String> {
+    let w = app.get_webview_window("main").ok_or("창이 없어요")?;
+    *PROBE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let js = format!(
+        r#"(async () => {{
+  const T = window.__TAURI__;
+  let r;
+  try {{
+    const p = await T.core.invoke('session_audio', {{ id: {id} }});
+    if (!p) throw new Error('녹음 파일 경로가 없어요');
+    const a = new Audio();
+    a.preload = 'metadata';
+    const d = await new Promise((ok, no) => {{
+      const to = setTimeout(() => no(new Error('10초 안에 열지 못했어요')), 10000);
+      a.onloadedmetadata = () => {{ clearTimeout(to); ok(a.duration); }};
+      a.onerror = () => {{ clearTimeout(to); no(new Error('재생 오류 ' + (a.error ? a.error.code + ' ' + a.error.message : ''))); }};
+      a.src = T.core.convertFileSrc(p) + '?v=' + Date.now();
+    }});
+    a.removeAttribute('src');
+    const name = p.slice(Math.max(p.lastIndexOf('/'), p.lastIndexOf(String.fromCharCode(92))) + 1);
+    r = {{ ok: true, duration: Number.isFinite(d) ? d : -1, detail: name }};
+  }} catch (e) {{
+    r = {{ ok: false, duration: 0, detail: String((e && e.message) || e) }};
+  }}
+  await T.core.invoke('smoke_probe', {{ result: r }});
+}})();"#,
+        id = serde_json::to_string(id).unwrap_or_default()
+    );
+    w.eval(&js).map_err(|e| e.to_string())?;
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(15) {
+        let got = PROBE.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(p) = got {
+            return if p.ok && p.duration >= 0.0 {
+                Ok(p.duration)
+            } else if p.ok {
+                Err(format!("길이를 알 수 없어요 ({})", p.detail))
+            } else {
+                Err(p.detail)
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("화면이 응답하지 않아요".into())
+}
+
 fn wait_idle(app: &AppHandle, timeout: Duration) -> bool {
     let t = Instant::now();
     while t.elapsed() < timeout {
@@ -100,6 +168,14 @@ fn check_doc(c: &mut Checks, label: &str, doc: &SessionDoc, expect: &[String]) {
             format!("빠진 낱말: {}", missing.join(", "))
         },
     );
+}
+
+/// 녹음 파일을 끝까지 디코딩 (16 kHz 모노)
+fn read_all(p: &Path) -> anyhow::Result<Vec<f32>> {
+    let mut f = badasugi_core::decode::AudioFile::open(p)?;
+    let mut out = Vec::new();
+    while f.read(&mut out)? {}
+    Ok(out)
 }
 
 fn run(app: &AppHandle, c: &mut Checks) {
@@ -149,6 +225,22 @@ fn run(app: &AppHandle, c: &mut Checks) {
     c.add("일시정지", crate::set_paused_inner(app, true).is_ok(), "4초 지점");
     std::thread::sleep(Duration::from_secs(2));
     c.add("이어서 녹음", crate::set_paused_inner(app, false).is_ok(), "6초 지점");
+    // 녹음 중 다시 듣기: 자라는 녹음 파일을 화면이 그때까지의 길이로 읽어야 한다 (1초마다 디스크에 내보냄)
+    std::thread::sleep(Duration::from_secs(3));
+    let live_id = app.state::<AppState>().store.lock().current.as_ref().map(|d| d.id.clone());
+    if let Some(id) = live_id {
+        let at = t0.elapsed().as_secs_f64();
+        match probe_playback(app, &id) {
+            Ok(d) => c.add(
+                "녹음 중 다시 듣기",
+                d > 1.0 && (d - at).abs() < 3.0,
+                format!("{d:.1}초까지 들림 (녹음 {at:.1}초째)"),
+            ),
+            Err(e) => c.add("녹음 중 다시 듣기", false, e),
+        };
+    } else {
+        c.add("녹음 중 다시 듣기", false, "녹음 중인 기록이 없어요");
+    }
     let rest = (wav_secs + 1.5 - t0.elapsed().as_secs_f64()).max(0.0);
     std::thread::sleep(Duration::from_secs_f64(rest));
     let rec_secs = t0.elapsed().as_secs_f64();
@@ -169,23 +261,34 @@ fn run(app: &AppHandle, c: &mut Checks) {
     // 일시정지 구간(4~6초)의 말은 빠질 수 있으니 그 밖의 낱말만 기대한다 — 점검 스크립트가 고른다
     check_doc(c, "녹음", &live, &expect);
     match live.audio_file.as_deref().map(|f| sessions.join(f)) {
-        Some(p) => match badasugi_core::wav::read_16k_mono(&p) {
+        Some(p) => match read_all(&p) {
             Ok(s) => {
                 let secs = s.len() as f64 / badasugi_core::SAMPLE_RATE as f64;
+                let kb = std::fs::metadata(&p).map(|m| m.len() / 1024).unwrap_or(0);
+                // Opus 24 kbps ≈ 3 KB/s (WAV 면 31 KB/s)
+                let small = (kb as f64) < secs.max(1.0) * 6.0;
                 c.add(
-                    "녹음 파일(WAV)",
-                    (secs - rec_secs).abs() < 4.0,
-                    format!("{secs:.1}초 (녹음 {rec_secs:.1}초)"),
+                    "녹음 파일(Opus)",
+                    p.extension().is_some_and(|e| e == "opus") && small && (secs - rec_secs).abs() < 4.0,
+                    format!("{secs:.1}초 (녹음 {rec_secs:.1}초) · {kb} KB"),
                 );
             }
             Err(e) => {
-                c.add("녹음 파일(WAV)", false, format!("읽을 수 없어요: {e}"));
+                c.add("녹음 파일(Opus)", false, format!("읽을 수 없어요: {e}"));
             }
         },
         None => {
-            c.add("녹음 파일(WAV)", false, "기록에 녹음 파일이 없어요");
+            c.add("녹음 파일(Opus)", false, "기록에 녹음 파일이 없어요");
         }
     }
+    match probe_playback(app, &live.id) {
+        Ok(d) => c.add(
+            "다시 듣기",
+            (d - rec_secs).abs() < 4.0,
+            format!("화면에서 {d:.1}초로 열림 (녹음 {rec_secs:.1}초)"),
+        ),
+        Err(e) => c.add("다시 듣기", false, e),
+    };
 
     // ── 2. 파일 받아쓰기 ──
     let file = std::env::var_os("BADASUGI_SMOKE_FILE").map(PathBuf::from).unwrap_or(wav);

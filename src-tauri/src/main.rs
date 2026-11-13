@@ -693,10 +693,10 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 }
                 if let Some(doc) = store.current.take() {
                     if doc.utterances.is_empty() {
-                        let wav = store.audio_path(&doc.id);
+                        let audio = store.audio_path(&doc.id);
                         // 받아 적힌 문장이 없어도(인터넷 끊김·API 키 오류 등) 5초 넘는 녹음은 지우지 않고 기록으로 남긴다
                         // → 나중에 회의 기록에서 다시 듣거나, 녹음 파일로 다시 받아 적을 수 있다
-                        if doc.audio_file.is_some() && doc.duration_ms >= 5_000 && wav.is_file() {
+                        if doc.audio_file.is_some() && doc.duration_ms >= 5_000 && audio.is_file() {
                             if session::write_doc(&store.dir, &doc).is_ok() {
                                 let _ = app.emit(
                                     "bd://toast",
@@ -704,7 +704,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                                 );
                             }
                         } else {
-                            let _ = std::fs::remove_file(wav);
+                            let _ = std::fs::remove_file(audio);
                         }
                     }
                 }
@@ -795,7 +795,8 @@ fn set_playback(app: AppHandle, playing: bool, texts: Vec<String>) {
 
 /// 기록의 음성 파일 경로 (다시 듣기). 화면이 읽을 수 있게 그 파일 하나만 허용한다.
 ///
-/// - 실시간 녹음: 기록 폴더의 `<id>.wav` (녹음 중에도 1초마다 헤더를 고쳐 써서 그때까지 들을 수 있다)
+/// - 실시간 녹음: 기록 폴더의 `<id>.opus` (녹음 중에도 1초마다 Ogg 페이지를 닫아 써서 그때까지 들을 수 있다).
+///   예전 기록은 `<id>.wav`.
 /// - 파일 받아쓰기: 원본 파일
 #[tauri::command]
 fn session_audio(app: AppHandle, id: String) -> CmdResult<Option<String>> {
@@ -1518,6 +1519,7 @@ fn main() {
             set_mini,
             set_playback,
             ui_ready,
+            smoke::smoke_probe,
             get_usage,
             open_folder,
             open_url,

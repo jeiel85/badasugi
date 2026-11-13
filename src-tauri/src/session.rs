@@ -261,8 +261,9 @@ impl SessionStore {
         self.dir.join(format!("{id}.json"))
     }
 
+    /// 새 녹음 파일 경로 (Ogg Opus). 예전 기록의 `.wav` 는 `audio_file` 에 적힌 이름 그대로 읽는다.
     pub fn audio_path(&self, id: &str) -> PathBuf {
-        self.dir.join(format!("{id}.wav"))
+        self.dir.join(format!("{id}.opus"))
     }
 
     pub fn begin(&mut self, doc: SessionDoc) {
@@ -423,7 +424,7 @@ impl SessionStore {
 
     pub fn delete(&mut self, id: &str) -> Result<()> {
         let id = safe_id(id)?;
-        for ext in ["json", "md", "wav"] {
+        for ext in ["json", "md", "opus", "wav"] {
             let p = self.dir.join(format!("{id}.{ext}"));
             if p.exists() {
                 std::fs::remove_file(p)?;

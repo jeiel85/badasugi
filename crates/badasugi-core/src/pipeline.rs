@@ -28,6 +28,7 @@ use crate::decode::AudioFile;
 use crate::resample::Resampler;
 use crate::speaker::{self, DiarizationConfig, SpeakerEncoder, SpeakerTracker};
 use crate::vad::{Segmenter, SegmenterConfig, SpeechSegment};
+use crate::ogg_opus::OpusRecorder;
 use crate::wav::WavRecorder;
 use crate::{samples_to_ms, SAMPLE_RATE};
 
@@ -50,7 +51,7 @@ pub struct PipelineConfig {
     /// 용어집 · 문맥 프롬프트
     #[serde(default)]
     pub prompt: String,
-    /// 지정하면 16 kHz 모노 WAV 로 녹음도 남긴다
+    /// 지정하면 녹음도 남긴다: 확장자 `.wav` 면 16 kHz 모노 PCM16, 그 밖(`.opus`)은 Ogg Opus 24 kbps (WAV 의 약 1/10)
     #[serde(default)]
     pub record_path: Option<PathBuf>,
 }
@@ -177,7 +178,7 @@ impl Pipeline {
         validate(&cfg)?;
         let segmenter = Segmenter::new(cfg.segmenter.clone())?;
         let recorder = match &cfg.record_path {
-            Some(p) => Some(WavRecorder::create(p)?),
+            Some(p) => Some(Recorder::create(p)?),
             None => None,
         };
 
@@ -626,13 +627,44 @@ impl MicCheck {
     }
 }
 
+/// 녹음 파일 쓰기 (확장자로 형식을 고른다)
+enum Recorder {
+    Wav(WavRecorder),
+    Opus(OpusRecorder),
+}
+
+impl Recorder {
+    fn create(path: &Path) -> Result<Self> {
+        let wav = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+        Ok(if wav {
+            Recorder::Wav(WavRecorder::create(path)?)
+        } else {
+            Recorder::Opus(OpusRecorder::create(path)?)
+        })
+    }
+
+    fn write(&mut self, samples: &[f32]) {
+        match self {
+            Recorder::Wav(r) => r.write(samples),
+            Recorder::Opus(r) => r.write(samples),
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        match self {
+            Recorder::Wav(r) => r.finish(),
+            Recorder::Opus(r) => r.finish(),
+        }
+    }
+}
+
 fn dsp_thread(
     rx: Receiver<RawChunk>,
     source: SourceKind,
     mut segmenter: Segmenter,
     seg_tx: Sender<SpeechSegment>,
     sink: EventSink,
-    mut recorder: Option<WavRecorder>,
+    mut recorder: Option<Recorder>,
     flags: Arc<Flags>,
 ) {
     const LEAD: usize = SAMPLE_RATE as usize / 5; // 200 ms

@@ -1,6 +1,7 @@
 # Badasugi smoke test: run the REAL app in an isolated "smoke mode" and check the full path
-#   live recording (test WAV instead of the mic) -> pause -> resume -> stop -> saved transcript/MD/WAV,
-#   then file transcription -> saved transcript, then the diagnostic log.
+#   live recording (test WAV instead of the mic) -> pause -> resume -> playback while recording -> stop ->
+#   saved transcript/MD/Opus recording -> playback in the UI, then file transcription -> saved transcript,
+#   then the diagnostic log.
 #
 #   pwsh scripts/smoke.ps1              # unit tests + build + smoke
 #   pwsh scripts/smoke.ps1 -SkipBuild   # use the existing target\release\badasugi.exe
