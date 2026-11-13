@@ -38,7 +38,7 @@
 | 💻 **온라인 회의** | 마이크 + **PC 소리(WASAPI 루프백)** 동시 캡처 — Zoom · Teams · Meet 상대방 목소리까지. 가상 오디오 장치 불필요. |
 | ✍️ **AI 회의록 요약** | 한 줄 요약 · 주요 논의 · 결정 사항 · 할 일(담당자/기한) + 회의 제목 자동 작성. **Groq · Gemini(무료 등급)** · Claude · OpenAI · 로컬 LLM(Ollama, 한국어 특화 **EXAONE 3.5**) · OpenAI 호환 서버. |
 | 🎧 **다시 듣기 · 문장 눌러 듣기** | 회의 녹음을 앱 안에서 바로 재생(속도 0.75~2배) — **녹음 중에도** 앞부분을 다시 들을 수 있어요. 문장을 누르면 그 부분만 들려주고, 이어 들으면 지금 문장을 따라가며 표시합니다. |
-| 📂 **녹음 파일 받아쓰기** | 휴대폰·Zoom 녹음(mp3 · m4a · mp4 · wav · flac · ogg)을 창에 **끌어다 놓으면** 화자를 나눠 받아 적습니다. |
+| 📂 **녹음 파일 받아쓰기** | 휴대폰·Zoom 녹음(mp3 · m4a · mp4 · wav · flac · ogg · opus)을 창에 **끌어다 놓으면** 화자를 나눠 받아 적습니다. |
 | 💾 **자동 저장 · 찾기 · 내보내기** | 말하는 동안 계속 저장(앱이 꺼져도 안전). 지난 회의 **전체 검색**, 녹취록 안 `Ctrl+F` 찾기. 더블클릭으로 오타 수정(비우면 삭제). Markdown · TXT · SRT 자막 · JSON. |
 | 🔄 **자동 업데이트** | 새 버전을 백그라운드에서 받아 두었다가, 쓰지 않을 때(트레이에 있을 때) 조용히 적용합니다. 서명(minisign)을 검증한 파일만 설치. |
 
@@ -157,7 +157,7 @@ badasugi.exe 회의.m4a :: 녹음 파일 받아쓰기
 
 | 내용 | 위치 |
 |---|---|
-| 회의 기록 (`.json` + `.md`, 선택 시 `.wav`) | `문서\받아쓰기\` |
+| 회의 기록 (`.json` + `.md`, 선택 시 녹음 `.opus` — 1시간 약 11MB) | `문서\받아쓰기\` |
 | 모델 | `%LOCALAPPDATA%\com.badasugi.desktop\models\` |
 | 설정 | `%APPDATA%\com.badasugi.desktop\settings.json` |
 | API 키 | Windows 자격 증명 관리자 (`badasugi`) |
@@ -216,7 +216,7 @@ cd src-tauri; cargo tauri build            # 설치 파일: target\release\bundl
   (cmake 크레이트가 Visual Studio 생성기에서 Release 최적화 플래그를 지우는 문제가 있어, 이 설정이 없으면 20배 이상 느려집니다.)
 - GPU 가속: [Vulkan SDK](https://vulkan.lunarg.com/) 설치 후 `cargo build --release -p badasugi --features vulkan`
 
-- 자동 점검: `pwsh scripts/smoke.ps1` — 실제 앱을 격리된 임시 폴더에서 띄워 화면 표시 · 녹음(테스트 음성) · 일시정지 · 정지 · 저장(JSON·MD·WAV) · 파일 받아쓰기 · 진단 로그까지 검사합니다. 쓰고 있는 앱·설정·기록은 건드리지 않아요. 릴리스 스크립트가 배포 전에 자동으로 실행합니다.
+- 자동 점검: `pwsh scripts/smoke.ps1` — 실제 앱을 격리된 임시 폴더에서 띄워 화면 표시 · 녹음(테스트 음성) · 일시정지 · 정지 · 저장(JSON·MD·Opus) · 다시 듣기(녹음 중·후) · 파일 받아쓰기 · 진단 로그까지 검사합니다. 쓰고 있는 앱·설정·기록은 건드리지 않아요. 릴리스 스크립트가 배포 전에 자동으로 실행합니다.
 - 릴리스(서명된 업데이트 포함): `pwsh scripts/release.ps1 -Notes "변경 내용"` 한 번으로 빌드 → 서명 → `latest.json` → GitHub Release 업로드. 업데이트 서명 키(`%USERPROFILE%\.tauri\badasugi.key`)가 필요합니다.
 
 ### 프로젝트 구조

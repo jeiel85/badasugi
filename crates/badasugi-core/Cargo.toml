@@ -21,6 +21,9 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 cpal = "0.18"
 hound = "3.5"
+# 회의 녹음 저장 (Ogg Opus: 같은 음질에 WAV 의 약 1/10 크기, libopus 는 BSD)
+opus = "0.4"
+ogg = "0.9"
 sha2 = "0.10"
 # 오디오 파일 불러오기 (필요한 형식만: wav · mp3 · m4a/mp4/mov(aac) · flac · ogg vorbis)
 symphonia = { version = "0.5.5", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "aac", "isomp4", "flac", "ogg", "vorbis"] }

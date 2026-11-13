@@ -1,4 +1,5 @@
-//! 오디오 파일 디코딩 (symphonia): wav · mp3 · m4a/mp4/mov(aac) · flac · ogg(vorbis) → 16 kHz 모노.
+//! 오디오 파일 디코딩 (symphonia): wav · mp3 · m4a/mp4/mov(aac) · flac · ogg(vorbis · opus) → 16 kHz 모노.
+//! Opus 는 symphonia 에 디코더가 없어 libopus 로 푼다 ([`crate::ogg_opus::OpusDecoder`]).
 //!
 //! 파일 전체를 한 번에 메모리에 풀지 않고, `read` 할 때마다 다음 몇 패킷만 디코딩한다 (1시간짜리 파일도 메모리 일정).
 
@@ -7,7 +8,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecParameters, CodecRegistry, Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
@@ -18,9 +19,9 @@ use crate::resample::Resampler;
 use crate::SAMPLE_RATE;
 
 /// 불러올 수 있는 파일 확장자 (소문자)
-pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "mp4", "mov", "aac", "flac", "ogg", "oga"];
+pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "mp4", "mov", "aac", "flac", "ogg", "oga", "opus"];
 
-const UNSUPPORTED: &str = "지원하지 않는 오디오 형식이에요 (mp3·m4a·wav·flac·ogg 지원)";
+const UNSUPPORTED: &str = "지원하지 않는 오디오 형식이에요 (mp3·m4a·wav·flac·ogg·opus 지원)";
 
 /// `read` 한 번에 최소 이만큼(16 kHz 샘플 = 100 ms) 만들어 돌려준다
 const MIN_READ: usize = SAMPLE_RATE as usize / 10;
@@ -190,7 +191,7 @@ impl AudioFile {
 
 /// 디코더를 만들 수 있는 첫 오디오 트랙 (기본 트랙 우선) → (트랙 ID, 디코더, 길이 ms)
 fn select_track(format: &dyn FormatReader) -> Option<(u32, Box<dyn Decoder>, Option<u64>)> {
-    let codecs = symphonia::default::get_codecs();
+    let codecs = codecs();
     let opts = DecoderOptions::default();
     let default_id = format.default_track().map(|t| t.id);
     let mut tracks: Vec<_> = format
@@ -206,6 +207,17 @@ fn select_track(format: &dyn FormatReader) -> Option<(u32, Box<dyn Decoder>, Opt
         }
     }
     None
+}
+
+/// symphonia 기본 디코더 + Opus (libopus)
+fn codecs() -> &'static CodecRegistry {
+    static REGISTRY: std::sync::OnceLock<CodecRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut r = CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut r);
+        r.register_all::<crate::ogg_opus::OpusDecoder>();
+        r
+    })
 }
 
 fn duration_ms(p: &CodecParameters) -> Option<u64> {

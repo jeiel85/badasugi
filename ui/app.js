@@ -896,7 +896,7 @@ $('#btn-import').addEventListener('click', () => pickFile());
 $('#btn-open-file').addEventListener('click', () => pickFile());
 
 /* ───────────── 파일 받아쓰기 ───────────── */
-const exts = () => S.app?.audioExts || ['wav', 'mp3', 'm4a', 'mp4', 'flac', 'ogg'];
+const exts = () => S.app?.audioExts || ['wav', 'mp3', 'm4a', 'mp4', 'flac', 'ogg', 'opus'];
 async function pickFile() {
   if (S.rec !== 'idle') return toast('녹음을 마친 뒤에 파일을 불러올 수 있어요', 'error');
   const path = await api.open({ multiple: false, directory: false, filters: [{ name: '오디오·영상', extensions: exts() }] });
@@ -1696,7 +1696,7 @@ function createMock() {
     keys: { openai: false, groq: false, custom: false, anthropic: false, gemini: false, llmCustom: false },
     autostart: false, version: '0.2.0', current: null, elapsedMs: 0,
     paused: false, fileMode: false, update: null, updatedFrom: null,
-    audioExts: ['wav', 'mp3', 'm4a', 'mp4', 'mov', 'aac', 'flac', 'ogg', 'oga'],
+    audioExts: ['wav', 'mp3', 'm4a', 'mp4', 'mov', 'aac', 'flac', 'ogg', 'oga', 'opus'],
     demo: new URLSearchParams(location.search).has('demo'),
   };
   return {

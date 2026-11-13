@@ -8,6 +8,7 @@ pub mod audio;
 pub mod decode;
 pub mod fbank;
 pub mod models;
+pub mod ogg_opus;
 pub mod onnx;
 pub mod perf;
 pub mod pipeline;

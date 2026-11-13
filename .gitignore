@@ -2,6 +2,7 @@
 /src-tauri/gen/
 *.part
 *.wav
+*.opus
 !crates/badasugi-core/assets/*.wav
 /.claude/
 /dist/
