@@ -40,6 +40,15 @@ pub struct UpdateStatus {
 fn set_status(app: &AppHandle, status: Option<UpdateStatus>) {
     *app.state::<Updates>().status.lock() = status.clone();
     let _ = app.emit("bd://update", status);
+    // 대기 중이면 트레이 아이콘에 초록 점
+    crate::status::refresh(app);
+}
+
+impl Updates {
+    /// 내려받아 두어 바로 설치할 수 있는 새 버전이 있는가
+    pub fn is_ready(&self) -> bool {
+        self.ready.lock().is_some()
+    }
 }
 
 /// 백그라운드 확인 루프

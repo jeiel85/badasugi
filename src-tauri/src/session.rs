@@ -39,6 +39,8 @@ pub struct SessionDoc {
     pub auto_title: bool,
     /// 파일 받아쓰기라면 원본 파일 이름
     pub source_file: Option<String>,
+    /// 파일 받아쓰기라면 원본 파일 전체 경로 (다시 듣기용)
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

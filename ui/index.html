@@ -47,6 +47,15 @@
       <div class="speakers" id="speakers"></div>
     </section>
 
+    <!-- 다시 듣기 -->
+    <div class="player" id="player" hidden>
+      <button class="icon-btn sm" id="pl-play" title="재생 · 멈춤 (Space)"><svg><use href="#i-play"/></svg></button>
+      <span class="pl-time" id="pl-time">00:00</span>
+      <input type="range" id="pl-seek" min="0" max="1000" value="0" title="원하는 곳으로 옮기기" />
+      <span class="pl-time" id="pl-dur">00:00</span>
+      <button class="pl-rate" id="pl-rate" title="재생 속도">1×</button>
+    </div>
+
     <!-- 찾기 -->
     <div class="findbar" id="findbar" hidden>
       <svg><use href="#i-search"/></svg>

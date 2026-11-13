@@ -11,7 +11,7 @@ tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 badasugi-core = { path = "../crates/badasugi-core" }
-tauri = { version = "2.12", features = ["tray-icon", "image-png", "custom-protocol"] }
+tauri = { version = "2.12", features = ["tray-icon", "image-png", "custom-protocol", "protocol-asset"] }
 tauri-plugin-global-shortcut = "2.4"
 tauri-plugin-single-instance = "2.5"
 tauri-plugin-autostart = "2.7"

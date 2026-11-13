@@ -203,6 +203,8 @@ function renderDoc() {
   renderSummary();
   updateActions();
   renderMiniCap();
+  syncAudio();
+  markPlaying(false);
   if (S.findQ) { updateFind(false); return; }
   if (stick) body.scrollTop = body.scrollHeight;
   else if (S.live && S.rec === 'recording') $('#jump').hidden = false;
@@ -622,6 +624,8 @@ $('#transcript').addEventListener('click', (e) => {
 
 // 발화 고치기 (더블클릭)
 $('#transcript').addEventListener('dblclick', (e) => {
+  clearTimeout(playClick);
+  if (!audio.paused && P.until != null) audio.pause();
   const el = e.target.closest('.u[data-id]');
   const d = doc();
   if (!el || !d) return;
@@ -768,6 +772,8 @@ document.addEventListener('keydown', (e) => {
     hidePopovers();
   }
   if (e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFind(); }
+  const typing = e.target.closest?.('input, textarea, select, [contenteditable="true"]');
+  if (e.code === 'Space' && !typing && !e.ctrlKey && !e.altKey && P.src && !S.mini) { e.preventDefault(); togglePlay(); }
   if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoom(1); }
   if (e.ctrlKey && e.key === '-') { e.preventDefault(); zoom(-1); }
   if (e.ctrlKey && e.key === '0') { e.preventDefault(); zoom(0); }
@@ -924,6 +930,135 @@ function zoom(dir) {
   if (dir !== 0 || fontPx !== 15) toast(`글자 크기 ${fontPx}px`);
 }
 $('#transcript').style.setProperty('--fs', `${fontPx}px`);
+
+/* ───────────── 다시 듣기 · 문장 눌러 듣기 ───────────── */
+const audio = new Audio();
+audio.preload = 'metadata';
+// key: 지금 재생할 수 있는 기록 id · until: 문장 하나만 들을 때 멈출 위치(초)
+const P = { key: null, src: null, until: null, curId: null, started: false, raf: 0, seeking: false, followId: null };
+let playClick;
+
+function playableKey() {
+  const d = doc();
+  if (!d) return null;
+  // 실시간 녹음 중에는 녹음 파일이 아직 닫히지 않아 들을 수 없다 (파일 받아쓰기는 원본을 바로 들을 수 있음)
+  if (S.live && S.rec !== 'idle' && !S.fileMode) return null;
+  return d.id;
+}
+async function syncAudio() {
+  const key = playableKey();
+  if (key === P.key) return;
+  P.key = key;
+  P.src = null;
+  P.until = null;
+  P.started = false;
+  audio.pause();
+  audio.removeAttribute('src');
+  renderPlayer();
+  if (!key) return;
+  let path = null;
+  try { path = await api.invoke('session_audio', { id: key }); } catch { /* 없으면 숨김 */ }
+  if (P.key !== key || !path) return;
+  P.src = T ? T.core.convertFileSrc(path) : path;
+  audio.src = P.src;
+  audio.playbackRate = +(localStorage.getItem('playRate') || 1) || 1;
+  renderPlayer();
+  try {
+    if (!localStorage.getItem('hintPlay')) { localStorage.setItem('hintPlay', '1'); toast('문장을 누르면 그 부분을 들을 수 있어요'); }
+  } catch { /* 저장소를 못 쓰면 안내만 생략 */ }
+}
+function renderPlayer() {
+  const on = !!P.src;
+  $('#player').hidden = !on;
+  $('#transcript').classList.toggle('can-play', on);
+  if (!on) return;
+  $('#pl-play use').setAttribute('href', audio.paused ? '#i-play' : '#i-pause');
+  const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+  $('#pl-time').textContent = fmt(audio.currentTime * 1000);
+  $('#pl-dur').textContent = fmt(dur * 1000);
+  if (!P.seeking) $('#pl-seek').value = dur ? Math.round((audio.currentTime / dur) * 1000) : 0;
+  $('#pl-rate').textContent = `${audio.playbackRate}×`;
+}
+function markPlaying(follow) {
+  $$('#transcript .u.playing').forEach((el) => el.classList.remove('playing'));
+  const d = doc();
+  if (!P.src || !P.started || !d) return;
+  const t = audio.currentTime * 1000;
+  const u = d.utterances.find((x) => t >= x.startMs - 200 && t <= x.endMs + 300);
+  const el = u && $(`#transcript .u[data-id="${u.id}"]`);
+  if (!el) return;
+  el.classList.add('playing');
+  // 이어 듣는 중이면 지금 문장이 보이게 따라간다
+  if (follow && P.followId !== u.id) {
+    P.followId = u.id;
+    const r = el.getBoundingClientRect();
+    const b = body.getBoundingClientRect();
+    if (r.top < b.top + 30 || r.bottom > b.bottom - 30) body.scrollTop += r.top - b.top - body.clientHeight / 3;
+  }
+}
+function checkUntil() {
+  if (P.until != null && audio.currentTime >= P.until) { audio.pause(); P.until = null; }
+}
+function tick() {
+  checkUntil();
+  renderPlayer();
+  markPlaying(P.until == null);
+  if (!audio.paused) P.raf = requestAnimationFrame(tick);
+}
+function togglePlay() {
+  if (!P.src) return;
+  if (audio.paused) { P.until = null; audio.play().catch((e) => toast(`재생할 수 없어요: ${e.message || e}`, 'error')); }
+  else audio.pause();
+}
+function playUtterance(id) {
+  const u = doc()?.utterances.find((x) => x.id === id);
+  if (!u || !P.src) return;
+  // 듣고 있는 문장을 다시 누르면 멈춤
+  if (!audio.paused && P.until != null && P.curId === id) { audio.pause(); return; }
+  P.curId = id;
+  P.followId = id;
+  audio.currentTime = Math.max(0, u.startMs / 1000 - 0.15);
+  P.until = u.endMs / 1000 + 0.2;
+  audio.play().catch((e) => toast(`재생할 수 없어요: ${e.message || e}`, 'error'));
+}
+audio.addEventListener('play', () => { P.started = true; cancelAnimationFrame(P.raf); P.raf = requestAnimationFrame(tick); });
+audio.addEventListener('pause', () => { renderPlayer(); markPlaying(false); });
+audio.addEventListener('timeupdate', checkUntil); // 창이 숨겨져 rAF 가 멈춰도 문장 끝에서 멈추게
+audio.addEventListener('loadedmetadata', renderPlayer);
+audio.addEventListener('ended', () => { P.until = null; renderPlayer(); });
+audio.addEventListener('error', () => {
+  if (!P.src) return;
+  P.src = null;
+  renderPlayer();
+  toast('녹음 파일을 열 수 없어요 (옮겼거나 지웠을 수 있어요)', 'error');
+});
+$('#pl-play').addEventListener('click', togglePlay);
+$('#pl-seek').addEventListener('input', (e) => {
+  P.seeking = true;
+  P.until = null;
+  P.started = true;
+  const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+  audio.currentTime = (+e.target.value / 1000) * dur;
+  renderPlayer();
+  markPlaying(true);
+});
+$('#pl-seek').addEventListener('change', () => { P.seeking = false; });
+const RATES = [1, 1.25, 1.5, 2, 0.75];
+$('#pl-rate').addEventListener('click', () => {
+  const i = RATES.indexOf(audio.playbackRate);
+  audio.playbackRate = RATES[(i + 1) % RATES.length];
+  try { localStorage.setItem('playRate', String(audio.playbackRate)); } catch { /* 무시 */ }
+  renderPlayer();
+});
+// 문장 한 번 누르기 → 그 부분 듣기 (더블클릭 편집·글자 선택과 겹치지 않게 잠깐 기다린다)
+$('#transcript').addEventListener('click', (e) => {
+  const el = e.target.closest('.u[data-id]');
+  if (!el || !P.src || editing || e.target.closest('.g-name')) return;
+  if (!window.getSelection().isCollapsed) return;
+  clearTimeout(playClick);
+  const id = +el.dataset.id;
+  playClick = setTimeout(() => playUtterance(id), 230);
+});
 
 /* ───────────── 미니 창 ───────────── */
 // 미니 창에서는 도크 빈 곳을 잡고 끌어 옮긴다 (큰 창에서는 더블클릭 최대화를 막으려고 끈다)
@@ -1297,6 +1432,26 @@ function loadDemo() {
   setInterval(() => setLevel(0.02 + Math.random() * 0.12), 90);
 }
 
+// 브라우저 미리보기용: 발화 구간마다 다른 높이의 소리가 나는 WAV
+let demoWav;
+function demoWavUrl() {
+  if (demoWav) return demoWav;
+  const rate = 8000, secs = 66, n = rate * secs;
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+  const segs = demoDoc().utterances;
+  for (let i = 0; i < n; i++) {
+    const t = i / rate, ms = t * 1000;
+    const u = segs.find((x) => ms >= x.startMs && ms <= x.endMs);
+    const f = u ? 180 + u.speaker * 90 : 0;
+    v.setInt16(44 + i * 2, f ? Math.sin(2 * Math.PI * f * t) * 2500 : 0, true);
+  }
+  demoWav = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  return demoWav;
+}
+
 function createMock() {
   const handlers = {};
   const st = {
@@ -1328,6 +1483,7 @@ function createMock() {
       if (cmd === 'save_settings') { st.settings = args.settings; return; }
       if (cmd === 'list_devices') return [{ id: 'mic1', name: '마이크(Realtek Audio)', isDefault: true }];
       if (cmd === 'search_sessions') return [];
+      if (cmd === 'session_audio') return demoWavUrl();
       if (cmd === 'set_mini') { st.settings.miniMode = args.mini; handlers['bd://mini'] && handlers['bd://mini']({ payload: args.mini }); return; }
       if (cmd === 'list_sessions') return [{ id: 'demo', title: '앱 출시 일정 회의', startedAt: '2026-11-12 14:30', durationMs: 61000, count: 7, speakers: 3, preview: '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.' }];
       if (cmd === 'load_session') return demoDoc();

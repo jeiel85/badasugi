@@ -4,6 +4,7 @@
 mod session;
 mod settings;
 mod snap;
+mod status;
 mod summary;
 mod update;
 
@@ -50,14 +51,16 @@ pub(crate) struct AppState {
     pub settings: Mutex<Settings>,
     pub paths: Paths,
     pub rec: Mutex<RecState>,
-    pipeline: Mutex<Option<Pipeline>>,
+    pub pipeline: Mutex<Option<Pipeline>>,
     pub store: Mutex<SessionStore>,
     dl_cancel: Arc<AtomicBool>,
     pub downloading: Mutex<Option<String>>,
     /// 진행 중인 요약 등 (업데이트 설치를 미룬다)
     pub busy_ops: AtomicUsize,
     /// 지금 세션이 파일 받아쓰기인지
-    file_mode: AtomicBool,
+    pub file_mode: AtomicBool,
+    /// 파일 받아쓰기 진행률 + 1 (0 = 모름)
+    pub file_pct: AtomicUsize,
     /// 업데이트 직후 첫 실행이면 이전 버전
     updated_from: Mutex<Option<String>>,
     /// 시작할 때 단축키 등록에 실패했다면 그 이유 (다른 앱이 쓰는 중 등)
@@ -65,9 +68,7 @@ pub(crate) struct AppState {
     tray_toggle: Mutex<Option<MenuItem<Wry>>>,
     tray_pause: Mutex<Option<MenuItem<Wry>>>,
     tray_mini: Mutex<Option<MenuItem<Wry>>>,
-    icon_idle: Image<'static>,
-    icon_rec: Image<'static>,
-    rec_started: Mutex<Option<Instant>>,
+    pub rec_started: Mutex<Option<Instant>>,
     quit_after_stop: AtomicBool,
 }
 
@@ -385,19 +386,7 @@ fn set_rec(app: &AppHandle, state: RecState) {
     let st = app.state::<AppState>();
     *st.rec.lock() = state;
     let recording = matches!(state, RecState::Recording | RecState::Starting);
-    if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_icon(Some(if recording {
-            st.icon_rec.clone()
-        } else {
-            st.icon_idle.clone()
-        }));
-        let _ = tray.set_tooltip(Some(match state {
-            RecState::Idle => "받아쓰기 — 대기 중",
-            RecState::Starting => "받아쓰기 — 시작하는 중…",
-            RecState::Recording => "받아쓰기 — 녹음 중",
-            RecState::Stopping => "받아쓰기 — 정리하는 중…",
-        }));
-    }
+    status::refresh(app);
     if let Some(item) = st.tray_toggle.lock().as_ref() {
         let _ = item.set_text(if recording { "녹음 중지" } else { "녹음 시작" });
     }
@@ -414,10 +403,7 @@ fn set_paused_inner(app: &AppHandle, paused: bool) -> CmdResult<()> {
     let p = guard.as_ref().ok_or("녹음 중이 아니에요")?;
     p.set_paused(paused);
     drop(guard);
-    if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(if paused { "받아쓰기 — 일시정지" } else { "받아쓰기 — 녹음 중" }));
-        let _ = tray.set_icon(Some(if paused { st.icon_idle.clone() } else { st.icon_rec.clone() }));
-    }
+    status::refresh(app);
     if let Some(item) = st.tray_pause.lock().as_ref() {
         let _ = item.set_text(if paused { "이어서 녹음" } else { "일시정지" });
     }
@@ -466,6 +452,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
             let stem = f.file_stem().and_then(|n| n.to_str()).unwrap_or("오디오 파일");
             doc.title = stem.chars().take(60).collect();
             doc.source_file = Some(name);
+            doc.source_path = Some(f.display().to_string());
         }
         let record_path = if s.save_audio && file.is_none() {
             let p = st.store.lock().audio_path(&doc.id);
@@ -493,6 +480,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         let app2 = app.clone();
         let sink: EventSink = Arc::new(move |ev| on_pipeline_event(&app2, ev));
         st.file_mode.store(file.is_some(), Ordering::SeqCst);
+        st.file_pct.store(0, Ordering::SeqCst);
         match file {
             Some(f) => Pipeline::start_file(f, cfg, sink).map_err(err),
             None => Pipeline::start(cfg, sink).map_err(err),
@@ -587,6 +575,12 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             store.mark_dirty();
             store.autosave();
         }
+        Event::Progress { done_ms, total_ms } if *total_ms > 0 => {
+            let pct = (done_ms * 100 / total_ms).min(100) as usize + 1;
+            if st.file_pct.swap(pct, Ordering::SeqCst) != pct {
+                status::refresh(app);
+            }
+        }
         Event::Level { position_ms, .. } => {
             if let Some(doc) = st.store.lock().current.as_mut() {
                 doc.duration_ms = doc.duration_ms.max(*position_ms);
@@ -638,6 +632,44 @@ async fn search_sessions(app: AppHandle, query: String) -> Vec<SearchHit> {
     tauri::async_runtime::spawn_blocking(move || SessionStore::new(dir).search(&query))
         .await
         .unwrap_or_default()
+}
+
+/// 기록의 음성 파일 경로 (다시 듣기). 화면이 읽을 수 있게 그 파일 하나만 허용한다.
+///
+/// - 실시간 녹음: 기록 폴더의 `<id>.wav` (녹음 중에는 파일이 아직 닫히지 않아 재생할 수 없음 → 없음)
+/// - 파일 받아쓰기: 원본 파일
+#[tauri::command]
+fn session_audio(app: AppHandle, id: String) -> CmdResult<Option<String>> {
+    let st = app.state::<AppState>();
+    let live_recording = {
+        let store = st.store.lock();
+        store.current.as_ref().is_some_and(|c| c.id == id) && !st.file_mode.load(Ordering::SeqCst)
+    };
+    if live_recording {
+        return Ok(None);
+    }
+    let (doc, dir) = {
+        let store = st.store.lock();
+        (store.load(&id).map_err(err)?, store.dir.clone())
+    };
+    let wav = doc
+        .audio_file
+        .as_deref()
+        // 기록 파일을 고쳐 다른 경로를 가리키게 해도 기록 폴더 밖은 열지 않는다
+        .and_then(|f| std::path::Path::new(f).file_name())
+        .map(|f| dir.join(f))
+        .filter(|p| p.is_file());
+    let original = doc.source_path.as_deref().map(PathBuf::from).filter(|p| {
+        p.is_file()
+            && p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| badasugi_core::decode::AUDIO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+    });
+    let Some(path) = wav.or(original) else {
+        return Ok(None);
+    };
+    app.asset_protocol_scope().allow_file(&path).map_err(err)?;
+    Ok(Some(path.display().to_string()))
 }
 
 #[tauri::command]
@@ -917,26 +949,6 @@ fn toggle_main(app: &AppHandle) {
     }
 }
 
-/// 트레이 아이콘 오른쪽 아래에 빨간 점을 찍어 "녹음 중" 아이콘을 만든다
-fn recording_icon(base: &Image<'_>) -> Image<'static> {
-    let (w, h) = (base.width() as i32, base.height() as i32);
-    let mut px = base.rgba().to_vec();
-    let r = (w as f32 * 0.24).max(4.0);
-    let (cx, cy) = (w as f32 - r - 0.5, h as f32 - r - 0.5);
-    for y in 0..h {
-        for x in 0..w {
-            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-            let i = ((y * w + x) * 4) as usize;
-            if d <= r - 1.0 {
-                px[i..i + 4].copy_from_slice(&[239, 68, 68, 255]);
-            } else if d <= r + 0.6 {
-                px[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
-            }
-        }
-    }
-    Image::new_owned(px, w as u32, h as u32)
-}
-
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "녹음 시작", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "일시정지", false, None::<&str>)?;
@@ -953,7 +965,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     *app.state::<AppState>().tray_mini.lock() = Some(mini);
 
     TrayIconBuilder::with_id("main")
-        .icon(app.state::<AppState>().icon_idle.clone())
+        .icon(app.state::<status::Status>().idle_icon())
         .tooltip("받아쓰기 — 대기 중")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -1135,8 +1147,7 @@ fn main() {
             let start_hidden = marker.exists();
             let _ = std::fs::remove_file(&marker);
 
-            let icon_idle = Image::from_bytes(include_bytes!("../icons/tray.png"))?.to_owned();
-            let icon_rec = recording_icon(&icon_idle);
+            let tray_base = Image::from_bytes(include_bytes!("../icons/tray.png"))?.to_owned();
 
             app.manage(AppState {
                 settings: Mutex::new(settings.clone()),
@@ -1153,17 +1164,17 @@ fn main() {
                 downloading: Mutex::new(None),
                 busy_ops: AtomicUsize::new(0),
                 file_mode: AtomicBool::new(false),
+                file_pct: AtomicUsize::new(0),
                 updated_from: Mutex::new(updated_from),
                 hotkey_error: Mutex::new(None),
                 tray_toggle: Mutex::new(None),
                 tray_pause: Mutex::new(None),
                 tray_mini: Mutex::new(None),
-                icon_idle,
-                icon_rec,
                 rec_started: Mutex::new(None),
                 quit_after_stop: AtomicBool::new(false),
             });
             app.manage(Updates::default());
+            app.manage(status::Status::new(tray_base));
 
             setup_tray(&handle)?;
             if let Err(e) = register_hotkey(&handle, &settings.hotkey) {
@@ -1186,6 +1197,7 @@ fn main() {
                 }
             }
             update::spawn_background(handle.clone());
+            status::spawn_ticker(handle.clone());
             if let Some(file) = audio_arg(&std::env::args().collect::<Vec<_>>()) {
                 open_file_from_cli(handle.clone(), file);
             }
@@ -1216,6 +1228,7 @@ fn main() {
             transcribe_file,
             list_sessions,
             search_sessions,
+            session_audio,
             load_session,
             save_session,
             delete_session,
