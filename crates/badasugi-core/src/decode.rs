@@ -47,6 +47,14 @@ pub struct AudioFile {
 impl AudioFile {
     /// 파일을 열고 형식을 확인한다. 지원하지 않는 형식이거나 오디오 트랙이 없으면 바로 에러.
     pub fn open(path: &Path) -> Result<AudioFile> {
+        // 손상·조작된 파일은 디코더 안에서 패닉이 날 수 있다 (예: mp4 timescale 0) → 오류로 돌려준다
+        std::panic::catch_unwind(|| Self::open_inner(path)).unwrap_or_else(|_| {
+            log::warn!("오디오 파일을 여는 중 디코더가 멈춤: {}", path.display());
+            Err(anyhow!("파일이 손상됐거나 읽을 수 없는 형식이에요"))
+        })
+    }
+
+    fn open_inner(path: &Path) -> Result<AudioFile> {
         let file = File::open(path).map_err(|e| anyhow!("파일을 열 수 없어요: {} ({e})", path.display()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();

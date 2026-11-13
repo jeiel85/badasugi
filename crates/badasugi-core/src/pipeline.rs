@@ -495,9 +495,20 @@ fn asr_worker(
             None
         }
     };
+    // API 가 연달아 실패하면(인터넷 끊김·키 오류) 20초 동안은 부르지 않고 바로 실패 처리한다.
+    // 한 번에 30초 넘게 걸리는 재시도가 쌓여 정지·종료가 몇 시간씩 걸리지 않게. (녹음 파일은 남는다)
+    let mut fails = 0u32;
+    let mut skip_until: Option<Instant> = None;
     for job in rx {
         // 결과가 어떻든 이 조각 처리가 끝나면 진행률에 반영
         let _done = inflight.as_deref().map(|t| InflightDone(t, job.origin));
+        if skip_until.is_some_and(|t| Instant::now() < t) {
+            sink(Event::Failed {
+                id: job.id,
+                message: "연결 문제로 잠시 건너뜀 (녹음 파일에는 남아요)".into(),
+            });
+            continue;
+        }
         let Some(engine) = engine.as_mut() else {
             sink(Event::Failed {
                 id: job.id,
@@ -511,7 +522,17 @@ fn asr_worker(
             language: &lang,
             prompt: &prompt,
         };
-        match engine.transcribe(&req) {
+        let result = engine.transcribe(&req);
+        if result.is_ok() {
+            fails = 0;
+            skip_until = None;
+        } else if !is_local {
+            fails += 1;
+            if fails >= 3 {
+                skip_until = Some(Instant::now() + Duration::from_secs(20));
+            }
+        }
+        match result {
             Ok(raw) => {
                 let text = crate::text::clean(&raw);
                 if text.is_empty() {

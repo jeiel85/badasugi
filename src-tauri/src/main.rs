@@ -61,6 +61,8 @@ pub(crate) struct AppState {
     pub file_mode: AtomicBool,
     /// 파일 받아쓰기 진행률 + 1 (0 = 모름)
     pub file_pct: AtomicUsize,
+    /// 이번 녹음에서 자동 저장 실패를 이미 알렸나 (한 번만 알림)
+    save_warned: AtomicBool,
     /// 업데이트 직후 첫 실행이면 이전 버전
     updated_from: Mutex<Option<String>>,
     /// 시작할 때 단축키 등록에 실패했다면 그 이유 (다른 앱이 쓰는 중 등)
@@ -184,6 +186,7 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
         let cur = st.settings.lock();
         settings.mini_mode = cur.mini_mode;
         settings.mini_pos = cur.mini_pos;
+        settings.mini_docked = cur.mini_docked;
         settings.full_bounds = cur.full_bounds;
         settings.last_version = cur.last_version.clone();
         cur.hotkey.clone()
@@ -387,10 +390,12 @@ fn set_rec(app: &AppHandle, state: RecState) {
     *st.rec.lock() = state;
     let recording = matches!(state, RecState::Recording | RecState::Starting);
     status::refresh(app);
-    if let Some(item) = st.tray_toggle.lock().as_ref() {
+    let item = st.tray_toggle.lock().clone();
+    if let Some(item) = item {
         let _ = item.set_text(if recording { "녹음 중지" } else { "녹음 시작" });
     }
-    if let Some(item) = st.tray_pause.lock().as_ref() {
+    let item = st.tray_pause.lock().clone();
+    if let Some(item) = item {
         let _ = item.set_enabled(state == RecState::Recording);
         let _ = item.set_text("일시정지");
     }
@@ -404,7 +409,8 @@ fn set_paused_inner(app: &AppHandle, paused: bool) -> CmdResult<()> {
     p.set_paused(paused);
     drop(guard);
     status::refresh(app);
-    if let Some(item) = st.tray_pause.lock().as_ref() {
+    let item = st.tray_pause.lock().clone();
+    if let Some(item) = item {
         let _ = item.set_text(if paused { "이어서 녹음" } else { "일시정지" });
     }
     let _ = app.emit("bd://paused", paused);
@@ -443,7 +449,8 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
     }
     set_rec(app, RecState::Starting);
 
-    let result = (|| -> CmdResult<Pipeline> {
+    // 안에서 패닉이 나도(손상된 파일 등) Err 로 바꿔 아래에서 대기 상태로 되돌린다 — '시작 중'에 갇히지 않게
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> CmdResult<Pipeline> {
         let s = st.settings.lock().clone();
         let engine = build_engine(&s, &st.paths)?;
         let mut doc = SessionDoc::new(engine.label());
@@ -481,11 +488,13 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         let sink: EventSink = Arc::new(move |ev| on_pipeline_event(&app2, ev));
         st.file_mode.store(file.is_some(), Ordering::SeqCst);
         st.file_pct.store(0, Ordering::SeqCst);
+        st.save_warned.store(false, Ordering::SeqCst);
         match file {
             Some(f) => Pipeline::start_file(f, cfg, sink).map_err(err),
             None => Pipeline::start(cfg, sink).map_err(err),
         }
-    })();
+    }))
+    .unwrap_or_else(|_| Err("시작하는 중 예기치 못한 오류가 났어요. 다른 파일로 다시 시도해 주세요.".to_string()));
 
     match result {
         Ok(p) => {
@@ -573,7 +582,14 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 });
             }
             store.mark_dirty();
-            store.autosave();
+            if let Err(e) = store.autosave() {
+                if !st.save_warned.swap(true, Ordering::SeqCst) {
+                    let _ = app.emit(
+                        "bd://toast",
+                        format!("회의 기록을 저장하지 못하고 있어요 ({e}). 녹음은 계속돼요 — 문서 폴더·디스크 공간을 확인해 주세요."),
+                    );
+                }
+            }
         }
         Event::Progress { done_ms, total_ms } if *total_ms > 0 => {
             let pct = (done_ms * 100 / total_ms).min(100) as usize + 1;
@@ -582,8 +598,10 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             }
         }
         Event::Level { position_ms, .. } => {
-            if let Some(doc) = st.store.lock().current.as_mut() {
-                doc.duration_ms = doc.duration_ms.max(*position_ms);
+            if let Some(mut store) = st.store.try_lock() {
+                if let Some(doc) = store.current.as_mut() {
+                    doc.duration_ms = doc.duration_ms.max(*position_ms);
+                }
             }
         }
         Event::Stopped => {
@@ -592,13 +610,42 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             st.file_mode.store(false, Ordering::SeqCst);
             {
                 let mut store = st.store.lock();
-                if let Err(e) = store.flush() {
-                    log::warn!("기록 저장 실패: {e}");
+                // 마지막 저장: 실패하면(디스크 가득·백신·OneDrive 잠금 등) 잠깐 뒤 다시, 그래도 안 되면 앱 폴더에 따로 저장하고 알린다
+                let mut saved = store.flush();
+                for _ in 0..2 {
+                    if saved.is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    saved = store.flush();
                 }
-                // 내용이 없는 세션은 녹음 파일도 남기지 않는다
+                if let Err(e) = saved {
+                    log::warn!("기록 저장 실패: {e}");
+                    let rescue = st.paths.config.join("recovered");
+                    let msg = match store.current.as_ref().map(|d| session::write_doc(&rescue, d)) {
+                        Some(Ok(())) => format!(
+                            "회의 기록을 문서 폴더에 저장하지 못해 따로 저장했어요: {} ({e})",
+                            rescue.display()
+                        ),
+                        _ => format!("회의 기록을 저장하지 못했어요: {e}"),
+                    };
+                    let _ = app.emit("bd://toast", msg);
+                }
                 if let Some(doc) = store.current.take() {
                     if doc.utterances.is_empty() {
-                        let _ = std::fs::remove_file(store.audio_path(&doc.id));
+                        let wav = store.audio_path(&doc.id);
+                        // 받아 적힌 문장이 없어도(인터넷 끊김·API 키 오류 등) 5초 넘는 녹음은 지우지 않고 기록으로 남긴다
+                        // → 나중에 회의 기록에서 다시 듣거나, 녹음 파일로 다시 받아 적을 수 있다
+                        if doc.audio_file.is_some() && doc.duration_ms >= 5_000 && wav.is_file() {
+                            if session::write_doc(&store.dir, &doc).is_ok() {
+                                let _ = app.emit(
+                                    "bd://toast",
+                                    "받아 적힌 문장은 없지만 녹음 파일은 회의 기록에 남겨 두었어요".to_string(),
+                                );
+                            }
+                        } else {
+                            let _ = std::fs::remove_file(wav);
+                        }
                     }
                 }
             }
@@ -622,8 +669,12 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
 // ───────────────────────── 기록 ─────────────────────────
 
 #[tauri::command]
-fn list_sessions(app: AppHandle) -> Vec<SessionMeta> {
-    app.state::<AppState>().store.lock().list()
+async fn list_sessions(app: AppHandle) -> Vec<SessionMeta> {
+    // 파일을 모두 읽는 일이라, 녹음 중 오디오 처리가 기록 잠금을 기다리지 않게 잠금 밖·작업 스레드에서
+    let dir = app.state::<AppState>().store.lock().dir.clone();
+    tauri::async_runtime::spawn_blocking(move || SessionStore::new(dir).list())
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -653,7 +704,9 @@ fn session_audio(app: AppHandle, id: String) -> CmdResult<Option<String>> {
         .map(|f| dir.join(f))
         .filter(|p| p.is_file());
     let original = doc.source_path.as_deref().map(PathBuf::from).filter(|p| {
-        p.is_file()
+        // 먼저 로컬 드라이브인지 본다: \\server\… 같은 경로는 is_file() 만 해도 Windows 가 그 서버에 로그인을 시도한다
+        is_local_disk(p)
+            && p.is_file()
             && p.extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| badasugi_core::decode::AUDIO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
@@ -663,6 +716,15 @@ fn session_audio(app: AppHandle, id: String) -> CmdResult<Option<String>> {
     };
     app.asset_protocol_scope().allow_file(&path).map_err(err)?;
     Ok(Some(path.display().to_string()))
+}
+
+/// C:\… 같은 로컬 드라이브 경로인가 (네트워크·장치 경로 제외)
+fn is_local_disk(p: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    matches!(
+        p.components().next(),
+        Some(Component::Prefix(x)) if matches!(x.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    )
 }
 
 #[tauri::command]
@@ -861,7 +923,8 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
     s.mini_mode = mini;
     let _ = s.save(&st.paths.settings);
     *st.settings.lock() = s;
-    if let Some(item) = st.tray_mini.lock().as_ref() {
+    let item = st.tray_mini.lock().clone();
+    if let Some(item) = item {
         let _ = item.set_text(if mini { "창 위치 복구" } else { "미니 창으로" });
     }
     let _ = app.emit("bd://mini", mini);
@@ -955,9 +1018,12 @@ fn request_quit(app: &AppHandle) {
     let rec = *st.rec.lock();
     if rec == RecState::Idle {
         app.exit(0);
+    } else if st.quit_after_stop.swap(true, Ordering::SeqCst) {
+        // 두 번째 종료 요청: 남은 인식을 기다리지 않고 지금까지를 저장하고 끝낸다
+        let _ = st.store.lock().flush();
+        app.exit(0);
     } else {
         // 남은 발화를 마저 인식하고 저장한 뒤 종료
-        st.quit_after_stop.store(true, Ordering::SeqCst);
         stop_recording_inner(app);
     }
 }
@@ -1150,6 +1216,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // 창이 앱 화면 밖(외부 페이지)으로 이동하지 못하게 — 녹취록·기록 파일에 심은 HTML 이 창을 가로채는 것 방지
+        .plugin(
+            tauri::plugin::Builder::<Wry>::new("nav-guard")
+                .on_navigation(|_webview, url| url.scheme() == "tauri" || url.host_str() == Some("tauri.localhost"))
+                .build(),
+        )
         // 창 크기·위치를 기억 (보이기 여부는 트레이 로직이 정한다)
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -1200,6 +1272,7 @@ fn main() {
                 busy_ops: AtomicUsize::new(0),
                 file_mode: AtomicBool::new(false),
                 file_pct: AtomicUsize::new(0),
+                save_warned: AtomicBool::new(false),
                 updated_from: Mutex::new(updated_from),
                 hotkey_error: Mutex::new(None),
                 tray_toggle: Mutex::new(None),
@@ -1282,4 +1355,23 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("받아쓰기 실행 실패");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_disk;
+    use std::path::Path;
+
+    #[test]
+    fn only_local_drive_paths_are_replayed() {
+        assert!(is_local_disk(Path::new(r"C:\Users\me\Documents\회의.m4a")));
+        assert!(is_local_disk(Path::new(r"\\?\D:\rec\a.mp3")));
+        // 네트워크·WebDAV 경로는 열기만 해도 Windows 가 그 서버에 로그인을 시도한다
+        assert!(!is_local_disk(Path::new(r"\\attacker\share\a.mp3")));
+        assert!(!is_local_disk(Path::new(r"\\attacker@SSL\DavWWWRoot\a.mp3")));
+        assert!(!is_local_disk(Path::new(r"\\?\UNC\attacker\share\a.mp3")));
+        // 드라이브 없는 루트 경로(현재 드라이브 기준)도 막는다
+        assert!(!is_local_disk(Path::new(r"\attacker\share\a.mp3")));
+        assert!(!is_local_disk(Path::new(r"relative\a.mp3")));
+    }
 }

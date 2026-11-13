@@ -361,6 +361,13 @@ function resetLevel() {
 }
 
 /* ───────────── 이벤트 (백엔드) ───────────── */
+// 모델·키 상태만 새로 받는다 (화면에서 고치는 중인 설정은 그대로)
+async function refreshApp() {
+  const st = await api.invoke('get_state');
+  if (S.settings) st.settings = S.settings;
+  S.app = st;
+}
+
 async function refreshState() {
   S.app = await api.invoke('get_state');
   S.settings = S.app.settings;
@@ -410,6 +417,8 @@ function onRec(state) {
   scheduleRender();
 }
 
+const renderLive = () => { if (S.live) scheduleRender(); };
+
 function onEvent(e) {
   const d = S.liveDoc;
   switch (e.type) {
@@ -428,28 +437,33 @@ function onEvent(e) {
         S.slowHinted = true;
         toast('이 PC에선 인식이 말보다 느려 조금씩 밀리고 있어요.\n설정에서 가벼운 모델이나 Groq API를 쓰면 더 빨라요.');
       }
-      scheduleRender();
+      renderLive();
       break;
     case 'transcript':
       S.pending.delete(e.id);
       if (d) {
         const u = { id: e.id, startMs: e.startMs, endMs: e.endMs, speaker: resolveSpk(d, e.speaker), text: e.text, latencyMs: e.latencyMs };
         const i = d.utterances.findIndex((x) => x.id === e.id);
-        if (i >= 0) d.utterances[i] = u; else d.utterances.push(u);
+        if (i >= 0) d.utterances[i] = u;
+        else {
+          // API 엔진은 여러 발화를 동시에 처리해 결과가 뒤섞여 온다 → 시간 순서 자리에 끼워 넣는다
+          const at = d.utterances.findIndex((x) => x.startMs > u.startMs || (x.startMs === u.startMs && x.id > u.id));
+          if (at < 0) d.utterances.push(u); else d.utterances.splice(at, 0, u);
+        }
         d.durationMs = Math.max(d.durationMs || 0, e.endMs);
       }
-      scheduleRender();
+      renderLive();
       break;
     case 'discarded':
       S.pending.delete(e.id);
-      scheduleRender();
+      renderLive();
       break;
     case 'failed': {
       const p = S.pending.get(e.id);
       S.pending.delete(e.id);
       if (p) S.failed.set(e.id, { ...p, message: e.message });
       if (S.failed.size === 1) toast(`인식 실패: ${e.message}`, 'error');
-      scheduleRender();
+      renderLive();
       break;
     }
     case 'status':
@@ -466,10 +480,23 @@ function onEvent(e) {
     case 'error':
       toast(e.message, 'error');
       break;
-    case 'stopped':
+    case 'stopped': {
       S.pending.clear();
-      api.invoke('get_state').then((st) => { S.app = st; renderDock(); scheduleRender(); });
+      // 화면이 들고 있던 기록(도착 순서대로 쌓임)을 저장된 기록으로 바꾼다 — 이후 편집이 순서가 뒤섞인 사본을 저장하지 않게
+      const id = S.liveDoc?.id;
+      api.invoke('get_state').then(async (st) => {
+        S.app = st;
+        if (id) {
+          try {
+            const fresh = await api.invoke('load_session', { id });
+            if (S.liveDoc?.id === id) S.liveDoc = fresh;
+          } catch { /* 내용이 없어 지운 기록 */ }
+        }
+        renderDock();
+        scheduleRender();
+      });
       break;
+    }
   }
 }
 
@@ -480,7 +507,7 @@ function onDownload(e) {
     delete S.downloads[e.id];
     if (e.state === 'error') { toast(e.message, 'error'); S.dlQueue = []; }
     if (e.state === 'done') {
-      refreshState().then(() => { renderSettings(); nextDownload(); });
+      refreshApp().then(() => { renderModels(); renderSetup(); nextDownload(); });
       return;
     }
   }
@@ -547,7 +574,8 @@ function startRename(spk) {
     if (ok) {
       const v = inp.value.trim();
       d.speakers = d.speakers || {};
-      if (v && v !== `화자 ${+spk + 1}`) d.speakers[spk] = v; else delete d.speakers[spk];
+      const def = speakerName({ utterances: d.utterances, speakers: {} }, +spk);
+      if (v && v !== def) d.speakers[spk] = v; else delete d.speakers[spk];
       persistDoc(d);
     }
     chip.innerHTML = '';
@@ -603,7 +631,7 @@ $('#pop-spk').addEventListener('click', (e) => {
     if (to === 'new') {
       let n = 100;
       const used = new Set(d.utterances.map((u) => u.speaker));
-      while (used.has(n)) n++;
+      while (used.has(n) || (d.speakerMap && d.speakerMap[n] != null)) n++;
       to = n;
     }
     const ids = new Set(pop.dataset.ids.split(',').filter(Boolean).map(Number));
@@ -628,7 +656,7 @@ $('#transcript').addEventListener('dblclick', (e) => {
   if (!audio.paused && P.until != null) audio.pause();
   const el = e.target.closest('.u[data-id]');
   const d = doc();
-  if (!el || !d) return;
+  if (!el || !d || el.isContentEditable) return;
   const u = d.utterances.find((x) => x.id === +el.dataset.id);
   if (!u) return;
   editing = true;
@@ -638,9 +666,11 @@ $('#transcript').addEventListener('dblclick', (e) => {
   const finish = (save) => {
     el.contentEditable = 'false';
     editing = false;
-    const v = el.innerText.trim();
+    // innerText 는 화면 배치에 기대므로(가려진 문단은 빈 값) 글자 그대로인 textContent 로 읽는다 — 빈 값이면 발화가 지워지므로 중요
+    const v = (el.textContent || '').replace(/\s+/g, ' ').trim();
     if (save && !v) {
       d.utterances = d.utterances.filter((x) => x.id !== u.id);
+      d.deleted = [...(d.deleted || []), u.id];
       persistDoc(d);
       toast('발화를 지웠어요');
     } else if (save && v !== u.text) { u.text = v; persistDoc(d); }
@@ -771,8 +801,11 @@ document.addEventListener('keydown', (e) => {
     closePanels();
     hidePopovers();
   }
-  if (e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFind(); }
-  const typing = e.target.closest?.('input, textarea, select, [contenteditable="true"]');
+  if (e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    if (!S.mini && $$('.panel').every((p) => p.hidden)) openFind();
+  }
+  const typing = e.target.closest?.('input:not([type=range]):not([type=checkbox]), textarea, select, [contenteditable="true"]');
   if (e.code === 'Space' && !typing && !e.ctrlKey && !e.altKey && P.src && !S.mini) { e.preventDefault(); togglePlay(); }
   if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoom(1); }
   if (e.ctrlKey && e.key === '-') { e.preventDefault(); zoom(-1); }
@@ -788,9 +821,12 @@ document.addEventListener('click', (e) => {
 });
 
 /* 기록 */
+let histReq = 0;
 async function renderHistory() {
+  const my = ++histReq;
   const q = $('#history-q').value.trim();
   const list = q ? await call('search_sessions', { query: q }) : await call('list_sessions');
+  if (my !== histReq) return; // 그 사이 검색어가 바뀜
   const box = $('#history-list');
   if (!list.length) {
     box.innerHTML = q
@@ -808,11 +844,11 @@ async function renderHistory() {
   const liveId = S.rec !== 'idle' ? S.liveDoc?.id : null;
   box.innerHTML = list.map((m) => {
     const dd = m.startedAt.slice(0, 10);
-    const head = dd !== day ? `<div class="h-day">${dd.replace(/-/g, '. ')}</div>` : '';
+    const head = dd !== day ? `<div class="h-day">${esc(dd.replace(/-/g, '. '))}</div>` : '';
     day = dd;
     return `${head}<div class="h-item" role="button" data-id="${esc(m.id)}">
       <div class="h-title"><span>${mark(m.title)}${m.hits ? `<span class="h-badge">${m.hits}곳</span>` : ''}</span>${m.id === liveId ? '<span class="h-live">● 녹음 중</span>' : `<button class="icon-btn sm" data-del="${esc(m.id)}" title="삭제"><svg><use href="#i-trash"/></svg></button>`}</div>
-      <div class="h-sub">${m.startedAt.slice(11)} · ${fmt(m.durationMs)} · 화자 ${m.speakers}명 · 발화 ${m.count}개</div>
+      <div class="h-sub">${esc(m.startedAt.slice(11))} · ${fmt(m.durationMs)} · 화자 ${m.speakers}명 · 발화 ${m.count}개</div>
       ${m.snippet ? `<div class="h-snip">${mark(m.snippet)}</div>` : `<div class="h-prev">${esc(m.preview)}</div>`}
     </div>`;
   }).join('');
@@ -822,7 +858,15 @@ $('#history-list').addEventListener('click', async (e) => {
   if (del) {
     e.stopPropagation();
     const ok = await api.ask('이 회의 기록을 삭제할까요?\n(녹취록·요약·녹음 파일이 함께 지워지며 되돌릴 수 없어요)', { title: '받아쓰기', kind: 'warning' });
-    if (ok) { await call('delete_session', { id: del.dataset.del }); renderHistory(); }
+    if (ok) {
+      const gone = del.dataset.del;
+      await call('delete_session', { id: gone });
+      if (S.viewDoc?.id === gone) { S.viewDoc = null; S.live = true; }
+      if (S.liveDoc?.id === gone && S.rec === 'idle') S.liveDoc = null;
+      renderDock();
+      renderDoc();
+      renderHistory();
+    }
     return;
   }
   const item = e.target.closest('.h-item');
@@ -936,7 +980,7 @@ const audio = new Audio();
 audio.preload = 'metadata';
 // key: 지금 재생할 수 있는 기록 id · until: 문장 하나만 들을 때 멈출 위치(초)
 // live: 녹음 중인 기록 (파일이 계속 자라므로 필요할 때 다시 읽는다) · wantPlay: 이어 듣는 중
-const P = { key: null, src: null, until: null, curId: null, started: false, raf: 0, seeking: false, followId: null, live: false, wantPlay: false, reloading: null };
+const P = { key: null, src: null, until: null, curId: null, started: false, raf: 0, seeking: false, followId: null, live: false, wantPlay: false, reloading: null, gen: 0 };
 let playClick;
 
 const isLiveRec = () => S.live && S.rec !== 'idle' && !S.fileMode;
@@ -951,11 +995,14 @@ function reloadSrc() {
   const t = audio.currentTime;
   const wasPlaying = !audio.paused;
   const rate = audio.playbackRate;
+  const src = P.src;
   P.reloading = new Promise((resolve) => {
     let to;
     const done = () => {
       audio.removeEventListener('loadedmetadata', done);
       clearTimeout(to);
+      // 그 사이 다른 기록으로 바뀌었으면 옛 위치로 옮기지 않는다
+      if (P.src !== src) { resolve(); return; }
       const dur = Number.isFinite(audio.duration) ? audio.duration : t;
       try { audio.currentTime = Math.min(t, dur); } catch { /* 아직 못 옮김 */ }
       audio.playbackRate = rate;
@@ -985,6 +1032,7 @@ async function syncAudio() {
   P.key = key;
   P.live = live;
   P.wantPlay = false;
+  P.gen++;
   P.src = null;
   P.until = null;
   P.started = false;
@@ -1043,6 +1091,7 @@ function tick() {
 }
 async function togglePlay() {
   if (!P.src) return;
+  P.gen++;
   if (audio.paused) {
     P.until = null;
     P.wantPlay = true;
@@ -1061,6 +1110,7 @@ async function playUtterance(id) {
   P.curId = id;
   P.followId = id;
   P.wantPlay = false;
+  P.gen++;
   await ensureFresh(u.endMs / 1000 + 0.3);
   audio.currentTime = Math.max(0, u.startMs / 1000 - 0.15);
   P.until = u.endMs / 1000 + 0.2;
@@ -1074,10 +1124,11 @@ audio.addEventListener('ended', async () => {
   P.until = null;
   renderPlayer();
   // 녹음 중에 이어 듣다 끝(지금 시각)에 닿으면, 새로 녹음된 만큼 다시 읽어 계속 따라간다
-  while (P.live && P.wantPlay && P.src) {
+  const gen = ++P.gen; // 사용자가 재생·멈춤·문장 듣기를 하면 이 따라가기는 그만둔다
+  while (P.live && P.wantPlay && P.src && gen === P.gen) {
     const t = audio.currentTime;
     await new Promise((r) => setTimeout(r, 700));
-    if (!P.live || !P.wantPlay) break;
+    if (!P.live || !P.wantPlay || gen !== P.gen) break;
     await reloadSrc();
     if ((Number.isFinite(audio.duration) ? audio.duration : 0) > t + 0.3) {
       audio.currentTime = t;
@@ -1255,6 +1306,10 @@ function setSeg(id, v) { $$(`#${id} button`).forEach((b) => b.classList.toggle('
 function renderSettings() {
   const s = S.settings;
   if (!s) return;
+  // 지금 입력하고 있는 칸은 건드리지 않는다 (아직 확정 안 된 글자가 지워지지 않게)
+  const act = document.activeElement;
+  const typing = act && /^(INPUT|TEXTAREA)$/.test(act.tagName) && act.type !== 'checkbox' ? act.value : null;
+  queueMicrotask(() => { if (typing != null && document.activeElement === act) act.value = typing; });
   setSeg('seg-engine', s.engine);
   $$('[data-engine]').forEach((el) => (el.hidden = el.dataset.engine !== s.engine));
   $('#engine-desc').textContent = ENGINE_DESC[s.engine];
@@ -1343,7 +1398,7 @@ $('#model-list').addEventListener('click', async (e) => {
   const del = e.target.closest('[data-delmodel]');
   if (del) {
     const ok = await api.ask('이 모델 파일을 삭제할까요? 다시 쓰려면 새로 내려받아야 해요.', { title: '받아쓰기', kind: 'warning' });
-    if (ok) { await call('delete_model', { id: del.dataset.delmodel }); await refreshState(); renderSettings(); }
+    if (ok) { await call('delete_model', { id: del.dataset.delmodel }); await refreshApp(); renderModels(); renderSetup(); }
     return;
   }
   const row = e.target.closest('[data-model]');
@@ -1395,7 +1450,7 @@ for (const [id, name] of KEY_INPUTS) {
     if (!v) return;
     await call('set_api_key', { name, value: v });
     e.target.value = '';
-    await refreshState();
+    await refreshApp();
     renderSettings();
     toast('API 키를 안전하게 저장했어요');
   });

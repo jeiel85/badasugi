@@ -41,6 +41,9 @@ pub struct SessionDoc {
     pub source_file: Option<String>,
     /// 파일 받아쓰기라면 원본 파일 전체 경로 (다시 듣기용)
     pub source_path: Option<String>,
+    /// 화면에서 지운 발화 id (저장 요청에만 쓰고 파일에는 남기지 않는다)
+    #[serde(skip_serializing)]
+    pub deleted: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -272,10 +275,16 @@ impl SessionStore {
     }
 
     /// 자주 부르면 2초에 한 번만 실제로 쓴다
-    pub fn autosave(&mut self) {
+    pub fn autosave(&mut self) -> Result<()> {
         if self.dirty && self.last_save.elapsed() > Duration::from_secs(2) {
-            let _ = self.flush();
+            let r = self.flush();
+            if r.is_err() {
+                // 실패해도 2초 뒤에 다시 시도한다 (매 발화마다 디스크를 두드리지 않게)
+                self.last_save = Instant::now();
+            }
+            return r;
         }
+        Ok(())
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -322,15 +331,16 @@ impl SessionStore {
             cur.speakers = doc.speakers.clone();
             cur.speaker_map = doc.speaker_map.clone();
             cur.summary = doc.summary.clone();
-            let seen = doc.utterances.iter().map(|u| u.id).max();
-            cur.utterances.retain_mut(|x| match doc.utterances.iter().find(|u| u.id == x.id) {
-                Some(u) => {
+            // 화면이 지웠다고 알린 발화만 지우고, 그 사이 새로 들어온 발화는 지킨다
+            cur.utterances.retain_mut(|x| {
+                if doc.deleted.contains(&x.id) {
+                    return false;
+                }
+                if let Some(u) = doc.utterances.iter().find(|u| u.id == x.id) {
                     x.text = u.text.clone();
                     x.speaker = u.speaker;
-                    true
                 }
-                // 화면이 이미 알고 있던 발화인데 없으면 사용자가 지운 것
-                None => seen.is_none_or(|m| x.id > m),
+                true
             });
             let map = cur.speaker_map.clone();
             if !map.is_empty() {
@@ -342,6 +352,18 @@ impl SessionStore {
             self.dirty = true;
             return self.flush_any();
         }
+        // 이미 지운 기록은 되살리지 않는다 (지운 뒤 화면에 남은 사본을 고친 경우)
+        let path = self.json_path(&doc.id);
+        let Some(old) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<SessionDoc>(&t).ok())
+        else {
+            return Err(anyhow!("지운 기록이에요"));
+        };
+        let mut doc = doc;
+        // 화면 사본은 발화가 도착 순서로 쌓여 있을 수 있다 → 시간 순으로 저장 (MD·TXT·SRT 순서)
+        doc.utterances.sort_by(|a, b| a.start_ms.cmp(&b.start_ms).then(a.id.cmp(&b.id)));
+        doc.duration_ms = doc.duration_ms.max(old.duration_ms);
         write_doc(&self.dir, &doc)
     }
 
@@ -440,11 +462,17 @@ pub(crate) fn safe_id(id: &str) -> Result<&str> {
     Ok(id)
 }
 
-fn write_doc(dir: &Path, doc: &SessionDoc) -> Result<()> {
+pub(crate) fn write_doc(dir: &Path, doc: &SessionDoc) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let json = dir.join(format!("{}.json", doc.id));
     let tmp = dir.join(format!("{}.json.tmp", doc.id));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(doc)?)?;
+    {
+        // 디스크에 다 쓴 뒤에 바꿔치기한다 — 갑자기 전원이 꺼져도 빈 파일이 남지 않게
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(doc)?)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, &json)?;
     std::fs::write(dir.join(format!("{}.md", doc.id)), doc.to_markdown())?;
     Ok(())

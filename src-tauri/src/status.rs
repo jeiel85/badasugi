@@ -178,8 +178,16 @@ pub fn refresh(app: &AppHandle) {
         _ => None,
     };
 
-    let mut last = status.last.lock();
-    let kind_changed = last.kind != Some(kind);
+    // 바뀐 것만 고르고 잠금은 바로 푼다. 트레이·창 호출은 메인 스레드가 아닌 곳에서 부르면 메인 스레드를 기다리는데,
+    // 잠금을 쥔 채 기다리면 같은 잠금을 기다리는 메인 스레드와 서로 멈춘다(교착).
+    let (kind_changed, tip_changed, progress_changed) = {
+        let mut last = status.last.lock();
+        let changed = (last.kind != Some(kind), last.tip != tip, last.progress != progress);
+        last.kind = Some(kind);
+        last.tip = tip.clone();
+        last.progress = progress;
+        changed
+    };
     if let Some(tray) = app.tray_by_id("main") {
         if kind_changed {
             let icon = match kind {
@@ -191,7 +199,7 @@ pub fn refresh(app: &AppHandle) {
             };
             let _ = tray.set_icon(Some(icon.clone()));
         }
-        if last.tip != tip {
+        if tip_changed {
             let _ = tray.set_tooltip(Some(tip.as_str()));
         }
     }
@@ -206,7 +214,7 @@ pub fn refresh(app: &AppHandle) {
             };
             let _ = w.set_overlay_icon(badge);
         }
-        if kind_changed || last.progress != progress {
+        if kind_changed || progress_changed {
             let state = match (kind, rec) {
                 (_, RecState::Stopping) => ProgressBarState {
                     status: Some(ProgressBarStatus::Indeterminate),
@@ -228,9 +236,6 @@ pub fn refresh(app: &AppHandle) {
             let _ = w.set_progress_bar(state);
         }
     }
-    last.kind = Some(kind);
-    last.tip = tip;
-    last.progress = progress;
 }
 
 /// 녹음 중에는 1초마다 툴팁의 경과 시간을 고친다

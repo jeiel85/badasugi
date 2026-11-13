@@ -28,19 +28,36 @@ Write-Host "== Badasugi $tag" -ForegroundColor Cyan
 
 $keyPath = Join-Path $HOME ".tauri\badasugi.key"
 if (-not (Test-Path $keyPath)) { throw "Signing key not found: $keyPath" }
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyPath -Raw
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 
+# The signing key must never be visible to the build: every dependency's build.rs / proc-macro runs
+# inside `cargo tauri build`. So build WITHOUT updater artifacts and with no key in the environment,
+# then sign the installer in a separate step below.
+Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PATH, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
 if (-not $SkipBuild) {
-    cargo tauri build
-    if ($LASTEXITCODE -ne 0) { throw "build failed" }
+    $noSign = Join-Path ([IO.Path]::GetTempPath()) "badasugi-nosign.json"
+    [IO.File]::WriteAllText($noSign, '{"bundle":{"createUpdaterArtifacts":false}}')
+    try {
+        cargo tauri build --config $noSign
+        if ($LASTEXITCODE -ne 0) { throw "build failed" }
+    } finally {
+        Remove-Item $noSign -ErrorAction SilentlyContinue
+    }
 }
 
 $bundle = Join-Path $root "target\release\bundle\nsis"
 $setup = Get-ChildItem $bundle -Filter "*_${version}_x64-setup.exe" | Select-Object -First 1
 if (-not $setup) { throw "installer not found in $bundle" }
 $sigFile = "$($setup.FullName).sig"
-if (-not (Test-Path $sigFile)) { throw "signature not found: $sigFile (createUpdaterArtifacts?)" }
+# Sign only the finished installer (minisign). The key is read from the file by the signer itself.
+Remove-Item $sigFile -ErrorAction SilentlyContinue
+try {
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+    cargo tauri signer sign --private-key-path $keyPath $setup.FullName
+    if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+} finally {
+    Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+}
+if (-not (Test-Path $sigFile)) { throw "signature not found: $sigFile" }
 
 $dist = Join-Path $root "dist"
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
