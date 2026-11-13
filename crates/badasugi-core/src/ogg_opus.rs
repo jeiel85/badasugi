@@ -200,6 +200,8 @@ pub struct OpusDecoder {
     dec: Mutex<::opus::Decoder>,
     params: CodecParameters,
     channels: usize,
+    /// 머리의 출력 이득 (Q7.8 dB). symphonia 의 Ogg 분리기는 이 값을 버리므로 여기서 적용한다.
+    gain: i16,
     pcm: Vec<f32>,
     buf: AudioBuffer<f32>,
 }
@@ -207,22 +209,28 @@ pub struct OpusDecoder {
 impl Decoder for OpusDecoder {
     fn try_new(params: &CodecParameters, _options: &DecoderOptions) -> SymResult<Self> {
         let count = params.channels.map(Channels::count).unwrap_or(1);
+        let head = params.extra_data.as_deref().unwrap_or_default();
         // 채널 매핑 1 이상은 스트림이 하나일 때만 (여러 스트림 = 다채널은 기본 디코더로 못 푼다)
-        if let Some(head) = params.extra_data.as_deref() {
-            if head.len() >= 19 && head[18] != 0 && head.get(19).copied() != Some(1) {
-                return unsupported_error("opus: 다채널(멀티스트림)은 지원하지 않아요");
-            }
+        if head.len() >= 19 && head[18] != 0 && head.get(19).copied() != Some(1) {
+            return unsupported_error("opus: 다채널(멀티스트림)은 지원하지 않아요");
         }
+        let gain = head.get(16..18).map(|b| i16::from_le_bytes([b[0], b[1]])).unwrap_or(0);
         let (ch, layout) = match count {
             1 => (::opus::Channels::Mono, Channels::FRONT_LEFT),
             2 => (::opus::Channels::Stereo, Channels::FRONT_LEFT | Channels::FRONT_RIGHT),
             _ => return unsupported_error("opus: 다채널은 지원하지 않아요"),
         };
-        let dec = ::opus::Decoder::new(GRANULE_RATE as u32, ch).or_else(|_| decode_error("opus: 디코더를 만들 수 없어요"))?;
+        let mut dec =
+            ::opus::Decoder::new(GRANULE_RATE as u32, ch).or_else(|_| decode_error("opus: 디코더를 만들 수 없어요"))?;
+        // 출력 이득 (RFC 7845 §5.1): libopus 의 OPUS_SET_GAIN 도 같은 Q7.8 dB 단위
+        if gain != 0 {
+            dec.set_gain(i32::from(gain)).or_else(|_| decode_error("opus: 출력 이득을 적용할 수 없어요"))?;
+        }
         Ok(Self {
             dec: Mutex::new(dec),
             params: params.clone(),
             channels: count,
+            gain,
             pcm: vec![0.0; MAX_FRAMES * count],
             buf: AudioBuffer::new(MAX_FRAMES as u64, SignalSpec::new(GRANULE_RATE as u32, layout)),
         })
@@ -233,8 +241,13 @@ impl Decoder for OpusDecoder {
     }
 
     fn reset(&mut self) {
+        let gain = self.gain;
         if let Ok(d) = self.dec.get_mut() {
             let _ = d.reset_state();
+            // 상태를 초기화해도 이득은 남지만, libopus 내부 구현에 기대지 않고 다시 건다
+            if gain != 0 {
+                let _ = d.set_gain(i32::from(gain));
+            }
         }
     }
 
@@ -345,6 +358,45 @@ mod tests {
         let (_, out) = decode_all(&path);
         let _ = std::fs::remove_file(&path);
         assert!((out.len() as i64 - (2.5 * SAMPLE_RATE as f32) as i64).abs() < 400, "len {}", out.len());
+    }
+
+    /// 머리의 출력 이득을 적용해야 한다 (+6.02 dB → 2배)
+    #[test]
+    fn decoder_applies_header_output_gain() {
+        let mut enc = ::opus::Encoder::new(SAMPLE_RATE, ::opus::Channels::Mono, ::opus::Application::Voip).unwrap();
+        enc.set_bitrate(::opus::Bitrate::Bits(BITRATE)).unwrap();
+        let src = tone(1.0, 0.2);
+        let mut buf = vec![0u8; MAX_PACKET];
+        let packets: Vec<Vec<u8>> = src
+            .chunks_exact(FRAME)
+            .map(|f| {
+                let n = enc.encode_float(f, &mut buf).unwrap();
+                buf[..n].to_vec()
+            })
+            .collect();
+
+        let level = |gain_q8: i16| {
+            let mut head = opus_head(0);
+            head[16..18].copy_from_slice(&gain_q8.to_le_bytes());
+            let mut params = CodecParameters::new();
+            params
+                .for_codec(CODEC_TYPE_OPUS)
+                .with_sample_rate(GRANULE_RATE as u32)
+                .with_channels(Channels::FRONT_LEFT)
+                .with_extra_data(head.into_boxed_slice());
+            let mut dec = OpusDecoder::try_new(&params, &DecoderOptions::default()).unwrap();
+            let mut out = Vec::new();
+            for p in &packets {
+                let pk = Packet::new_from_slice(0, 0, 0, p);
+                let decoded = dec.decode(&pk).unwrap();
+                let AudioBufferRef::F32(b) = decoded else { panic!("f32") };
+                out.extend_from_slice(b.chan(0));
+            }
+            rms(&out[out.len() / 4..])
+        };
+        let (plain, loud) = (level(0), level(1541)); // 1541/256 = 6.02 dB
+        assert!(plain > 0.05, "plain {plain}");
+        assert!((loud / plain - 2.0).abs() < 0.1, "plain {plain} loud {loud}");
     }
 
     #[test]
