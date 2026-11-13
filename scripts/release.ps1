@@ -13,7 +13,8 @@ param(
     [string]$Notes = "",
     [string]$NotesFile = "",
     [switch]$NoUpload,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,12 @@ $repo = "jeiel85/badasugi"
 $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 $tag = "v$version"
 Write-Host "== Badasugi $tag" -ForegroundColor Cyan
+
+# Smoke test first: the real app records/stops/saves/transcribes a test file in an isolated temp profile.
+if (-not $SkipBuild -and -not $SkipSmoke) {
+    pwsh -NoProfile -File (Join-Path $PSScriptRoot "smoke.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "smoke test failed - not releasing" }
+}
 
 $keyPath = Join-Path $HOME ".tauri\badasugi.key"
 if (-not (Test-Path $keyPath)) { throw "Signing key not found: $keyPath" }

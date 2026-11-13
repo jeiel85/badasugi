@@ -558,7 +558,7 @@ fn asr_worker(
 }
 
 const MIC_SILENT_MSG: &str =
-    "마이크에서 소리가 들어오지 않아요. 마이크 음소거나 Windows 설정 › 개인 정보 › 마이크 접근을 확인해 주세요.";
+    "마이크에서 소리가 거의 들어오지 않아요. 마이크 음소거 · 입력 음량, 또는 설정 › 입력의 마이크 선택을 확인해 주세요. (Windows 설정 › 개인 정보 › 마이크 접근도 확인)";
 
 /// 마이크가 실제로 소리를 보내는지 점검한다.
 /// Windows 개인 정보 설정으로 막혔거나 하드웨어 음소거면 데이터가 안 오거나 디지털 0 만 온다.
@@ -570,6 +570,9 @@ struct MicCheck {
     /// 받은 마이크 오디오 길이 (초)
     secs: f64,
     peak: f32,
+    /// 제곱합 · 샘플 수 (평균 소리 크기 RMS 용)
+    sum_sq: f64,
+    count: u64,
     done: bool,
 }
 
@@ -577,6 +580,9 @@ impl MicCheck {
     const AFTER: Duration = Duration::from_secs(8);
     const MIN_SECS: f64 = 1.0;
     const MIN_PEAK: f32 = 1e-4;
+    /// 평균 소리 크기 하한 (약 -70 dBFS). 조용한 방이라도 실제 마이크 잡음은 이보다 훨씬 크다(보통 -60~-45).
+    /// 음소거 · 입력 음량 0 · 꽂혀 있지 않은 마이크는 미세한 잡음만 들어와 이보다 작다 (실사용 사례: -88 dBFS)
+    const MIN_RMS: f64 = 3e-4;
 
     fn new() -> Self {
         Self {
@@ -584,6 +590,8 @@ impl MicCheck {
             last_tick: Instant::now(),
             secs: 0.0,
             peak: 0.0,
+            sum_sq: 0.0,
+            count: 0,
             done: false,
         }
     }
@@ -594,6 +602,13 @@ impl MicCheck {
         }
         self.secs += c.samples.len() as f64 / c.rate.max(1) as f64;
         self.peak = c.samples.iter().fold(self.peak, |m, s| m.max(s.abs()));
+        self.sum_sq += c.samples.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+        self.count += c.samples.len() as u64;
+    }
+
+    fn silent(&self) -> bool {
+        let rms = if self.count > 0 { (self.sum_sq / self.count as f64).sqrt() } else { 0.0 };
+        self.secs < Self::MIN_SECS || self.peak < Self::MIN_PEAK || rms < Self::MIN_RMS
     }
 
     /// 녹음 시간이 충분히 쌓이면 한 번 판정한다 → 문제가 있으면 true
@@ -607,7 +622,7 @@ impl MicCheck {
             return false;
         }
         self.done = true;
-        self.secs < Self::MIN_SECS || self.peak < Self::MIN_PEAK
+        self.silent()
     }
 }
 
@@ -924,5 +939,38 @@ mod tests {
         assert_eq!(t.earliest(), Some(500));
         t.done(500);
         assert_eq!(t.earliest(), None);
+    }
+}
+
+#[cfg(test)]
+mod mic_check_tests {
+    use super::*;
+
+    fn chunk(level: f32, secs: f32) -> RawChunk {
+        let n = (16_000.0 * secs) as usize;
+        // 간단한 잡음 흉내: 부호가 번갈아 바뀌는 일정한 크기
+        RawChunk {
+            source: SRC_MIC,
+            rate: 16_000,
+            samples: (0..n).map(|i| if i % 2 == 0 { level } else { -level }).collect(),
+        }
+    }
+
+    fn judged(level: f32) -> bool {
+        let mut m = MicCheck::new();
+        m.feed(&chunk(level, 8.0), false);
+        m.silent()
+    }
+
+    #[test]
+    fn warns_when_the_mic_is_nearly_silent() {
+        assert!(judged(0.0), "디지털 0 (개인 정보 차단)");
+        assert!(judged(4e-5), "실사용 사례: 음소거 · 음량 0 (-88 dBFS)");
+    }
+
+    #[test]
+    fn quiet_room_noise_is_not_a_problem() {
+        assert!(!judged(1e-3), "조용한 방의 실제 마이크 (-60 dBFS)");
+        assert!(!judged(0.05), "말소리");
     }
 }

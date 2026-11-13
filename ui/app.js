@@ -18,21 +18,29 @@ const COLORS = ['#7c6cff', '#0ea5e9', '#f59e0b', '#10b981', '#f43f5e', '#6366f1'
 const spkColor = (s) => (s == null ? 'var(--muted)' : COLORS[s % COLORS.length]);
 const SOURCE_LABEL = { mic: '마이크', system: '시스템 소리', both: '마이크 + 시스템' };
 const SOURCE_ICON = { mic: '#i-mic', system: '#i-speaker', both: '#i-both' };
+// 설명은 앱이 정한 문구만 넣으므로 innerHTML 로 그린다 (링크 · 단계 안내)
+const KEY_STEPS = {
+  groq: '<ol class="howto"><li><button class="link" data-url="https://console.groq.com/keys">console.groq.com</button> 에 가입 · 로그인 (구글 계정 가능)</li><li><b>API Keys</b> → <b>Create API Key</b> → 이름 아무거나</li><li>나온 키(<code>gsk_…</code>)를 복사해 아래 칸에 붙여 넣기 — 다시 볼 수 없으니 바로 붙여 넣으세요</li></ol>',
+  openai: '<ol class="howto"><li><button class="link" data-url="https://platform.openai.com/api-keys">platform.openai.com</button> 에 로그인</li><li><b>Billing</b> 에서 결제 수단 등록 (사용한 만큼 과금)</li><li><b>Create new secret key</b> → 키(<code>sk-…</code>)를 복사해 붙여 넣기</li></ol>',
+  gemini: '<ol class="howto"><li><button class="link" data-url="https://aistudio.google.com/apikey">aistudio.google.com</button> 에 구글 계정으로 로그인</li><li><b>Create API key</b> (또는 Get API key)</li><li>나온 키(<code>AIza…</code>)를 복사해 아래 칸에 붙여 넣기</li></ol>',
+  anthropic: '<ol class="howto"><li><button class="link" data-url="https://console.anthropic.com/settings/keys">console.anthropic.com</button> 에 가입 · 로그인</li><li><b>Billing</b> 에서 크레딧 충전 (사용한 만큼 차감)</li><li><b>Create Key</b> → 키(<code>sk-ant-…</code>)를 복사해 붙여 넣기</li></ol>',
+};
+const KEY_NOTE = '<span class="keynote">키는 이 PC의 Windows 자격 증명 관리자에만 보관돼요.</span>';
 const LLM_DESC = {
-  ollama: 'PC에 따로 설치한 <b>Ollama</b>로 요약해요 (앱에 들어 있지 않아요). 인터넷 없이 동작하지만 Ollama 설치와 모델(약 5GB)이 필요하고, PC 사양에 따라 몇 분 걸릴 수 있어요. <button class="link" data-url="https://ollama.com/download">Ollama 받기 ↗</button>',
-  groq: '<b>무료 등급</b>으로 바로 쓸 수 있고 매우 빨라요. 음성 인식용 Groq 키를 같이 써요. <button class="link" data-url="https://console.groq.com/keys">키 무료로 받기 ↗</button>',
-  gemini: 'Google Gemini — <b>무료 등급</b>이 있고 한국어 요약 품질이 좋아요. <button class="link" data-url="https://aistudio.google.com/apikey">키 무료로 받기 ↗</button>',
-  openai: 'OpenAI — 음성 인식용 OpenAI 키를 같이 써요. 사용한 만큼 과금돼요. <button class="link" data-url="https://platform.openai.com/api-keys">키 만들기 ↗</button>',
-  anthropic: 'Anthropic Claude — 긴 회의도 꼼꼼하게 정리해요. 사용한 만큼 과금돼요. <button class="link" data-url="https://console.anthropic.com/settings/keys">키 만들기 ↗</button>',
+  ollama: 'PC에 따로 설치한 <b>Ollama</b>로 요약해요 (앱에 들어 있지 않아요). 인터넷 없이 동작하지만 Ollama 설치와 모델(약 5GB)이 필요하고, PC 사양에 따라 몇 분 걸릴 수 있어요. <button class="link" data-url="https://ollama.com/download">Ollama 받기 ↗</button> → 설치 후 명령 프롬프트에서 <code>ollama pull exaone3.5:7.8b</code>',
+  groq: '<b>무료 등급</b>으로 바로 쓸 수 있고 매우 빨라요. 음성 인식용 Groq 키를 같이 써요.' + KEY_STEPS.groq + KEY_NOTE,
+  gemini: 'Google Gemini — <b>무료 등급</b>이 있고 한국어 요약 품질이 좋아요.' + KEY_STEPS.gemini + KEY_NOTE,
+  openai: 'OpenAI — 음성 인식용 OpenAI 키를 같이 써요. 사용한 만큼 과금돼요.' + KEY_STEPS.openai + KEY_NOTE,
+  anthropic: 'Anthropic Claude — 긴 회의도 꼼꼼하게 정리해요. 사용한 만큼 과금돼요.' + KEY_STEPS.anthropic + KEY_NOTE,
   custom: 'LM Studio · vLLM · OpenRouter 같은 OpenAI 호환 서버를 써요.',
 };
 const LLM_PRIVACY = '<br>API를 쓰면 녹취록이 해당 서비스로 전송돼요.';
 
 const ENGINE_DESC = {
   local: '인터넷 없이 이 PC에서 인식합니다. 회의 내용이 밖으로 나가지 않아요. 첫 사용 때 모델을 한 번 내려받습니다.',
-  openai: 'OpenAI gpt-4o-transcribe — 한국어 정확도가 가장 높습니다. 사용량만큼 과금됩니다.',
-  groq: 'Groq Whisper — 매우 빠르고 저렴합니다. (large-v3-turbo 기준 시간당 약 $0.04)',
-  custom: 'OpenAI 호환 음성 인식 서버(faster-whisper-server, LocalAI 등)를 사용합니다.',
+  openai: 'OpenAI gpt-4o-transcribe — 한국어 정확도가 가장 높습니다. 사용한 만큼 과금돼요. 회의 소리가 OpenAI 로 전송돼요.' + KEY_STEPS.openai + KEY_NOTE,
+  groq: 'Groq Whisper — 매우 빨라 회의가 길어도 밀리지 않아요. <b>무료 등급</b>으로 시작할 수 있어요(사용량 한도 있음). 회의 소리가 Groq 로 전송돼요.' + KEY_STEPS.groq + KEY_NOTE,
+  custom: 'OpenAI 호환 음성 인식 서버(faster-whisper-server, LocalAI, 사내 서버 등)를 사용합니다.',
 };
 
 const S = {
@@ -275,7 +283,8 @@ function renderSetup() {
   } else {
     const keyName = { openai: 'openai', groq: 'groq' }[s.engine];
     if (keyName && !S.app.keys[keyName]) {
-      cards.push(`<div class="setup-card"><b>${s.engine === 'openai' ? 'OpenAI' : 'Groq'} API 키가 필요해요</b><p>설정에서 키를 입력하면 바로 사용할 수 있어요. 키는 Windows 자격 증명 관리자에 안전하게 보관됩니다.</p><div class="actions"><button class="btn sm" data-open-settings>설정 열기</button></div></div>`);
+      const keyUrl = s.engine === 'openai' ? 'https://platform.openai.com/api-keys' : 'https://console.groq.com/keys';
+      cards.push(`<div class="setup-card"><b>${s.engine === 'openai' ? 'OpenAI' : 'Groq'} API 키가 필요해요</b><p>${s.engine === 'openai' ? 'OpenAI 사이트에서 키를 만들어' : 'Groq 사이트에서 무료로 키를 만들어'} 설정에 붙여 넣으면 바로 쓸 수 있어요. 키는 Windows 자격 증명 관리자에 안전하게 보관됩니다.</p><div class="actions"><button class="btn sm" data-url="${keyUrl}">키 받기 ↗</button><button class="link" data-open-settings>설정 열기</button></div></div>`);
     }
   }
   box.innerHTML = cards.join('');
@@ -1322,7 +1331,7 @@ function renderSettings() {
   queueMicrotask(() => { if (typing != null && document.activeElement === act) act.value = typing; });
   setSeg('seg-engine', s.engine);
   $$('[data-engine]').forEach((el) => (el.hidden = el.dataset.engine !== s.engine));
-  $('#engine-desc').textContent = ENGINE_DESC[s.engine];
+  $('#engine-desc').innerHTML = ENGINE_DESC[s.engine];
   $('#opt-beam').checked = s.beamSize >= 2;
   $('#opt-openai-model').value = s.openaiModel;
   $('#opt-groq-model').value = s.groqModel;
@@ -1522,6 +1531,7 @@ hk.addEventListener('keydown', (e) => {
 $('#btn-github').addEventListener('click', () => call('open_url', { url: 'https://github.com/jeiel85/badasugi' }));
 $('#btn-folder-sessions').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
 $('#btn-folder-models').addEventListener('click', () => call('open_folder', { kind: 'models' }));
+$('#btn-folder-logs').addEventListener('click', () => call('open_folder', { kind: 'logs' }));
 $('#btn-quit').addEventListener('click', () => call('quit_app'));
 
 /* ───────────── 시작 ───────────── */
@@ -1537,6 +1547,8 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   $('#drop-exts').textContent = exts().join(' · ');
   renderUpdate();
   if (S.app.hotkeyError) setTimeout(() => toast(S.app.hotkeyError, 'warn'), 600);
+  // 화면이 끝까지 준비됐다는 신호 (자동 점검이 확인한다)
+  api.invoke('ui_ready').catch(() => {});
   if (S.app.updatedFrom) toast(`v${S.app.version}(으)로 업데이트했어요`);
   if (S.app.demo) loadDemo();
   if (S.app.downloading) S.downloads[S.app.downloading] = { done: 0, total: 1 };

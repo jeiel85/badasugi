@@ -397,3 +397,9 @@ mark.cur { background: var(--warn); color: #111; }
 
 /* 긴 회의: 화면 밖 문단은 레이아웃·그리기를 건너뛴다 (2000발화 기준 렌더 215ms → 28ms) */
 #transcript .group { content-visibility: auto; contain-intrinsic-size: auto 120px; }
+
+/* API 키 받는 방법 */
+ol.howto { margin: 8px 0 0; padding-left: 18px; color: var(--text-2); }
+ol.howto li { margin: 3px 0; line-height: 1.5; }
+ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; background: var(--sunken); padding: 0 4px; border-radius: 4px; }
+.keynote { display: block; margin-top: 6px; font-size: 11.5px; color: var(--muted); }

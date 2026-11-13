@@ -5,3 +5,4 @@
 !crates/badasugi-core/assets/*.wav
 /.claude/
 /dist/
+!tests/fixtures/*.wav

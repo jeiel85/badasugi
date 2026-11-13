@@ -1,8 +1,10 @@
 // 릴리스 빌드에서는 콘솔 창을 띄우지 않는다
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod logging;
 mod session;
 mod settings;
+mod smoke;
 mod snap;
 mod status;
 mod summary;
@@ -63,6 +65,8 @@ pub(crate) struct AppState {
     pub file_pct: AtomicUsize,
     /// 이번 녹음에서 자동 저장 실패를 이미 알렸나 (한 번만 알림)
     save_warned: AtomicBool,
+    /// 화면 스크립트가 끝까지 실행돼 준비됐는지 (자동 점검이 확인)
+    pub ui_ready: AtomicBool,
     /// 녹음 중 지금 위치 (ms) — 다시 듣기 구간을 녹음 시간축에 맞추는 데 쓴다
     live_pos_ms: AtomicU64,
     /// 녹음 중 다시 들은 구간들 (그 소리가 다시 받아 적히면 버린다)
@@ -567,6 +571,20 @@ async fn transcribe_file(app: AppHandle, path: String) -> CmdResult<()> {
 
 fn on_pipeline_event(app: &AppHandle, ev: Event) {
     let st = app.state::<AppState>();
+    // 진단 로그 (앱이 만든 문구만 — 녹취록 내용은 남기지 않는다)
+    match &ev {
+        Event::Started {
+            mic,
+            system,
+            engine,
+            diarization,
+        } => log::info!("녹음 시작됨: 엔진 {engine}, 마이크 {mic:?}, 시스템/파일 {system:?}, 화자 구분 {diarization}"),
+        Event::Error { message } => log::error!("{message}"),
+        Event::Warning { message } => log::warn!("{message}"),
+        Event::Failed { id, message } => log::warn!("발화 {id} 인식 실패: {message}"),
+        Event::Status { message } => log::info!("{message}"),
+        _ => {}
+    }
     match &ev {
         Event::Transcript {
             id,
@@ -579,7 +597,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             // 녹음 중 다시 들은 소리가 스피커·시스템 소리로 다시 녹음돼 받아 적힌 것이면 버린다
             let now = st.live_pos_ms.load(Ordering::Relaxed);
             if is_echo(&st.echo.lock(), *start_ms, *end_ms, text, now) {
-                log::info!("다시 듣기 메아리로 보고 버림: {text}");
+                log::info!("다시 듣기 메아리로 보고 버림 (발화 {id}, {}자)", text.chars().count());
                 let _ = app.emit("bd://event", &Event::Discarded { id: *id });
                 return;
             }
@@ -624,6 +642,14 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             st.file_mode.store(false, Ordering::SeqCst);
             {
                 let mut store = st.store.lock();
+                if let Some(d) = store.current.as_ref() {
+                    log::info!(
+                        "녹음 끝: 기록 {} · 발화 {}개 · 길이 {}초",
+                        d.id,
+                        d.utterances.len(),
+                        d.duration_ms / 1000
+                    );
+                }
                 // 마지막 저장: 실패하면(디스크 가득·백신·OneDrive 잠금 등) 잠깐 뒤 다시, 그래도 안 되면 앱 폴더에 따로 저장하고 알린다
                 let mut saved = store.flush();
                 for _ in 0..2 {
@@ -1042,6 +1068,13 @@ fn on_display_change(app: &AppHandle) {
     });
 }
 
+/// 화면 스크립트가 시작을 끝냈다는 신호 (스크립트 오류로 화면이 비면 오지 않는다)
+#[tauri::command]
+fn ui_ready(app: AppHandle) {
+    app.state::<AppState>().ui_ready.store(true, Ordering::SeqCst);
+    log::info!("화면 준비됨");
+}
+
 #[tauri::command]
 fn hide_window(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -1055,6 +1088,7 @@ fn open_folder(app: AppHandle, kind: String) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let dir = match kind.as_str() {
         "models" => st.paths.models.clone(),
+        "logs" => logging::log_dir(),
         _ => st.paths.sessions.clone(),
     };
     std::fs::create_dir_all(&dir).map_err(err)?;
@@ -1234,9 +1268,13 @@ fn open_file_from_cli(app: AppHandle, file: PathBuf) {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    logging::init();
+    let smoke = smoke::enabled();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // 자동 점검은 사용 중인 앱과 따로 돈다 (명령이 사용 중인 앱으로 넘어가지 않게)
+    if !smoke {
+        builder = builder
         // 두 번째 실행은 이미 떠 있는 앱으로 전달된다: `badasugi --toggle | --start | --stop | --pause`
         // (Stream Deck · 배치 파일 · 바로 가기 등에서 녹음 제어)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -1254,7 +1292,9 @@ fn main() {
                 }
                 handle_forwarded(&app, &argv);
             });
-        }))
+        }));
+    }
+    builder
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -1291,17 +1331,26 @@ fn main() {
                 )
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let path = app.path();
-            let config_dir = path.app_config_dir()?;
             let models_dir = path.app_local_data_dir()?.join("models");
-            let sessions_dir = path
-                .document_dir()
-                .map(|d| d.join("받아쓰기"))
-                .unwrap_or_else(|_| path.app_data_dir().unwrap_or_default().join("sessions"));
+            let (config_dir, sessions_dir) = match smoke::home() {
+                // 자동 점검: 설정 · 기록은 임시 폴더에 (모델만 설치된 것을 읽는다)
+                Some(home) => (home.join("config"), home.join("sessions")),
+                None => (
+                    path.app_config_dir()?,
+                    path.document_dir()
+                        .map(|d| d.join("받아쓰기"))
+                        .unwrap_or_else(|_| path.app_data_dir().unwrap_or_default().join("sessions")),
+                ),
+            };
             let settings_path = config_dir.join("settings.json");
             let mut settings = Settings::load(&settings_path);
+            if smoke {
+                settings.save_audio = true;
+                settings.mini_mode = false;
+            }
             // 업데이트 직후 첫 실행인지 (안내 토스트용)
             let version = app.package_info().version.to_string();
             let updated_from = (!settings.last_version.is_empty() && settings.last_version != version)
@@ -1334,6 +1383,7 @@ fn main() {
                 file_mode: AtomicBool::new(false),
                 file_pct: AtomicUsize::new(0),
                 save_warned: AtomicBool::new(false),
+                ui_ready: AtomicBool::new(false),
                 live_pos_ms: AtomicU64::new(0),
                 echo: Mutex::new(Vec::new()),
                 updated_from: Mutex::new(updated_from),
@@ -1346,6 +1396,23 @@ fn main() {
             });
             app.manage(Updates::default());
             app.manage(status::Status::new(tray_base));
+            log::info!(
+                "받아쓰기 {} 시작 — 엔진 {}, 모델 {}, 언어 {}, 입력 {:?}, 화자 구분 {}, 녹음 저장 {}, 미니 창 {}{}",
+                app.package_info().version,
+                settings.engine,
+                settings.local_model,
+                settings.language,
+                settings.source,
+                settings.diarization.enabled,
+                settings.save_audio,
+                settings.mini_mode,
+                if smoke { " (자동 점검)" } else { "" }
+            );
+            if smoke {
+                // 트레이 · 단축키 · 업데이트 없이, 창은 숨긴 채로 점검만 하고 끝낸다
+                smoke::spawn(handle.clone());
+                return Ok(());
+            }
 
             setup_tray(&handle)?;
             if let Err(e) = register_hotkey(&handle, &settings.hotkey) {
@@ -1413,6 +1480,7 @@ fn main() {
             hide_window,
             set_mini,
             set_playback,
+            ui_ready,
             open_folder,
             open_url,
             quit_app,

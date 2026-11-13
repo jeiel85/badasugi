@@ -161,6 +161,7 @@ badasugi.exe 회의.m4a :: 녹음 파일 받아쓰기
 | 모델 | `%LOCALAPPDATA%\com.badasugi.desktop\models\` |
 | 설정 | `%APPDATA%\com.badasugi.desktop\settings.json` |
 | API 키 | Windows 자격 증명 관리자 (`badasugi`) |
+| 진단 로그 (7일 보관 · 녹취록 내용·API 키 제외) | `%LOCALAPPDATA%\com.badasugi.desktop\logs\` — 설정 맨 아래 **로그 폴더** |
 
 ## 🧠 작동 방식
 
@@ -215,6 +216,7 @@ cd src-tauri; cargo tauri build            # 설치 파일: target\release\bundl
   (cmake 크레이트가 Visual Studio 생성기에서 Release 최적화 플래그를 지우는 문제가 있어, 이 설정이 없으면 20배 이상 느려집니다.)
 - GPU 가속: [Vulkan SDK](https://vulkan.lunarg.com/) 설치 후 `cargo build --release -p badasugi --features vulkan`
 
+- 자동 점검: `pwsh scripts/smoke.ps1` — 실제 앱을 격리된 임시 폴더에서 띄워 화면 표시 · 녹음(테스트 음성) · 일시정지 · 정지 · 저장(JSON·MD·WAV) · 파일 받아쓰기 · 진단 로그까지 검사합니다. 쓰고 있는 앱·설정·기록은 건드리지 않아요. 릴리스 스크립트가 배포 전에 자동으로 실행합니다.
 - 릴리스(서명된 업데이트 포함): `pwsh scripts/release.ps1 -Notes "변경 내용"` 한 번으로 빌드 → 서명 → `latest.json` → GitHub Release 업로드. 업데이트 서명 키(`%USERPROFILE%\.tauri\badasugi.key`)가 필요합니다.
 
 ### 프로젝트 구조

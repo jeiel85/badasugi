@@ -334,7 +334,6 @@ dependencies = [
  "anyhow",
  "badasugi-core",
  "chrono",
- "env_logger",
  "keyring",
  "log",
  "parking_lot",
