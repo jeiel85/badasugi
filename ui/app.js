@@ -1156,7 +1156,12 @@ $('#btn-expand').addEventListener('click', () => call('set_mini', { mini: false 
 $('#btn-mini-hide').addEventListener('click', () => api.invoke('hide_window'));
 // 미니 창 도크 빈 곳 더블클릭 → 큰 창 (끌기와 겹치지 않게 mousedown 의 두 번째 클릭으로 판단)
 $('.dock').addEventListener('mousedown', (e) => {
-  if (S.mini && e.detail === 2 && e.target.closest('[data-tauri-drag-region]')) call('set_mini', { mini: false });
+  if (S.mini && e.button === 0 && e.detail === 2 && e.target.closest('[data-tauri-drag-region]')) {
+    // Tauri 의 끌기 영역 기본 동작(더블클릭 = 최대화)이 이어서 돌지 않도록 여기서 멈춘다 → 이전 크기로만 돌아감
+    e.preventDefault();
+    e.stopPropagation();
+    call('set_mini', { mini: false });
+  }
 });
 
 /* ───────────── 일시정지 ───────────── */

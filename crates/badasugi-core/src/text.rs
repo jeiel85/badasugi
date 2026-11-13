@@ -199,6 +199,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repeated_short_utterance_is_fixed_by_clean() {
+        for raw in [" 안녕하세요. 안녕하세요.", " 다음주에 전 매장에 적용하겠습니다. 다음주에 전 매장에 적용하겠습니다."] {
+            assert!(is_degenerate(raw));
+            let tidy = clean(raw);
+            assert!(!is_degenerate(&tidy), "{tidy}");
+            assert_eq!(sentences(&tidy).len(), 1, "{tidy}");
+        }
+    }
+
+    #[test]
     fn wrong_script_only_for_korean_without_hangul() {
         assert!(is_wrong_script("and then, it's", "ko"));
         assert!(is_wrong_script("And.", "ko"));

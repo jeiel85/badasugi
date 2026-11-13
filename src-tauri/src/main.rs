@@ -806,12 +806,15 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let mut s = st.settings.lock().clone();
     if mini {
+        // 최대화된 상태였다면 먼저 원래 크기로 돌려놓고 그 크기를 기억한다 (돌아올 때 꽉 찬 창이 되지 않게)
+        if w.is_maximized().unwrap_or(false) {
+            let _ = w.unmaximize();
+        }
         if !s.mini_mode {
             if let (Ok(p), Ok(sz)) = (w.outer_position(), w.inner_size()) {
                 s.full_bounds = Some([p.x, p.y, sz.width as i32, sz.height as i32]);
             }
         }
-        let _ = w.unmaximize();
         let _ = w.set_min_size(None::<tauri::Size>);
         let _ = w.set_resizable(false);
         let _ = w.set_size(LogicalSize::new(MINI_SIZE.0, MINI_SIZE.1));
@@ -831,6 +834,7 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
                 s.mini_pos = Some([p.x, p.y]);
             }
         }
+        let _ = w.unmaximize();
         let _ = w.set_resizable(true);
         let _ = w.set_min_size(Some(LogicalSize::new(FULL_MIN.0, FULL_MIN.1)));
         match s.full_bounds.filter(|b| on_screen(app, b[0], b[1])) {

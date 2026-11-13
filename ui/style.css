@@ -378,3 +378,15 @@ mark.cur { background: var(--warn); color: #111; }
 .pl-rate:hover { color: var(--accent); }
 .transcript.can-play .u[data-id] { cursor: pointer; }
 .u.playing { background: var(--accent-soft) !important; box-shadow: inset 3px 0 0 var(--accent); }
+
+/* 좁은 창에서도 제목이 한 줄로 (버튼을 조금 촘촘하게) */
+.titlebar { gap: 8px; }
+.brand { min-width: 0; flex: 1 1 auto; overflow: hidden; }
+.brand span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-actions { flex: none; }
+@media (max-width: 400px) {
+  .titlebar { padding-left: 12px; }
+  .tb-actions { gap: 0; }
+  .titlebar .icon-btn { width: 30px; }
+  .tb-sep { margin: 0 2px; }
+}

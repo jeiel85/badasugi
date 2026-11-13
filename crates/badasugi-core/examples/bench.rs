@@ -15,7 +15,8 @@ fn main() -> anyhow::Result<()> {
     let ctx = WhisperContext::new_with_params(&args[1], cp)?;
     eprintln!("load {:?}", t.elapsed());
     let mut state = ctx.create_state()?;
-    for round in 0..1 {
+    let rounds: usize = std::env::var("BENCH_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    for round in 0..rounds {
         let mut p = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         p.set_language(Some("ko"));
         p.set_n_threads(threads);

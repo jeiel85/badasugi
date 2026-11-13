@@ -158,13 +158,32 @@ impl Transcriber for LocalWhisper {
         let mut params = params_template(self.threads, self.beam, req);
         if reduced {
             params.set_audio_ctx(audio_ctx);
+            // whisper 자체의 온도 올려 다시 풀기(최대 5번)는 끈다: 짧은 발화가 같은 말을 되풀이하면 이게 돌아
+            // 1초짜리 "안녕하세요"에 10초 넘게 걸리고 엉뚱한 말이 섞였다. 이상하면 아래에서 직접 정리·재인식한다.
+            params.set_temperature_inc(0.0);
+            // 말 길이에 비해 터무니없이 긴 출력(반복 루프)은 일찍 끊는다 (빠른 말 · 바이트 토큰까지 넉넉히)
+            let secs = req.samples.len() as f32 / SAMPLE_RATE as f32;
+            params.set_max_tokens((secs * 30.0) as i32 + 20);
         }
         self.state.full(params, samples).map_err(|e| anyhow!("whisper 추론 실패: {e}"))?;
         let mut text = self.collect();
 
         // 줄인 창에서 반복 루프에 빠졌거나, 한국어인데 엉뚱한 영어가 나왔으면 전체 창으로 한 번 더 (느리지만 드묾)
         // (AAC(m4a) 녹음에서 특히 잘 생긴다)
-        if reduced && (crate::text::is_degenerate(&text) || crate::text::is_wrong_script(&text, req.language)) {
+        let bad = |t: &str| crate::text::is_degenerate(t) || crate::text::is_wrong_script(t, req.language);
+        if reduced && bad(&text) {
+            // 짧은 발화("안녕하세요")는 줄인 창에서 같은 문장을 두 번 내놓는 일이 잦다. 겹친 문장만 빼면 맞는 결과라,
+            // 다시 인식(이 CPU 에서 15초 이상)하지 않는다 → 회의 첫마디가 바로 뜬다.
+            // 긴 발화의 반복은 뒷말을 빠뜨렸을 수 있으므로 그대로 다시 인식한다.
+            if req.samples.len() <= SAMPLE_RATE as usize * 4 {
+                let tidy = crate::text::clean(&text);
+                if !tidy.is_empty() && !bad(&tidy) {
+                    log::debug!("짧은 발화 반복 → 겹친 문장만 정리: {text} → {tidy}");
+                    return Ok(tidy);
+                }
+            }
+        }
+        if reduced && bad(&text) {
             // 바로 30초 창으로 가면 이 CPU 에서 50초가 넘게 걸려 뒤 발화가 밀리므로, 창을 두 배로 늘려 한 번 더
             let retry = (audio_ctx * 2).min(1500);
             log::debug!("반복·언어 이상 감지 → 창 {audio_ctx} → {retry} 로 재인식: {text}");
