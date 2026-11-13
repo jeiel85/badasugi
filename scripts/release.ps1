@@ -52,7 +52,7 @@ $sigFile = "$($setup.FullName).sig"
 Remove-Item $sigFile -ErrorAction SilentlyContinue
 try {
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-    cargo tauri signer sign --private-key-path $keyPath $setup.FullName
+    cargo tauri signer sign --private-key-path $keyPath --app-version $version $setup.FullName
     if ($LASTEXITCODE -ne 0) { throw "signing failed" }
 } finally {
     Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
