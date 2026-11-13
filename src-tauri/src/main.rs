@@ -950,6 +950,14 @@ async fn check_update(app: AppHandle) -> CmdResult<Option<String>> {
     update::check(&app, true).await
 }
 
+/// 업데이트 팝업: 지금 버전 이후 바뀐 내용 (버전별, 최신순)
+#[tauri::command]
+async fn update_notes(app: AppHandle) -> Vec<update::VersionNotes> {
+    tauri::async_runtime::spawn_blocking(move || update::release_notes(&app))
+        .await
+        .unwrap_or_default()
+}
+
 /// 내려받아 둔 업데이트를 설치하고 다시 시작
 #[tauri::command]
 fn install_update(app: AppHandle) -> CmdResult<()> {
@@ -1519,6 +1527,7 @@ fn main() {
             set_playback,
             ui_ready,
             get_usage,
+            update_notes,
             open_folder,
             open_url,
             quit_app,
