@@ -1282,7 +1282,11 @@ function renderUpdate() {
 }
 function onUpdate(u) {
   S.update = u;
-  if (!$('#update-modal').hidden && u?.state === 'ready') { $('#um-apply').disabled = false; $('#um-apply').textContent = '지금 적용'; }
+  if (!$('#update-modal').hidden) {
+    // 팝업이 열린 채 상태가 바뀌면: 준비 끝 → 적용 버튼 살림, 실패 · 사라짐 → 닫기 (오류는 아래 토스트로)
+    if (u?.state === 'ready') { $('#um-apply').disabled = false; $('#um-apply').textContent = '지금 적용'; }
+    else if (!u || u.state === 'error') closeUpdateModal();
+  }
   if (u?.state === 'error') toast(u.message || '업데이트 확인 실패', 'error');
   renderUpdate();
 }
