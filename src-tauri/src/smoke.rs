@@ -305,11 +305,11 @@ fn run(app: &AppHandle, c: &mut Checks) {
     };
     if speaker_ready {
         let voices = crate::voices::read_session_voices(&sessions, &live.id);
-        let secs: f32 = voices.iter().map(|v| v.secs).sum();
+        let secs: f32 = voices.iter().map(|v| v.dur_ms as f32 / 1000.0).sum();
         c.add(
             "화자 다시 정리",
             !voices.is_empty(),
-            format!("화자 {}명 목소리 · {secs:.0}초 ({}.voices)", voices.len(), live.id),
+            format!("문장 {}개 목소리 · {secs:.0}초 ({}.voices)", voices.len(), live.id),
         );
         // 화면에서 화자 이름을 바꾼 것처럼 저장한다
         let mut doc = live.clone();

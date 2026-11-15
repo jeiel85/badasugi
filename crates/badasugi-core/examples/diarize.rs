@@ -116,7 +116,7 @@ fn main() -> anyhow::Result<()> {
     seg.flush(&mut segs);
     feed(&mut segs, &mut d, &mut parts);
 
-    let r = d.finish();
+    let r = d.finish(&BTreeMap::new());
     let refined: BTreeMap<u64, u32> = r.labels.iter().map(|&(id, _, l)| (id, l)).collect();
     let online: Vec<(u64, u64, u32)> = parts.iter().map(|&(_, s, e, l)| (s, e, l)).collect();
     let after: Vec<(u64, u64, u32)> = parts.iter().map(|&(id, s, e, _)| (s, e, refined[&id])).collect();

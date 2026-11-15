@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
-use badasugi_core::diarize::{match_voices, KnownVoice, SpeakerVoice};
+use badasugi_core::diarize::{match_voices, KnownVoice, SpeakerVoice, UtteranceVoice};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -78,8 +78,8 @@ const NAME_MIN_SECS: f32 = 8.0;
 pub struct Refined {
     /// 화자가 바뀐 문장 수
     pub moved: usize,
-    /// 최종 화자 번호 기준 목소리
-    pub voices: Vec<SpeakerVoice>,
+    /// 목소리가 있는 화자 수
+    pub speakers: usize,
     /// 목소리로 새로 이름을 붙인 화자 수
     pub named: usize,
 }
@@ -126,7 +126,8 @@ impl SessionDoc {
     /// 회의가 끝난 뒤 다시 정리한 화자를 반영한다.
     ///
     /// - `labels`: [발화 id, 실시간 화자, 다시 정리한 화자]. 사람이 직접 화자를 바꾼 문장은 건드리지 않고,
-    ///   녹음 중에 합친 화자(`speaker_map`)는 그대로 지킨다.
+    ///   녹음 중에 합친 화자(`speaker_map`)는 그대로 지킨다 (다시 정리도 합친 화자를 한 화자로 묶어 계산한다).
+    /// - `utterances`: 문장별 목소리 — 화자별 목소리는 지금의 문장 배정대로 모은다 (사람이 옮긴 문장도 따라감)
     /// - 화자가 합쳐져 사라지면 그 이름은 합쳐진 쪽이 이어받는다 (그쪽에 이름이 없을 때).
     /// - `known` 목소리와 닮은 화자에 이름을 붙인다. 녹음 중에 목소리로 붙였던 이름(`auto_named`)은
     ///   회의 전체로 다시 보고 아니면 거둔다. 사람이 붙인 이름은 그대로.
@@ -134,7 +135,7 @@ impl SessionDoc {
     pub fn apply_refinement(
         &mut self,
         labels: &[[u64; 3]],
-        voices: &[SpeakerVoice],
+        utterances: &[UtteranceVoice],
         auto_named: &BTreeSet<String>,
         known: &[KnownVoice],
     ) -> Refined {
@@ -176,32 +177,8 @@ impl SessionDoc {
         }
         self.speakers.retain(|k, _| used.contains(k));
 
-        // 화자별 목소리 (녹음 중에 합친 화자는 말한 길이만큼 섞는다)
-        let mut sums: BTreeMap<u32, (Vec<f32>, f32)> = BTreeMap::new();
-        for v in voices {
-            let Some(l) = resolve_with(&smap, Some(v.speaker)).filter(|l| used.contains(l)) else {
-                continue;
-            };
-            let e = sums.entry(l).or_insert_with(|| (vec![0.0; v.embedding.len()], 0.0));
-            if e.0.len() != v.embedding.len() {
-                continue;
-            }
-            let w = v.secs.max(0.1);
-            e.0.iter_mut().zip(&v.embedding).for_each(|(a, b)| *a += b * w);
-            e.1 += v.secs;
-        }
-        let mut finals: Vec<SpeakerVoice> = sums
-            .into_iter()
-            .map(|(speaker, (mut e, secs))| {
-                let n = e.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-                e.iter_mut().for_each(|x| *x /= n);
-                SpeakerVoice {
-                    speaker,
-                    embedding: e,
-                    secs,
-                }
-            })
-            .collect();
+        // 화자별 목소리: 지금 문장 배정대로 모은다
+        let finals = self.speaker_voices(utterances);
 
         // 목소리로 이름 붙이기 (회의 전체 기준)
         let mut named = 0;
@@ -245,41 +222,52 @@ impl SessionDoc {
             u.speaker = u.speaker.map(re);
         }
         self.speakers = std::mem::take(&mut self.speakers).into_iter().map(|(k, v)| (re(k), v)).collect();
-        for v in finals.iter_mut() {
-            v.speaker = re(v.speaker);
-        }
         // 모든 문장이 최종 화자로 정리됐으므로 합친 기록은 더 필요 없다
         self.speaker_map.clear();
         Refined {
             moved,
-            voices: finals,
+            speakers: finals.len(),
             named,
         }
     }
 
-    /// 이름 붙은 화자의 목소리 (목소리 기억에 넣을 것): (이름, 목소리, 말한 초).
-    /// 회의가 끝난 뒤 합친 화자도 따라간다.
-    pub fn named_voices(&self, voices: &[SpeakerVoice]) -> Vec<(String, Vec<f32>, f32)> {
-        let mut by: BTreeMap<u32, (Vec<f32>, f32)> = BTreeMap::new();
-        for v in voices {
-            let Some(l) = self.resolve(Some(v.speaker)) else {
+    /// 화자별 목소리: 문장별 목소리를 지금의 화자 배정(합친 화자 포함)대로 모은다.
+    /// 기록에 없는(지운) 문장 · 화자가 없는 문장은 뺀다.
+    pub fn speaker_voices(&self, utterances: &[UtteranceVoice]) -> Vec<SpeakerVoice> {
+        let by_id: HashMap<u64, &UtteranceVoice> = utterances.iter().map(|u| (u.id, u)).collect();
+        let mut sums: BTreeMap<u32, (Vec<f32>, f32)> = BTreeMap::new();
+        for u in &self.utterances {
+            let (Some(spk), Some(v)) = (self.resolve(u.speaker), by_id.get(&u.id)) else {
                 continue;
             };
-            let e = by.entry(l).or_insert_with(|| (vec![0.0; v.embedding.len()], 0.0));
+            let e = sums.entry(spk).or_insert_with(|| (vec![0.0; v.embedding.len()], 0.0));
             if e.0.len() != v.embedding.len() {
                 continue;
             }
-            let w = v.secs.max(0.1);
+            let secs = v.dur_ms as f32 / 1000.0;
+            let w = secs.clamp(0.3, 6.0);
             e.0.iter_mut().zip(&v.embedding).for_each(|(a, b)| *a += b * w);
-            e.1 += v.secs;
+            e.1 += secs;
         }
-        by.into_iter()
-            .filter_map(|(l, (mut e, secs))| {
-                let name = self.speakers.get(&l)?.clone();
+        sums.into_iter()
+            .map(|(speaker, (mut e, secs))| {
                 let n = e.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
                 e.iter_mut().for_each(|x| *x /= n);
-                Some((name, e, secs))
+                SpeakerVoice {
+                    speaker,
+                    embedding: e,
+                    secs,
+                }
             })
+            .collect()
+    }
+
+    /// 이름 붙은 화자의 목소리 (목소리 기억에 넣을 것): (이름, 목소리, 말한 초).
+    /// 문장별 목소리를 지금의 화자 배정대로 모으므로, 사람이 문단을 옮기거나 화자를 합친 결과를 따른다.
+    pub fn named_voices(&self, utterances: &[UtteranceVoice]) -> Vec<(String, Vec<f32>, f32)> {
+        self.speaker_voices(utterances)
+            .into_iter()
+            .filter_map(|v| Some((self.speakers.get(&v.speaker)?.clone(), v.embedding, v.secs)))
             .collect()
     }
 
@@ -726,12 +714,12 @@ mod tests {
         }
     }
 
-    fn voice(speaker: u32, e: [f32; 3], secs: f32) -> SpeakerVoice {
+    fn uv(id: u64, e: [f32; 3]) -> UtteranceVoice {
         let n = e.iter().map(|x| x * x).sum::<f32>().sqrt();
-        SpeakerVoice {
-            speaker,
+        UtteranceVoice {
+            id,
             embedding: e.iter().map(|x| x / n).collect(),
-            secs,
+            dur_ms: 4000,
         }
     }
 
@@ -742,27 +730,29 @@ mod tests {
         d.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2), u(3, 15000, 3), u(4, 20000, 100), u(5, 25000, 1)];
         d.speakers.insert(2, "김 팀장".into());
         let labels = [[0, 0, 0], [1, 1, 1], [2, 2, 0], [3, 3, 3], [4, 3, 1], [5, 1, 1]];
-        let voices = [voice(0, [1.0, 0.0, 0.0], 20.0), voice(1, [0.0, 1.0, 0.0], 20.0), voice(3, [0.0, 0.0, 1.0], 9.0)];
-        let r = d.apply_refinement(&labels, &voices, &BTreeSet::new(), &[]);
+        let r = d.apply_refinement(&labels, &[], &BTreeSet::new(), &[]);
         assert_eq!(r.moved, 1);
         let spk: Vec<Option<u32>> = d.utterances.iter().map(|u| u.speaker).collect();
         // 0,2 → 0 · 1 → 1 · 3 → 2 (번호를 빈틈없이) · 사람이 옮긴 100번은 그대로
         assert_eq!(spk, vec![Some(0), Some(1), Some(0), Some(2), Some(100), Some(1)]);
         // 사라진 2번 화자의 이름은 합쳐진 0번이 이어받는다
         assert_eq!(d.speakers.get(&0).map(String::as_str), Some("김 팀장"));
-        assert_eq!(r.voices.iter().map(|v| v.speaker).collect::<Vec<_>>(), vec![0, 1, 2]);
     }
 
     #[test]
     fn refinement_follows_merges_made_during_recording() {
         let mut d = SessionDoc::new("로컬".into());
-        // 녹음 중에 사람이 1번을 0번에 합쳐 둠
+        // 녹음 중에 사람이 1번을 0번에 합쳐 둠 → 다시 정리도 합친 채로 계산해 둘을 같은 곳(2번)으로 보낸다
         d.speaker_map.insert(1, 0);
-        d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 10000, 2)];
-        let labels = [[0, 0, 0], [1, 1, 1], [2, 2, 2]];
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 10000, 2), u(3, 15000, 0)];
+        let labels = [[0, 0, 2], [1, 1, 2], [2, 2, 2], [3, 0, 0]];
         let r = d.apply_refinement(&labels, &[], &BTreeSet::new(), &[]);
-        assert_eq!(r.moved, 0);
-        assert_eq!(d.utterances.iter().map(|u| u.speaker).collect::<Vec<_>>(), vec![Some(0), Some(0), Some(1)]);
+        assert_eq!(r.moved, 2);
+        // 2번과 합쳐진 0·1 은 함께 0번(다시 매긴 번호)으로, 따로 남은 문장 3은 1번
+        assert_eq!(
+            d.utterances.iter().map(|u| u.speaker).collect::<Vec<_>>(),
+            vec![Some(1), Some(1), Some(1), Some(0)]
+        );
         assert!(d.speaker_map.is_empty());
     }
 
@@ -783,21 +773,47 @@ mod tests {
             },
         ];
         let mut d = SessionDoc::new("로컬".into());
-        d.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2)];
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 10000, 1), u(3, 15000, 1), u(4, 20000, 2), u(5, 25000, 2)];
         // 0번: 녹음 중 목소리로 "박 대리"라고 붙였지만 회의 전체로 보면 김 팀장 · 2번: 사람이 직접 "최 부장"
         d.speakers.insert(0, "박 대리".into());
         d.speakers.insert(2, "최 부장".into());
-        let voices = [voice(0, [1.0, 0.05, 0.0], 30.0), voice(1, [0.0, 1.0, 0.1], 30.0), voice(2, [0.0, 0.0, 1.0], 30.0)];
+        let voices = [
+            uv(0, [1.0, 0.05, 0.0]),
+            uv(1, [1.0, 0.0, 0.05]),
+            uv(2, [0.0, 1.0, 0.1]),
+            uv(3, [0.05, 1.0, 0.0]),
+            uv(4, [0.0, 0.0, 1.0]),
+            uv(5, [0.0, 0.1, 1.0]),
+        ];
         let auto: BTreeSet<String> = ["박 대리".to_string()].into();
-        let labels = [[0, 0, 0], [1, 1, 1], [2, 2, 2]];
+        let labels = [[0, 0, 0], [1, 0, 0], [2, 1, 1], [3, 1, 1], [4, 2, 2], [5, 2, 2]];
         let r = d.apply_refinement(&labels, &voices, &auto, &known);
         assert_eq!(d.speakers.get(&0).map(String::as_str), Some("김 팀장"));
         assert_eq!(d.speakers.get(&1).map(String::as_str), Some("박 대리"));
         assert_eq!(d.speakers.get(&2).map(String::as_str), Some("최 부장"));
         assert_eq!(r.named, 1);
         // 이름 붙은 화자의 목소리 → 목소리 기억으로
-        let named: Vec<String> = d.named_voices(&r.voices).into_iter().map(|x| x.0).collect();
+        let named: Vec<String> = d.named_voices(&voices).into_iter().map(|x| x.0).collect();
         assert_eq!(named, vec!["김 팀장", "박 대리", "최 부장"]);
+    }
+
+    #[test]
+    fn voices_follow_utterances_moved_by_hand() {
+        // 실시간 0번이었던 문장 둘 중 하나를 사람이 새 화자(100번)로 옮기고 이름을 붙임
+        let mut d = SessionDoc::new("로컬".into());
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 100), u(2, 10000, 0)];
+        d.speakers.insert(0, "김 팀장".into());
+        d.speakers.insert(100, "박 대리".into());
+        let voices = [uv(0, [1.0, 0.0, 0.0]), uv(1, [0.0, 1.0, 0.0]), uv(2, [1.0, 0.1, 0.0])];
+        let named = d.named_voices(&voices);
+        let get = |n: &str| named.iter().find(|x| x.0 == n).unwrap();
+        // 박 대리의 목소리는 옮긴 문장에서, 김 팀장 목소리에는 박 대리 문장이 섞이지 않는다
+        assert!(get("박 대리").1[1] > 0.99);
+        assert!(get("김 팀장").1[1] < 0.1);
+        assert!((get("김 팀장").2 - 8.0).abs() < 1e-3);
+        // 지운 문장의 목소리는 빠진다
+        d.utterances.retain(|u| u.id != 1);
+        assert!(d.named_voices(&voices).iter().all(|x| x.0 != "박 대리"));
     }
 
     #[test]

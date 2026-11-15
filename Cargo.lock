@@ -333,6 +333,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "badasugi-core",
+ "base64 0.23.1",
  "chrono",
  "keyring",
  "log",

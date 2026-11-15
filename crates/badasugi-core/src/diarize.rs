@@ -33,6 +33,17 @@ pub struct SpeakerVoice {
     pub secs: f32,
 }
 
+/// 문장(조각) 하나의 목소리 — 사람이 문장을 다른 화자로 옮겨도 목소리가 그 문장을 따라가게 문장별로 넘긴다
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtteranceVoice {
+    /// 발화 id
+    pub id: u64,
+    /// L2 정규화된 임베딩
+    pub embedding: Vec<f32>,
+    pub dur_ms: u64,
+}
+
 /// 다시 정리할 때 쓰는 조각 정보
 #[derive(Debug, Clone)]
 pub struct VoiceSample {
@@ -54,7 +65,10 @@ impl VoiceSample {
 pub struct Refinement {
     /// (발화 id, 실시간 화자, 다시 정리한 화자) — 모든 조각
     pub labels: Vec<(u64, u32, u32)>,
+    /// 다시 정리한 화자별 목소리
     pub voices: Vec<SpeakerVoice>,
+    /// 믿을 만한 조각의 목소리 (문장별)
+    pub utterances: Vec<UtteranceVoice>,
 }
 
 impl Refinement {
@@ -157,9 +171,9 @@ impl Diarizer {
         self.samples.is_empty()
     }
 
-    /// 회의 전체를 보고 화자를 다시 정리한다
-    pub fn finish(&self) -> Refinement {
-        refine(&self.samples, &self.cfg)
+    /// 회의 전체를 보고 화자를 다시 정리한다. `merges`: 사람이 녹음 중에 합친 화자 (실시간 화자 → 합쳐진 화자)
+    pub fn finish(&self, merges: &BTreeMap<u32, u32>) -> Refinement {
+        refine(&self.samples, &self.cfg, merges)
     }
 }
 
@@ -264,11 +278,21 @@ fn distinct(labels: &[u32]) -> usize {
 
 /// 회의 전체의 조각을 보고 화자를 다시 정한다.
 ///
+/// 0. 사람이 녹음 중에 합친 화자(`merges`)는 처음부터 한 화자로 묶는다 — 다시 정리가 그 결정을 되돌리지 않게
 /// 1. 화자 중심끼리 아주 닮았으면 같은 사람으로 합친다 (최대 화자 수를 넘으면 가장 닮은 쌍부터 합친다)
 /// 2. 믿을 만한 조각마다, 자기를 뺀 원래 화자 중심보다 다른 화자 중심에 뚜렷이 가까우면 옮긴다
 /// 3. 1~2를 바뀌는 것이 없을 때까지 되풀이하고, 짧은 말로만 이뤄진 화자는 가까운 화자에 붙인다
-pub fn refine(samples: &[VoiceSample], cfg: &DiarizationConfig) -> Refinement {
-    let mut labels: Vec<u32> = samples.iter().map(|s| s.online).collect();
+pub fn refine(samples: &[VoiceSample], cfg: &DiarizationConfig, merges: &BTreeMap<u32, u32>) -> Refinement {
+    let merged = |mut l: u32| {
+        for _ in 0..16 {
+            match merges.get(&l) {
+                Some(&t) if t != l => l = t,
+                _ => break,
+            }
+        }
+        l
+    };
+    let mut labels: Vec<u32> = samples.iter().map(|s| merged(s.online)).collect();
     let merge_thr = (cfg.threshold + env_f32("BADASUGI_MERGE_MARGIN", MERGE_MARGIN)).min(0.95);
     let move_margin = env_f32("BADASUGI_MOVE_MARGIN", MOVE_MARGIN);
     let max = cfg.max_speakers as usize;
@@ -418,6 +442,16 @@ pub fn refine(samples: &[VoiceSample], cfg: &DiarizationConfig) -> Refinement {
     Refinement {
         labels: samples.iter().zip(&labels).map(|(s, &l)| (s.id, s.online, l)).collect(),
         voices,
+        utterances: samples
+            .iter()
+            .filter_map(|s| {
+                Some(UtteranceVoice {
+                    id: s.id,
+                    embedding: s.reliable()?.to_vec(),
+                    dur_ms: s.dur_ms,
+                })
+            })
+            .collect(),
     }
 }
 
@@ -451,7 +485,7 @@ mod tests {
             sample(4, &[0.98, 0.1, 0.0], 2),
             sample(5, &[0.05, 0.0, 1.0], 1),
         ];
-        let r = refine(&s, &DiarizationConfig::default());
+        let r = refine(&s, &DiarizationConfig::default(), &BTreeMap::new());
         let l: Vec<u32> = r.labels.iter().map(|x| x.2).collect();
         assert_eq!(l[0], l[2]);
         assert_eq!(l[0], l[4]);
@@ -473,7 +507,7 @@ mod tests {
             sample(5, &a, 0),
             sample(6, &b, 1),
         ];
-        let r = refine(&s, &DiarizationConfig::default());
+        let r = refine(&s, &DiarizationConfig::default(), &BTreeMap::new());
         assert_eq!(r.labels[2], (2, 0, 1));
         assert_eq!(r.labels[0].2, 0);
         assert_eq!(r.moved(), 1);
@@ -487,7 +521,7 @@ mod tests {
             sample(2, &[0.0, 0.0, 1.0], 2),
             sample(3, &[1.0, 0.1, 0.0], 0),
         ];
-        let r = refine(&s, &DiarizationConfig::default());
+        let r = refine(&s, &DiarizationConfig::default(), &BTreeMap::new());
         assert_eq!(r.moved(), 0);
         assert_eq!(r.voices.len(), 3);
     }
@@ -503,10 +537,39 @@ mod tests {
             max_speakers: 2,
             ..Default::default()
         };
-        let r = refine(&s, &cfg);
+        let r = refine(&s, &cfg, &BTreeMap::new());
         // 가장 닮은 쌍(0 · 2)이 합쳐진다
         assert_eq!(r.labels[2].2, r.labels[0].2);
         assert_eq!(r.voices.len(), 2);
+    }
+
+    #[test]
+    fn keeps_speakers_merged_by_hand_together() {
+        // 사람이 녹음 중에 1번을 0번에 합쳐 둠. 목소리만 보면 0번 조각들은 (말이 더 많은) 2번과 아주 닮아
+        // 2번으로 합쳐지고 1번만 남아, 사람이 합친 0 · 1 이 다시 갈라질 판이다.
+        let s = vec![
+            sample(0, &[1.0, 0.0, 0.0], 0),
+            sample(1, &[0.0, 1.0, 0.0], 1),
+            sample(2, &[0.98, 0.0, 0.1], 2),
+            sample(3, &[1.0, 0.02, 0.0], 0),
+            sample(4, &[0.05, 1.0, 0.0], 1),
+            sample(5, &[0.97, 0.05, 0.1], 2),
+            sample(6, &[0.99, 0.0, 0.12], 2),
+            sample(7, &[0.96, 0.03, 0.08], 2),
+        ];
+        let split = refine(&s, &DiarizationConfig::default(), &BTreeMap::new());
+        assert_ne!(split.labels[0].2, split.labels[1].2, "제약이 없으면 갈라지는 경우여야 시험이 의미 있다");
+        let merges: BTreeMap<u32, u32> = [(1, 0)].into();
+        let r = refine(&s, &DiarizationConfig::default(), &merges);
+        let l: Vec<u32> = r.labels.iter().map(|x| x.2).collect();
+        // 사람이 합친 0 · 1 은 어디로 가든 함께
+        assert_eq!(l[0], l[1]);
+        assert_eq!(l[0], l[3]);
+        assert_eq!(l[0], l[4]);
+        // 실시간 화자 번호는 그대로 돌려준다 (사람이 고친 문장을 알아보는 데 쓴다)
+        assert_eq!(r.labels[1].1, 1);
+        // 문장별 목소리
+        assert_eq!(r.utterances.len(), 8);
     }
 
     #[test]

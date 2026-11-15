@@ -4,12 +4,14 @@
 //! - 저장하는 것은 화자 임베딩(목소리 특징값, 숫자 192개)뿐이다. 녹음 · 녹취록은 넣지 않는다. 이 PC 밖으로 나가지 않는다.
 //! - 이름마다 "어느 회의에서 온 목소리인지"를 따로 둔다 → 같은 회의를 다시 저장해도 두 번 세지 않고,
 //!   이름을 바꾸거나 회의 기록을 지우면 그 회의에서 온 목소리만 빠진다.
-//! - 회의마다의 화자 목소리는 기록 폴더의 `<id>.voices` 에 둔다 (회의가 끝난 뒤에 이름을 붙여도 기억할 수 있게).
+//! - 회의마다 문장별 목소리를 기록 폴더의 `<id>.voices` 에 둔다 — 회의가 끝난 뒤에 이름을 붙이거나 문단을 다른 화자로
+//!   옮겨도, 목소리는 그 문장을 따라가 지금의 화자 배정대로 모인다.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use badasugi_core::diarize::{KnownVoice, SpeakerVoice};
+use badasugi_core::diarize::{KnownVoice, UtteranceVoice};
+use base64::Engine as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -211,39 +213,69 @@ impl VoiceBook {
 
 // ───────────── 회의별 목소리 (`<id>.voices`) ─────────────
 
+/// 문장 하나의 목소리를 작게: 임베딩을 자기 최댓값 기준 8비트로 줄여 base64 (192개 → 256자, 닮음 계산 오차 0.001 미만)
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredUtterance {
+    id: u64,
+    ms: u64,
+    /// 최댓값 (되돌릴 때 곱한다)
+    s: f32,
+    /// i8 × 차원 수, base64
+    v: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct SessionVoices {
     version: u32,
-    voices: Vec<SpeakerVoice>,
+    utterances: Vec<StoredUtterance>,
 }
 
 pub fn voices_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.voices"))
 }
 
-pub fn write_session_voices(dir: &Path, id: &str, voices: &[SpeakerVoice]) -> anyhow::Result<()> {
+fn pack(u: &UtteranceVoice) -> StoredUtterance {
+    let max = u.embedding.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-8);
+    let q: Vec<u8> = u.embedding.iter().map(|x| ((x / max * 127.0).round().clamp(-127.0, 127.0) as i8) as u8).collect();
+    StoredUtterance {
+        id: u.id,
+        ms: u.dur_ms,
+        s: max,
+        v: base64::engine::general_purpose::STANDARD_NO_PAD.encode(q),
+    }
+}
+
+fn unpack(s: &StoredUtterance) -> Option<UtteranceVoice> {
+    let q = base64::engine::general_purpose::STANDARD_NO_PAD.decode(&s.v).ok()?;
+    let mut e: Vec<f32> = q.iter().map(|&b| (b as i8) as f32 / 127.0 * s.s).collect();
+    let n = e.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if q.is_empty() || n < 1e-8 {
+        return None;
+    }
+    e.iter_mut().for_each(|x| *x /= n);
+    Some(UtteranceVoice {
+        id: s.id,
+        embedding: e,
+        dur_ms: s.ms,
+    })
+}
+
+pub fn write_session_voices(dir: &Path, id: &str, utterances: &[UtteranceVoice]) -> anyhow::Result<()> {
     let data = SessionVoices {
-        version: 1,
-        voices: voices
-            .iter()
-            .map(|v| SpeakerVoice {
-                speaker: v.speaker,
-                embedding: round(&v.embedding),
-                secs: (v.secs * 10.0).round() / 10.0,
-            })
-            .collect(),
+        version: 2,
+        utterances: utterances.iter().map(pack).collect(),
     };
     std::fs::create_dir_all(dir)?;
     std::fs::write(voices_path(dir, id), serde_json::to_vec(&data)?)?;
     Ok(())
 }
 
-pub fn read_session_voices(dir: &Path, id: &str) -> Vec<SpeakerVoice> {
+pub fn read_session_voices(dir: &Path, id: &str) -> Vec<UtteranceVoice> {
     std::fs::read_to_string(voices_path(dir, id))
         .ok()
         .and_then(|s| serde_json::from_str::<SessionVoices>(&s).ok())
-        .map(|v| v.voices)
+        .map(|v| v.utterances.iter().filter_map(unpack).collect())
         .unwrap_or_default()
 }
 
@@ -291,6 +323,28 @@ mod tests {
         assert_eq!(again.list().iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), vec!["박 대리"]);
         again.forget_all();
         assert!(again.known().is_empty());
+    }
+
+    #[test]
+    fn utterance_voices_survive_the_compact_file_format() {
+        let dir = tmp("pack").parent().unwrap().to_path_buf();
+        let mut e: Vec<f32> = (0..192).map(|i| ((i as f32) * 0.37).sin()).collect();
+        let n = e.iter().map(|x| x * x).sum::<f32>().sqrt();
+        e.iter_mut().for_each(|x| *x /= n);
+        let u = UtteranceVoice {
+            id: 7,
+            embedding: e.clone(),
+            dur_ms: 3200,
+        };
+        write_session_voices(&dir, "2026-11-15_120000", &[u]).unwrap();
+        let back = read_session_voices(&dir, "2026-11-15_120000");
+        assert_eq!(back.len(), 1);
+        assert_eq!((back[0].id, back[0].dur_ms), (7, 3200));
+        let cos: f32 = back[0].embedding.iter().zip(&e).map(|(a, b)| a * b).sum();
+        assert!(cos > 0.999, "{cos}");
+        // 문장 하나에 300바이트 남짓
+        let size = std::fs::metadata(voices_path(&dir, "2026-11-15_120000")).unwrap().len();
+        assert!(size < 340, "{size}");
     }
 
     #[test]
