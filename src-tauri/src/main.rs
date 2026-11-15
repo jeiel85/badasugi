@@ -961,15 +961,14 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
             serde_json::json!({ "id": id2, "done": p.done, "total": p.total, "waitSecs": p.wait_secs }),
         );
     };
-    let sum = tauri::async_runtime::spawn_blocking(move || summary::summarize(&cfg, &doc, &progress))
-        .await
-        .map_err(err)?
-        .map_err(err)?;
-    {
-        let book = app.state::<usage_book::UsageBook>();
-        book.summary(&sum.provider, sum.requests, sum.in_tokens, sum.out_tokens);
-        book.save();
-    }
+    // 요청이 성공할 때마다 바로 사용량에 센다 — 긴 회의 중간에 실패해도 이미 쓴 만큼은 남게
+    let app3 = app.clone();
+    let on_usage = move |provider: &str, r: &summary::Reply| {
+        app3.state::<usage_book::UsageBook>().summary(provider, r.in_tokens, r.out_tokens);
+    };
+    let res = tauri::async_runtime::spawn_blocking(move || summary::summarize(&cfg, &doc, &progress, &on_usage)).await;
+    app.state::<usage_book::UsageBook>().save();
+    let sum = res.map_err(err)?.map_err(err)?;
     // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
     let loaded = st.store.lock().load(&id);
     let mut latest = loaded.unwrap_or(doc2);

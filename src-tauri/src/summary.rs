@@ -174,6 +174,7 @@ fn span(part: &str) -> (String, String) {
 }
 
 /// 구간 메모 하나
+#[derive(Clone)]
 struct Note {
     from: String,
     to: String,
@@ -199,15 +200,37 @@ fn render_notes(notes: &[Note]) -> String {
         .join("\n\n")
 }
 
-/// 요청 보내기 · 사용량 · 진행 알림 (긴 회의 나눠 정리용)
+/// 이어진 메모들을 실제 크기대로 묶는다 (묶음마다 ≤ budget 글자, 메모 하나가 더 크면 혼자)
+fn pack(notes: &[Note], budget: usize) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let (mut start, mut size) = (0, 0);
+    for (i, n) in notes.iter().enumerate() {
+        let len = n.render("구간 00").chars().count() + 2;
+        if i > start && size + len > budget {
+            out.push(start..i);
+            start = i;
+            size = 0;
+        }
+        size += len;
+    }
+    if start < notes.len() {
+        out.push(start..notes.len());
+    }
+    out
+}
+
+const MERGE_ASK: &str = "다음은 이 회의 여러 구간의 메모입니다. 하나의 메모로 합치세요. \
+같은 내용은 하나로 합치고, 결정 사항과 할 일은 빠뜨리지 마세요.";
+const SHRINK_ASK: &str = "다음은 이 회의 한 구간의 메모입니다. 결정 사항 · 할 일 · 숫자 · 이름은 그대로 두고, \
+나머지 논의는 핵심만 남겨 절반 길이로 줄이세요.";
+
+/// 요청 보내기 · 진행 알림 (긴 회의 나눠 정리용). 요청이 성공할 때마다 `on_reply` 로 사용량을 바로 알린다
 struct Run<'a> {
     call: &'a mut dyn FnMut(&str, &str) -> Result<Reply>,
     progress: &'a dyn Fn(Progress),
+    on_reply: &'a dyn Fn(&Reply),
     done: usize,
     total: usize,
-    requests: u64,
-    in_tokens: u64,
-    out_tokens: u64,
 }
 
 impl Run<'_> {
@@ -221,9 +244,8 @@ impl Run<'_> {
         loop {
             match (self.call)(system, user) {
                 Ok(r) => {
-                    self.requests += 1;
-                    self.in_tokens += r.in_tokens;
-                    self.out_tokens += r.out_tokens;
+                    // 뒤 요청이 실패해도 이미 쓴 만큼은 사용량에 남게 바로 알린다
+                    (self.on_reply)(&r);
                     return Ok(r.text);
                 }
                 Err(e) => match wait_for(&e) {
@@ -239,6 +261,29 @@ impl Run<'_> {
             }
         }
     }
+
+    /// 메모 묶음을 하나로. 그래도 너무 크다고 거절되면 반으로 나눠 따로 합친다
+    fn merge(&mut self, head: &str, g: &[Note]) -> Result<Vec<Note>> {
+        if g.len() < 2 {
+            return Ok(g.to_vec());
+        }
+        match self.ask(PART_SYSTEM, &format!("{head}{MERGE_ASK}\n\n{}", render_notes(g))) {
+            Ok(text) => {
+                self.done += 1;
+                self.report(0);
+                Ok(vec![Note { from: g[0].from.clone(), to: g[g.len() - 1].to.clone(), text }])
+            }
+            Err(e) if too_large(&e) => {
+                let (a, b) = g.split_at(g.len() / 2);
+                // 요청 하나가 (2개 이상인 쪽마다) 하나씩으로 바뀜
+                self.total = (self.total + (a.len() > 1) as usize + (b.len() > 1) as usize).saturating_sub(1);
+                let mut out = self.merge(head, a)?;
+                out.extend(self.merge(head, b)?);
+                Ok(out)
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// 녹취록(`text`)을 요약한다. 한 번에 보내기엔 길면(`budget` 글자 초과) 구간별로 메모한 뒤 합친다.
@@ -246,15 +291,16 @@ impl Run<'_> {
 fn run_summary(
     call: &mut dyn FnMut(&str, &str) -> Result<Reply>,
     progress: &dyn Fn(Progress),
+    on_reply: &dyn Fn(&Reply),
     head: &str,
     text: &str,
     mut budget: usize,
-) -> Result<(String, u64, u64, u64)> {
-    let mut r = Run { call, progress, done: 0, total: 1, requests: 0, in_tokens: 0, out_tokens: 0 };
+) -> Result<String> {
+    let mut r = Run { call, progress, on_reply, done: 0, total: 1 };
     let len = text.chars().count();
     if len <= budget {
         match r.ask(SYSTEM, &format!("{head}녹취록:\n{text}")) {
-            Ok(out) => return Ok((out, r.requests, r.in_tokens, r.out_tokens)),
+            Ok(out) => return Ok(out),
             // 생각보다 컸다 (토큰이 글자보다 많은 모델 등) — 나눠서
             Err(e) if too_large(&e) && len > MIN_CHUNK * 2 => budget = len / 2 + 1,
             Err(e) => return Err(e),
@@ -293,10 +339,10 @@ fn run_summary(
         }
     }
 
-    // ── 메모 합치기: 아직도 크면 몇 개씩 묶어 한 번 더 줄인다 ──
+    // ── 메모 합치기: 한 번에 보내기엔 크면 크기대로 묶어 줄인 뒤 (최대 3번) ──
     for round in 0.. {
         let joined = render_notes(&notes);
-        if joined.chars().count() <= budget || notes.len() == 1 || round >= 3 {
+        if joined.chars().count() <= budget || round >= 3 {
             let user = format!(
                 "{head}이 회의는 길어서 녹취록을 구간별로 먼저 메모했습니다. 아래 구간 메모를 모두 합쳐 회의 전체 회의록을 만드세요. \
                  같은 내용은 하나로 합치고, 결정 사항과 할 일은 빠뜨리지 마세요.\n\n{joined}"
@@ -305,45 +351,40 @@ fn run_summary(
                 Ok(out) => {
                     r.done = r.total;
                     r.report(0);
-                    return Ok((out, r.requests, r.in_tokens, r.out_tokens));
+                    return Ok(out);
                 }
-                Err(e) if too_large(&e) && notes.len() > 1 && round < 3 => budget = budget * 2 / 3,
+                Err(e) if too_large(&e) && round < 3 => budget = budget * 2 / 3,
                 Err(e) => return Err(e),
             }
         }
-        // 묶음 수: 크기로 정하되 매번 적어도 절반으로 준다
-        let size = render_notes(&notes).chars().count();
-        let groups = size.div_ceil(budget.max(1)).max(2).min(notes.len() / 2).max(1);
-        let per = notes.len().div_ceil(groups);
-        r.total += groups;
-        r.report(0);
-        let mut merged = Vec::new();
-        let old = std::mem::take(&mut notes);
-        for g in old.chunks(per) {
-            let user = format!(
-                "{head}다음은 이 회의 여러 구간의 메모입니다. 하나의 메모로 합치세요. 같은 내용은 하나로 합치고, 결정 사항과 할 일은 빠뜨리지 마세요.\n\n{}",
-                render_notes(g)
-            );
-            let text = r.ask(PART_SYSTEM, &user)?;
-            merged.push(Note { from: g[0].from.clone(), to: g[g.len() - 1].to.clone(), text });
-            r.done += 1;
+        let groups = pack(&notes, budget);
+        if groups.len() < notes.len() {
+            // 크기에 맞춰 묶어 합친다 (묶음마다 ≤ budget)
+            r.total += groups.iter().filter(|g| g.len() > 1).count();
             r.report(0);
+            let old = std::mem::take(&mut notes);
+            for g in groups {
+                notes.extend(r.merge(head, &old[g])?);
+            }
+        } else {
+            // 메모 하나하나가 커서 묶을 수 없다 — 각각 줄인다
+            r.total += notes.len();
+            r.report(0);
+            for i in 0..notes.len() {
+                let user = format!("{head}{SHRINK_ASK}\n\n{}", notes[i].render("구간"));
+                notes[i].text = r.ask(PART_SYSTEM, &user)?;
+                r.done += 1;
+                r.report(0);
+            }
         }
-        notes = merged;
     }
     unreachable!()
 }
 
-/// 요약 결과: 본문 + (모델이 제안한) 회의 제목 + 사용량 (설정 › API 사용량)
+/// 요약 결과: 본문 + (모델이 제안한) 회의 제목
 pub struct Summary {
     pub text: String,
     pub title: Option<String>,
-    /// "groq" · "gemini" · "openai" · "anthropic" · "custom" · "ollama"
-    pub provider: String,
-    pub in_tokens: u64,
-    pub out_tokens: u64,
-    /// 보낸 요청 수 (긴 회의는 구간 수 + 합치기)
-    pub requests: u64,
 }
 
 fn client(timeout_secs: u64) -> Result<reqwest::blocking::Client> {
@@ -390,8 +431,14 @@ fn openai_like(cfg: &SummarySettings) -> Result<Option<(String, Option<String>, 
 
 type Caller = Box<dyn FnMut(&str, &str) -> Result<Reply>>;
 
-/// 회의록을 요약한다. 긴 회의는 구간으로 나눠 정리하며 `progress` 로 진행을 알린다
-pub fn summarize(cfg: &SummarySettings, doc: &SessionDoc, progress: &dyn Fn(Progress)) -> Result<Summary> {
+/// 회의록을 요약한다. 긴 회의는 구간으로 나눠 정리하며 `progress` 로 진행을,
+/// `on_usage(제공자, 응답)` 로 요청마다 사용량을 알린다 (중간에 실패해도 이미 쓴 만큼은 셀 수 있게)
+pub fn summarize(
+    cfg: &SummarySettings,
+    doc: &SessionDoc,
+    progress: &dyn Fn(Progress),
+    on_usage: &dyn Fn(&str, &Reply),
+) -> Result<Summary> {
     if doc.utterances.is_empty() {
         bail!("요약할 내용이 없습니다");
     }
@@ -413,17 +460,12 @@ pub fn summarize(cfg: &SummarySettings, doc: &SessionDoc, progress: &dyn Fn(Prog
         },
     };
     let head = format!("회의 제목: {}\n일시: {}\n\n", doc.title, doc.started_at);
-    let (raw, requests, in_tokens, out_tokens) =
-        run_summary(&mut *call, progress, &head, &doc.to_text(), chunk_budget(&provider))?;
+    let on_reply = |r: &Reply| on_usage(&provider, r);
+    let raw = run_summary(&mut *call, progress, &on_reply, &head, &doc.to_text(), chunk_budget(&provider))?;
     if raw.trim().is_empty() {
         bail!("요약 결과가 비어 있습니다");
     }
-    let mut out = split_title(&raw);
-    out.provider = provider;
-    out.in_tokens = in_tokens;
-    out.out_tokens = out_tokens;
-    out.requests = requests;
-    Ok(out)
+    Ok(split_title(&raw))
 }
 
 /// 맨 앞 "### 제목" 섹션을 떼어 제목으로 쓴다
@@ -465,10 +507,6 @@ fn split_title(raw: &str) -> Summary {
     Summary {
         text: rest.join("\n").trim().to_string(),
         title,
-        provider: String::new(),
-        in_tokens: 0,
-        out_tokens: 0,
-        requests: 0,
     }
 }
 
@@ -726,6 +764,13 @@ mod tests {
         assert_eq!(span("[01:02] a: x\n[03:04] b: y\n"), ("01:02".into(), "03:04".into()));
     }
 
+    /// 성공한 요청 수를 세는 사용량 콜백
+    fn counter() -> (std::rc::Rc<std::cell::Cell<u64>>, impl Fn(&Reply)) {
+        let n = std::rc::Rc::new(std::cell::Cell::new(0));
+        let m = n.clone();
+        (n, move |_: &Reply| m.set(m.get() + 1))
+    }
+
     #[test]
     fn short_meeting_is_one_request() {
         let mut sent = Vec::new();
@@ -733,8 +778,9 @@ mod tests {
             sent.push((sys == SYSTEM, user.to_string()));
             Ok(Reply { text: "요약".into(), in_tokens: 10, out_tokens: 5 })
         };
-        let (out, req, i, o) = run_summary(&mut call, &|_| {}, "회의 제목: t\n\n", &transcript(10, 20), 12_000).unwrap();
-        assert_eq!((out.as_str(), req, i, o), ("요약", 1, 10, 5));
+        let (req, on_reply) = counter();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, "회의 제목: t\n\n", &transcript(10, 20), 12_000).unwrap();
+        assert_eq!((out.as_str(), req.get()), ("요약", 1));
         assert!(sent[0].0 && sent[0].1.contains("녹취록:"));
     }
 
@@ -747,11 +793,11 @@ mod tests {
             Ok(Reply { text: format!("메모{}", calls.len()), in_tokens: 1, out_tokens: 1 })
         };
         let seen = std::cell::RefCell::new(Vec::new());
-        let (out, req, _, _) =
-            run_summary(&mut call, &|p| seen.borrow_mut().push(p), "회의 제목: t\n\n", &t, 4_000).unwrap();
+        let (req, on_reply) = counter();
+        let out = run_summary(&mut call, &|p| seen.borrow_mut().push(p), &on_reply, "회의 제목: t\n\n", &t, 4_000).unwrap();
         let parts = calls.iter().filter(|c| c.0).count();
         assert!(parts >= 4, "구간으로 나눔: {parts}");
-        assert_eq!(req as usize, parts + 1, "구간 + 합치기");
+        assert_eq!(req.get() as usize, parts + 1, "구간 + 합치기");
         let last = calls.last().unwrap();
         assert!(!last.0, "마지막은 최종 회의록 형식");
         assert!(last.1.contains("## 구간 1 (00:00~") && last.1.contains(&format!("메모{parts}")));
@@ -763,18 +809,46 @@ mod tests {
     #[test]
     fn too_large_part_is_halved_and_retried() {
         let t = transcript(60, 60);
-        let mut n = 0;
         let mut call = |sys: &str, user: &str| {
-            n += 1;
             // 처음 한 번 보낸 요청(전체)과 큰 구간은 거절
             if sys == SYSTEM && !user.contains("구간 메모") || user.chars().count() > 1_500 {
                 return Err(too_big());
             }
             Ok(Reply { text: "ok".into(), ..Default::default() })
         };
-        let (out, req, _, _) = run_summary(&mut call, &|_| {}, "", &t, 5_000).unwrap();
+        let (req, on_reply) = counter();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, "", &t, 5_000).unwrap();
         assert_eq!(out, "ok");
-        assert!(req >= 5, "한 번에 → 두 구간 → 다시 반씩, 끝까지: {req}회");
+        assert!(req.get() >= 5, "한 번에 → 두 구간 → 다시 반씩, 끝까지: {}회", req.get());
+    }
+
+    /// 메모가 커서 합칠 때도 한 번에 보내는 크기가 budget 을 넘지 않아야 한다 (두 메모 2,500자 · budget 4,000)
+    #[test]
+    fn merging_big_notes_stays_within_budget() {
+        let t = transcript(100, 60); // 약 7,500자 → 두 구간
+        let mut biggest = 0;
+        let mut call = |sys: &str, user: &str| {
+            let len = user.chars().count();
+            biggest = biggest.max(len);
+            if len > 4_300 {
+                return Err(too_big());
+            }
+            let text = if user.contains("절반 길이") {
+                "나".repeat(1_000)
+            } else if user.contains("녹취록:") {
+                "가".repeat(2_500)
+            } else if sys == SYSTEM {
+                "최종".into()
+            } else {
+                "다".repeat(1_500)
+            };
+            Ok(Reply { text, ..Default::default() })
+        };
+        let (req, on_reply) = counter();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, "", &t, 4_000).unwrap();
+        assert_eq!(out, "최종");
+        assert!(biggest <= 4_300, "합칠 때 너무 큰 요청을 보냄: {biggest}자");
+        assert_eq!(req.get(), 5, "구간 2 + 줄이기 2 + 최종 1");
     }
 
     #[test]
@@ -787,12 +861,29 @@ mod tests {
             }
             Ok(Reply { text: "ok".into(), ..Default::default() })
         };
-        let (out, req, ..) = run_summary(&mut call, &|_| {}, "", "[00:00] a: b\n", 100).unwrap();
-        assert_eq!((out.as_str(), req), ("ok", 1), "한도 초과 뒤 다시 보내 성공");
+        let (req, on_reply) = counter();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, "", "[00:00] a: b\n", 100).unwrap();
+        assert_eq!((out.as_str(), req.get()), ("ok", 1), "한도 초과 뒤 다시 보내 성공");
         let mut call = |_: &str, _: &str| -> Result<Reply> {
             Err(anyhow::Error::new(ApiError { status: 429, retry_after: Some(3600), msg: "daily limit".into() }))
         };
-        let e = run_summary(&mut call, &|_| {}, "", "[00:00] a: b\n", 100).unwrap_err();
+        let e = run_summary(&mut call, &|_| {}, &|_| {}, "", "[00:00] a: b\n", 100).unwrap_err();
         assert!(e.to_string().contains("429"), "하루 한도는 기다리지 않고 알림: {e}");
+    }
+
+    /// 앞 구간이 성공하고 뒤에서 실패해도, 이미 쓴 요청은 사용량에 남아야 한다
+    #[test]
+    fn usage_is_kept_when_a_later_request_fails() {
+        let mut n = 0;
+        let mut call = |_: &str, _: &str| {
+            n += 1;
+            if n > 2 {
+                return Err(anyhow::Error::new(ApiError { status: 500, retry_after: None, msg: "server error".into() }));
+            }
+            Ok(Reply { text: "메모".into(), in_tokens: 100, out_tokens: 20 })
+        };
+        let (req, on_reply) = counter();
+        assert!(run_summary(&mut call, &|_| {}, &on_reply, "", &transcript(200, 60), 4_000).is_err());
+        assert_eq!(req.get(), 2, "실패 전에 성공한 두 요청");
     }
 }
