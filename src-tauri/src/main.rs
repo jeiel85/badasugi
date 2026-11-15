@@ -13,7 +13,7 @@ mod update;
 mod usage_book;
 mod voices;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -91,8 +91,9 @@ pub(crate) struct AppState {
     sleep_paused: AtomicBool,
     /// 이번 잠에 대해 화면에 이미 알렸다 (깨어남 알림이 여러 번 와도 한 번만)
     sleep_notified: AtomicBool,
-    /// 이번 녹음에서 목소리로 자동으로 붙인 이름 (회의가 끝나면 전체를 보고 다시 확인한다)
-    auto_named: Mutex<BTreeSet<String>>,
+    /// 이번 녹음에서 목소리로 자동으로 붙인 이름: 화자 → 이름 (회의가 끝나면 전체를 보고 다시 확인한다).
+    /// 사람이 그 화자 이름을 고치면 빠진다.
+    auto_named: Mutex<BTreeMap<u32, String>>,
     /// 지금 녹음에서 사람이 합친 화자를 파이프라인에 알려 주는 손잡이 (정리하는 동안에도)
     speaker_merges: Mutex<Option<badasugi_core::pipeline::SpeakerMerges>>,
 }
@@ -703,7 +704,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 store.mark_dirty();
                 target
             };
-            st.auto_named.lock().insert(name.clone());
+            st.auto_named.lock().insert(target, name.clone());
             let _ = app.emit(
                 "bd://event",
                 &Event::SpeakerNamed {
@@ -1035,11 +1036,16 @@ fn load_session(app: AppHandle, id: String) -> CmdResult<SessionDoc> {
 fn save_session(app: AppHandle, doc: SessionDoc) -> CmdResult<()> {
     let id = doc.id.clone();
     let st = app.state::<AppState>();
-    let live_merges = {
+    let live = {
         let mut store = st.store.lock();
         store.save_doc(doc).map_err(err)?;
-        store.current.as_ref().filter(|c| c.id == id).map(|c| c.speaker_map.clone())
+        store.current.as_ref().filter(|c| c.id == id).map(|c| (c.speaker_map.clone(), c.speakers.clone()))
     };
+    let live_merges = live.map(|(merges, names)| {
+        // 사람이 자동 이름을 고쳤으면 그 화자는 더 이상 자동 이름이 아니다
+        st.auto_named.lock().retain(|l, n| names.get(l) == Some(n));
+        merges
+    });
     // 녹음 중에 합친 화자는 회의 후 다시 정리에서도 한 화자로 묶이게 파이프라인에 알린다
     if let Some(map) = live_merges {
         if let Some(h) = st.speaker_merges.lock().as_ref() {
@@ -1657,7 +1663,7 @@ fn main() {
                 quit_after_stop: AtomicBool::new(false),
                 sleep_paused: AtomicBool::new(false),
                 sleep_notified: AtomicBool::new(false),
-                auto_named: Mutex::new(BTreeSet::new()),
+                auto_named: Mutex::new(BTreeMap::new()),
                 speaker_merges: Mutex::new(None),
             });
             app.manage(Updates::default());

@@ -129,17 +129,21 @@ impl SessionDoc {
     ///   녹음 중에 합친 화자(`speaker_map`)는 그대로 지킨다 (다시 정리도 합친 화자를 한 화자로 묶어 계산한다).
     /// - `utterances`: 문장별 목소리 — 화자별 목소리는 지금의 문장 배정대로 모은다 (사람이 옮긴 문장도 따라감)
     /// - 화자가 합쳐져 사라지면 그 이름은 합쳐진 쪽이 이어받는다 (그쪽에 이름이 없을 때).
-    /// - `known` 목소리와 닮은 화자에 이름을 붙인다. 녹음 중에 목소리로 붙였던 이름(`auto_named`)은
-    ///   회의 전체로 다시 보고 아니면 거둔다. 사람이 붙인 이름은 그대로.
+    /// - `known` 목소리와 닮은 화자에 이름을 붙인다. 녹음 중에 목소리로 붙였던 이름(`auto_named`: 화자 → 이름)은
+    ///   그 화자에 그대로 붙어 있을 때만 자동 이름으로 보고, 회의 전체로 다시 보고 아니면 거둔다.
+    ///   사람이 고쳤거나 직접 붙인 이름은 그대로.
     /// - 화자 번호를 1부터 빈틈없이 다시 매긴다 (합쳐져 "화자 3" 이 비는 일 없게).
     pub fn apply_refinement(
         &mut self,
         labels: &[[u64; 3]],
         utterances: &[UtteranceVoice],
-        auto_named: &BTreeSet<String>,
+        auto_named: &BTreeMap<u32, String>,
         known: &[KnownVoice],
     ) -> Refined {
         let smap = self.speaker_map.clone();
+        // 자동으로 붙인 이름 중 지금도 그 화자에 그대로 붙어 있는 것만 자동 이름 (사람이 고쳤으면 사람 이름)
+        let mut auto: BTreeMap<u32, String> =
+            auto_named.iter().filter(|(l, n)| self.speakers.get(l) == Some(*n)).map(|(l, n)| (*l, n.clone())).collect();
         let map: HashMap<u64, (u32, u32)> = labels.iter().map(|l| (l[0], (l[1] as u32, l[2] as u32))).collect();
         // 화자별로 말이 어디로 옮겨 갔나 (이름 이어받기)
         let mut flow: BTreeMap<u32, BTreeMap<u32, u64>> = BTreeMap::new();
@@ -171,11 +175,16 @@ impl SessionDoc {
             };
             if let Some((&t, _)) = dests.iter().max_by_key(|x| *x.1) {
                 if !self.speakers.contains_key(&t) {
+                    // 자동 이름이었다면 이어받은 쪽에서도 자동 이름
+                    if auto.get(f) == Some(&name) {
+                        auto.insert(t, name.clone());
+                    }
                     self.speakers.insert(t, name);
                 }
             }
         }
         self.speakers.retain(|k, _| used.contains(k));
+        auto.retain(|l, n| self.speakers.get(l) == Some(n));
 
         // 화자별 목소리: 지금 문장 배정대로 모은다
         let finals = self.speaker_voices(utterances);
@@ -184,12 +193,12 @@ impl SessionDoc {
         let mut named = 0;
         if !known.is_empty() {
             let matched: BTreeMap<u32, String> = match_voices(&finals, known, NAME_MIN_SECS).into_iter().collect();
-            let is_auto = |n: &String| auto_named.contains(n);
             // 사람이 붙인 이름은 다른 화자가 가져가지 못한다
-            let manual: BTreeSet<String> = self.speakers.values().filter(|n| !is_auto(n)).cloned().collect();
+            let manual: BTreeSet<String> =
+                self.speakers.iter().filter(|(l, _)| !auto.contains_key(l)).map(|(_, n)| n.clone()).collect();
             for v in &finals {
                 let cur = self.speakers.get(&v.speaker).cloned();
-                if cur.as_ref().is_some_and(|n| !is_auto(n)) {
+                if cur.is_some() && !auto.contains_key(&v.speaker) {
                     continue;
                 }
                 match matched.get(&v.speaker).filter(|n| !manual.contains(*n)) {
@@ -730,7 +739,7 @@ mod tests {
         d.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2), u(3, 15000, 3), u(4, 20000, 100), u(5, 25000, 1)];
         d.speakers.insert(2, "김 팀장".into());
         let labels = [[0, 0, 0], [1, 1, 1], [2, 2, 0], [3, 3, 3], [4, 3, 1], [5, 1, 1]];
-        let r = d.apply_refinement(&labels, &[], &BTreeSet::new(), &[]);
+        let r = d.apply_refinement(&labels, &[], &BTreeMap::new(), &[]);
         assert_eq!(r.moved, 1);
         let spk: Vec<Option<u32>> = d.utterances.iter().map(|u| u.speaker).collect();
         // 0,2 → 0 · 1 → 1 · 3 → 2 (번호를 빈틈없이) · 사람이 옮긴 100번은 그대로
@@ -746,7 +755,7 @@ mod tests {
         d.speaker_map.insert(1, 0);
         d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 10000, 2), u(3, 15000, 0)];
         let labels = [[0, 0, 2], [1, 1, 2], [2, 2, 2], [3, 0, 0]];
-        let r = d.apply_refinement(&labels, &[], &BTreeSet::new(), &[]);
+        let r = d.apply_refinement(&labels, &[], &BTreeMap::new(), &[]);
         assert_eq!(r.moved, 2);
         // 2번과 합쳐진 0·1 은 함께 0번(다시 매긴 번호)으로, 따로 남은 문장 3은 1번
         assert_eq!(
@@ -785,7 +794,7 @@ mod tests {
             uv(4, [0.0, 0.0, 1.0]),
             uv(5, [0.0, 0.1, 1.0]),
         ];
-        let auto: BTreeSet<String> = ["박 대리".to_string()].into();
+        let auto: BTreeMap<u32, String> = [(0, "박 대리".to_string())].into();
         let labels = [[0, 0, 0], [1, 0, 0], [2, 1, 1], [3, 1, 1], [4, 2, 2], [5, 2, 2]];
         let r = d.apply_refinement(&labels, &voices, &auto, &known);
         assert_eq!(d.speakers.get(&0).map(String::as_str), Some("김 팀장"));
@@ -795,6 +804,25 @@ mod tests {
         // 이름 붙은 화자의 목소리 → 목소리 기억으로
         let named: Vec<String> = d.named_voices(&voices).into_iter().map(|x| x.0).collect();
         assert_eq!(named, vec!["김 팀장", "박 대리", "최 부장"]);
+    }
+
+    #[test]
+    fn a_name_the_user_fixed_or_typed_is_never_taken_back() {
+        let known = vec![KnownVoice {
+            name: "앨리스".into(),
+            embedding: vec![0.0, 0.0, 1.0],
+        }];
+        let mut d = SessionDoc::new("로컬".into());
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 10000, 1)];
+        // 녹음 중 0번에 목소리로 "앨리스"가 붙었는데, 사람이 0번을 "밥"으로 고치고 1번(말이 짧음)에 "앨리스"를 직접 붙임
+        d.speakers.insert(0, "밥".into());
+        d.speakers.insert(1, "앨리스".into());
+        let auto: BTreeMap<u32, String> = [(0, "앨리스".to_string())].into();
+        let voices = [uv(0, [1.0, 0.0, 0.0]), uv(1, [1.0, 0.1, 0.0])];
+        let labels = [[0, 0, 0], [1, 0, 0], [2, 1, 1]];
+        d.apply_refinement(&labels, &voices, &auto, &known);
+        assert_eq!(d.speakers.get(&0).map(String::as_str), Some("밥"));
+        assert_eq!(d.speakers.get(&1).map(String::as_str), Some("앨리스"));
     }
 
     #[test]
