@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod logging;
+mod power;
 mod session;
 mod settings;
 mod smoke;
@@ -83,6 +84,10 @@ pub(crate) struct AppState {
     tray_mini: Mutex<Option<MenuItem<Wry>>>,
     pub rec_started: Mutex<Option<Instant>>,
     quit_after_stop: AtomicBool,
+    /// PC 가 잠들어서 녹음을 일시정지했다 (사람이 이어서 녹음하면 풀림)
+    sleep_paused: AtomicBool,
+    /// 이번 잠에 대해 화면에 이미 알렸다 (깨어남 알림이 여러 번 와도 한 번만)
+    sleep_notified: AtomicBool,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -419,6 +424,10 @@ fn set_paused_inner(app: &AppHandle, paused: bool) -> CmdResult<()> {
     let p = guard.as_ref().ok_or("녹음 중이 아니에요")?;
     p.set_paused(paused);
     drop(guard);
+    if !paused {
+        st.sleep_paused.store(false, Ordering::SeqCst);
+        st.sleep_notified.store(false, Ordering::SeqCst);
+    }
     status::refresh(app);
     let item = st.tray_pause.lock().clone();
     if let Some(item) = item {
@@ -442,6 +451,38 @@ fn toggle_pause(app: &AppHandle) -> CmdResult<()> {
 #[tauri::command]
 fn set_paused(app: AppHandle, paused: bool) -> CmdResult<()> {
     set_paused_inner(&app, paused)
+}
+
+/// PC 가 잠들거나 깨어남 (power.rs) — 실시간 녹음 중이면 일시정지해 두고, 깨어나면 한 번 알린다.
+/// 파일 받아쓰기는 깨어난 뒤 그대로 이어서 하면 되므로 건드리지 않는다.
+pub(crate) fn on_power(app: &AppHandle, ev: power::PowerEvent) {
+    let Some(st) = app.try_state::<AppState>() else {
+        return;
+    };
+    let live = *st.rec.lock() == RecState::Recording && !st.file_mode.load(Ordering::SeqCst);
+    if !live {
+        return;
+    }
+    let paused = st.pipeline.lock().as_ref().is_some_and(|p| p.is_paused());
+    // 사람이 이미 일시정지해 둔 녹음은 그대로 둔다 (깨어나도 알리지 않음)
+    if !paused && set_paused_inner(app, true).is_ok() {
+        st.sleep_paused.store(true, Ordering::SeqCst);
+        log::info!("절전 — 녹음을 일시정지함");
+    }
+    match ev {
+        power::PowerEvent::Suspend => {
+            st.sleep_notified.store(false, Ordering::SeqCst);
+            // 잠든 사이 전원이 꺼져도 여기까지는 남게
+            if let Err(e) = st.store.lock().autosave() {
+                log::warn!("절전 전 저장 실패: {e}");
+            }
+        }
+        power::PowerEvent::Resume { slept_secs } => {
+            if st.sleep_paused.load(Ordering::SeqCst) && !st.sleep_notified.swap(true, Ordering::SeqCst) {
+                let _ = app.emit("bd://sleep", slept_secs);
+            }
+        }
+    }
 }
 
 fn start_recording_inner(app: &AppHandle) -> CmdResult<()> {
@@ -505,6 +546,8 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         st.file_pct.store(0, Ordering::SeqCst);
         st.save_warned.store(false, Ordering::SeqCst);
         st.live_pos_ms.store(0, Ordering::SeqCst);
+        st.sleep_paused.store(false, Ordering::SeqCst);
+        st.sleep_notified.store(false, Ordering::SeqCst);
         st.echo.lock().clear();
         match file {
             Some(f) => Pipeline::start_file(f, cfg, sink).map_err(err),
@@ -910,15 +953,22 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
         (cfg, doc)
     };
     let doc2 = doc.clone();
-    let sum = tauri::async_runtime::spawn_blocking(move || summary::summarize(&cfg, &doc))
-        .await
-        .map_err(err)?
-        .map_err(err)?;
-    {
-        let book = app.state::<usage_book::UsageBook>();
-        book.summary(&sum.provider, sum.in_tokens, sum.out_tokens);
-        book.save();
-    }
+    // 긴 회의는 구간으로 나눠 정리하므로 진행을 화면에 알린다
+    let (app2, id2) = (app.clone(), id.clone());
+    let progress = move |p: summary::Progress| {
+        let _ = app2.emit(
+            "bd://summary-progress",
+            serde_json::json!({ "id": id2, "done": p.done, "total": p.total, "waitSecs": p.wait_secs }),
+        );
+    };
+    // 요청이 성공할 때마다 바로 사용량에 센다 — 긴 회의 중간에 실패해도 이미 쓴 만큼은 남게
+    let app3 = app.clone();
+    let on_usage = move |provider: &str, r: &summary::Reply| {
+        app3.state::<usage_book::UsageBook>().summary(provider, r.in_tokens, r.out_tokens);
+    };
+    let res = tauri::async_runtime::spawn_blocking(move || summary::summarize(&cfg, &doc, &progress, &on_usage)).await;
+    app.state::<usage_book::UsageBook>().save();
+    let sum = res.map_err(err)?.map_err(err)?;
     // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
     let loaded = st.store.lock().load(&id);
     let mut latest = loaded.unwrap_or(doc2);
@@ -1440,6 +1490,8 @@ fn main() {
                 tray_mini: Mutex::new(None),
                 rec_started: Mutex::new(None),
                 quit_after_stop: AtomicBool::new(false),
+                sleep_paused: AtomicBool::new(false),
+                sleep_notified: AtomicBool::new(false),
             });
             app.manage(Updates::default());
             app.manage(usage_book::UsageBook::load(config_dir_for_usage.join("usage.json")));
@@ -1474,6 +1526,9 @@ fn main() {
                 let h = handle.clone();
                 let h2 = handle.clone();
                 snap::install(&w, Box::new(move || on_move_end(&h)), Box::new(move || on_display_change(&h2)));
+                // 녹음 중 PC 가 잠들면 일시정지 (덮개 닫고 가방에 넣었다 열었을 때 저절로 이어 녹음되지 않게)
+                let h3 = handle.clone();
+                power::install(&w, Box::new(move |ev| on_power(&h3, ev)));
                 if settings.mini_mode {
                     let _ = set_mini_inner(&handle, true, true);
                 }

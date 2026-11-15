@@ -222,7 +222,14 @@ fn run(app: &AppHandle, c: &mut Checks) {
         return;
     }
     std::thread::sleep(Duration::from_secs(4));
-    c.add("일시정지", crate::set_paused_inner(app, true).is_ok(), "4초 지점");
+    // 일시정지는 절전 감지 경로로: 녹음 중 PC 가 2분 잠들었다 깬 것처럼 (power.rs 감시 스레드가 알아챈 경우)
+    crate::on_power(app, crate::power::PowerEvent::Resume { slept_secs: Some(120) });
+    let paused = {
+        let st = app.state::<AppState>();
+        let p = st.pipeline.lock().as_ref().is_some_and(|p| p.is_paused());
+        p && st.sleep_paused.load(std::sync::atomic::Ordering::SeqCst)
+    };
+    c.add("절전 감지 → 일시정지", paused, "4초 지점, 2분 잠들었다 깬 것처럼");
     std::thread::sleep(Duration::from_secs(2));
     c.add("이어서 녹음", crate::set_paused_inner(app, false).is_ok(), "6초 지점");
     // 녹음 중 다시 듣기: 자라는 녹음 파일을 화면이 그때까지의 길이로 읽어야 한다 (1초마다 디스크에 내보냄)
