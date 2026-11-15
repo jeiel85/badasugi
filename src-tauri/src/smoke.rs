@@ -367,6 +367,25 @@ fn run(app: &AppHandle, c: &mut Checks) {
         }
     }
 
+    // ── 2-2. 목소리 잊기: 잊은 뒤 예전 회의를 고쳐 저장해도 다시 기억되면 안 된다 ──
+    if speaker_ready {
+        crate::voices::strip_name(&sessions, VOICE_NAME, None);
+        app.state::<crate::voices::VoiceBook>().forget(VOICE_NAME);
+        // (기록 잠금을 한 문장 안에서 두 번 잡지 않게 나눠서)
+        let loaded = app.state::<AppState>().store.lock().load(&live.id);
+        let edited = loaded.and_then(|mut d| {
+            d.title.push_str(" (제목 고침)");
+            app.state::<AppState>().store.lock().save_doc(d)
+        });
+        crate::sync_session_voices(app, &live.id);
+        let back = app.state::<crate::voices::VoiceBook>().list().iter().any(|v| v.name == VOICE_NAME);
+        c.add(
+            "목소리 잊기",
+            edited.is_ok() && !back,
+            if back { "잊은 목소리가 기록을 고치자 다시 기억됐어요".to_string() } else { "잊은 뒤 기록을 고쳐도 다시 기억하지 않음".to_string() },
+        );
+    }
+
     // ── 3. 진단 로그가 남는지 ──
     let logs = crate::logging::log_dir();
     let has_log = std::fs::read_dir(&logs)

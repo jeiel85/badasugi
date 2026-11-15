@@ -271,6 +271,63 @@ pub fn write_session_voices(dir: &Path, id: &str, utterances: &[UtteranceVoice])
     Ok(())
 }
 
+/// 이 이름이 붙은 화자의 문장 목소리를 모든 회의의 `<id>.voices` 에서 지운다 — '잊기' 뒤에 예전 회의를 고쳐 저장해도
+/// 그 목소리가 다시 기억되지 않게 (목소리 자체를 지우므로 실제로 잊는다). 녹음 중인 회의(`skip`)는 건너뛴다.
+/// 돌려주는 값: 고친 회의 수
+pub fn strip_name(dir: &Path, name: &str, skip: Option<&str>) -> usize {
+    let mut changed = 0;
+    let docs = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"));
+    for path in docs {
+        let Some(doc) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<crate::session::SessionDoc>(&t).ok())
+        else {
+            continue;
+        };
+        if doc.id.is_empty() || Some(doc.id.as_str()) == skip || !voices_path(dir, &doc.id).is_file() {
+            continue;
+        }
+        let ids: std::collections::BTreeSet<u64> = doc
+            .utterances
+            .iter()
+            .filter(|u| doc.resolve(u.speaker).and_then(|s| doc.speakers.get(&s)).is_some_and(|n| n.trim() == name.trim()))
+            .map(|u| u.id)
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let kept: Vec<UtteranceVoice> = read_session_voices(dir, &doc.id).into_iter().filter(|u| !ids.contains(&u.id)).collect();
+        let r = if kept.is_empty() {
+            std::fs::remove_file(voices_path(dir, &doc.id)).map_err(anyhow::Error::from)
+        } else {
+            write_session_voices(dir, &doc.id, &kept)
+        };
+        match r {
+            Ok(()) => changed += 1,
+            Err(e) => log::warn!("회의 목소리 지우기 실패: {e}"),
+        }
+    }
+    changed
+}
+
+/// 모든 회의의 문장 목소리를 지운다 ('모두 잊기'). 녹음 중인 회의(`skip`)는 건너뛴다.
+pub fn strip_all(dir: &Path, skip: Option<&str>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let stem = p.file_stem().and_then(|x| x.to_str());
+        if p.extension().and_then(|x| x.to_str()) == Some("voices") && stem.is_some() && stem != skip {
+            if let Err(e) = std::fs::remove_file(&p) {
+                log::warn!("회의 목소리 지우기 실패: {e}");
+            }
+        }
+    }
+}
+
 pub fn read_session_voices(dir: &Path, id: &str) -> Vec<UtteranceVoice> {
     std::fs::read_to_string(voices_path(dir, id))
         .ok()
@@ -345,6 +402,42 @@ mod tests {
         // 문장 하나에 300바이트 남짓
         let size = std::fs::metadata(voices_path(&dir, "2026-11-15_120000")).unwrap().len();
         assert!(size < 340, "{size}");
+    }
+
+    #[test]
+    fn forgetting_a_name_also_removes_its_meeting_voices() {
+        use crate::session::{SessionDoc, Utterance};
+        let dir = std::env::temp_dir().join(format!("bd-strip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-15_130000".into();
+        let u = |id, speaker| Utterance {
+            id,
+            start_ms: id * 5000,
+            end_ms: id * 5000 + 4000,
+            speaker: Some(speaker),
+            text: "문장".into(),
+        };
+        d.utterances = vec![u(0, 0), u(1, 1), u(2, 0)];
+        d.speakers.insert(0, "김 팀장".into());
+        d.speakers.insert(1, "박 대리".into());
+        crate::session::write_doc(&dir, &d).unwrap();
+        let v = |id, e: [f32; 2]| UtteranceVoice {
+            id,
+            embedding: e.to_vec(),
+            dur_ms: 4000,
+        };
+        write_session_voices(&dir, &d.id, &[v(0, [1.0, 0.0]), v(1, [0.0, 1.0]), v(2, [1.0, 0.0])]).unwrap();
+        assert_eq!(strip_name(&dir, "김 팀장", None), 1);
+        let left = read_session_voices(&dir, &d.id);
+        // 김 팀장 문장(0, 2)의 목소리는 지워지고 박 대리 것만 남는다 → 이 회의를 고쳐 저장해도 김 팀장은 다시 기억되지 않는다
+        assert_eq!(left.iter().map(|x| x.id).collect::<Vec<_>>(), vec![1]);
+        assert!(d.named_voices(&left).iter().all(|x| x.0 != "김 팀장"));
+        // 녹음 중인 회의는 건너뛰고, 모두 잊기는 파일째 지운다
+        assert_eq!(strip_name(&dir, "박 대리", Some(&d.id)), 0);
+        strip_all(&dir, None);
+        assert!(!voices_path(&dir, &d.id).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

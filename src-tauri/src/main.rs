@@ -885,14 +885,36 @@ fn list_voices(app: AppHandle) -> Vec<voices::VoiceInfo> {
     app.state::<VoiceBook>().list()
 }
 
+/// 기록 폴더와 지금 녹음 중인 기록 id
+fn sessions_dir_and_live(app: &AppHandle) -> (PathBuf, Option<String>) {
+    let st = app.state::<AppState>();
+    let store = st.store.lock();
+    (store.dir.clone(), store.current.as_ref().map(|d| d.id.clone()))
+}
+
+/// 기억한 목소리 하나 잊기: 그 이름이 붙은 문장의 목소리를 회의별 파일에서도 지운다
+/// (예전 회의의 제목 · 글자만 고쳐 저장해도 다시 기억되지 않게)
 #[tauri::command]
-fn forget_voice(app: AppHandle, name: String) {
+async fn forget_voice(app: AppHandle, name: String) -> CmdResult<()> {
+    let (dir, live) = sessions_dir_and_live(&app);
+    let n = name.clone();
+    let fixed = tauri::async_runtime::spawn_blocking(move || voices::strip_name(&dir, &n, live.as_deref()))
+        .await
+        .map_err(err)?;
     app.state::<VoiceBook>().forget(&name);
+    log::info!("기억한 목소리 하나를 잊음 (회의 {fixed}개의 목소리도 지움)");
+    Ok(())
 }
 
 #[tauri::command]
-fn forget_all_voices(app: AppHandle) {
+async fn forget_all_voices(app: AppHandle) -> CmdResult<()> {
+    let (dir, live) = sessions_dir_and_live(&app);
+    tauri::async_runtime::spawn_blocking(move || voices::strip_all(&dir, live.as_deref()))
+        .await
+        .map_err(err)?;
     app.state::<VoiceBook>().forget_all();
+    log::info!("기억한 목소리를 모두 잊음");
+    Ok(())
 }
 
 // ───────────────────────── 기록 ─────────────────────────
