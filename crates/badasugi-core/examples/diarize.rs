@@ -27,18 +27,18 @@ struct Truth {
     speaker: String,
 }
 
-/// 예측 화자 ↔ 정답 화자를 겹친 시간이 큰 쌍부터 하나씩 맞춰, 맞게 붙은 시간의 비율
+/// 예측 화자 ↔ 정답 화자를 겹친 시간이 큰 쌍부터 하나씩 맞춰, 맞게 붙은 시간의 비율.
+/// 조각이 정답 발화 여러 개에 걸치면(놓친 화자 전환) 겹친 시간을 모두 센다 — 가장 큰 겹침만 세면 정확도가 부푼다.
 fn accuracy(parts: &[(u64, u64, u32)], truth: &[Truth]) -> (f64, BTreeMap<u32, String>) {
     let mut ov: BTreeMap<(u32, String), u64> = BTreeMap::new();
     let mut total = 0u64;
     for &(s, e, l) in parts {
-        let best = truth
-            .iter()
-            .map(|t| (t, e.min(t.end_ms).saturating_sub(s.max(t.start_ms))))
-            .max_by_key(|x| x.1);
-        if let Some((t, o)) = best.filter(|x| x.1 > 0) {
-            *ov.entry((l, t.speaker.clone())).or_default() += o;
-            total += o;
+        for t in truth {
+            let o = e.min(t.end_ms).saturating_sub(s.max(t.start_ms));
+            if o > 0 {
+                *ov.entry((l, t.speaker.clone())).or_default() += o;
+                total += o;
+            }
         }
     }
     let mut pairs: Vec<_> = ov.into_iter().collect();
