@@ -28,6 +28,9 @@ pub struct Settings {
     /// 용어집 (고유명사·전문용어) — 인식 정확도를 올린다
     pub glossary: String,
     pub diarization: DiarizationConfig,
+    /// 이름을 붙인 화자의 목소리를 기억해 두었다가 다음 회의에서 같은 목소리에 그 이름을 붙인다
+    /// (목소리 특징값만 이 PC 의 voices.json 에 · 녹음은 저장하지 않음)
+    pub remember_voices: bool,
     /// 회의 녹음도 함께 저장 (Ogg Opus, 1시간 약 11 MB)
     pub save_audio: bool,
     /// 녹음이 끝나면 로컬 모델을 메모리에서 내림 (대기 중 가볍게)
@@ -101,6 +104,7 @@ impl Default for Settings {
             language: "ko".into(),
             glossary: String::new(),
             diarization: DiarizationConfig::default(),
+            remember_voices: true,
             save_audio: false,
             unload_when_idle: true,
             hotkey: "Ctrl+Alt+R".into(),

@@ -31,6 +31,7 @@ fn main() -> anyhow::Result<()> {
         language: "ko".into(),
         prompt: String::new(),
         record_path: None,
+        known_voices: Vec::new(),
     };
     let (tx, rx) = crossbeam_channel::unbounded();
     let sink = Arc::new(move |e: Event| {

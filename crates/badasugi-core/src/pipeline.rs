@@ -11,7 +11,7 @@
 //!                                   [ASR 워커 ×N] 인식 → 후처리 → Transcript 이벤트
 //! ```
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 use crate::asr::{self, AsrRequest, EngineConfig};
 use crate::audio::{Capture, CaptureConfig, Notify, RawChunk, SourceKind, SRC_MIC};
 use crate::decode::AudioFile;
+use crate::diarize::{Diarizer, KnownVoice, UtteranceVoice};
 use crate::resample::Resampler;
-use crate::speaker::{self, DiarizationConfig, SpeakerEncoder, SpeakerTracker};
+use crate::speaker::{DiarizationConfig, SpeakerEncoder};
 use crate::vad::{Segmenter, SegmenterConfig, SpeechSegment};
 use crate::ogg_opus::OpusRecorder;
 use crate::wav::WavRecorder;
@@ -54,6 +55,9 @@ pub struct PipelineConfig {
     /// 지정하면 녹음도 남긴다: 확장자 `.wav` 면 16 kHz 모노 PCM16, 그 밖(`.opus`)은 Ogg Opus 24 kbps (WAV 의 약 1/10)
     #[serde(default)]
     pub record_path: Option<PathBuf>,
+    /// 이름을 아는 목소리 — 녹음 중 화자 목소리가 닮으면 그 이름을 알려 준다 ([`Event::SpeakerNamed`])
+    #[serde(default)]
+    pub known_voices: Vec<KnownVoice>,
 }
 
 fn default_lang() -> String {
@@ -102,6 +106,17 @@ pub enum Event {
     Warning { message: String },
     #[serde(rename_all = "camelCase")]
     Error { message: String },
+    /// 등록된 목소리로 화자를 알아봄 (화자마다 한 번)
+    #[serde(rename_all = "camelCase")]
+    SpeakerNamed { speaker: u32, name: String },
+    /// 모든 발화 인식이 끝난 뒤(`Stopped` 바로 전) 회의 전체를 보고 다시 정리한 화자
+    #[serde(rename_all = "camelCase")]
+    SpeakersRefined {
+        /// [발화 id, 실시간 화자, 다시 정리한 화자] — 모든 조각. 다시 정리한 화자는 사람이 합친 화자를 지킨다.
+        labels: Vec<[u64; 3]>,
+        /// 믿을 만한 조각의 목소리 (문장별) — 이름을 기억해 두었다가 다음 회의에서 알아보는 데 쓴다
+        utterances: Vec<UtteranceVoice>,
+    },
     /// 파일 전사 진행: 인식까지 끝난 위치 / 전체 길이 (모르면 0). 앞으로만 움직이고, 다 끝나면 done = total.
     #[serde(rename_all = "camelCase")]
     Progress { done_ms: u64, total_ms: u64 },
@@ -109,6 +124,9 @@ pub enum Event {
 }
 
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// 사람이 녹음 중에 합친 화자 (실시간 화자 → 합쳐진 화자). 회의 후 다시 정리할 때 한 화자로 묶어 둔다.
+pub type SpeakerMerges = Arc<parking_lot::Mutex<BTreeMap<u32, u32>>>;
 
 struct Job {
     id: u64,
@@ -170,9 +188,15 @@ pub struct Pipeline {
     backend: Option<JoinHandle<()>>,
     sink: EventSink,
     file_mode: bool,
+    merges: SpeakerMerges,
 }
 
 impl Pipeline {
+    /// 사람이 합친 화자를 알려 주는 손잡이 — 녹음이 끝나 정리하는 동안에도 고칠 수 있게 복제해 둘 수 있다
+    pub fn speaker_merges(&self) -> SpeakerMerges {
+        self.merges.clone()
+    }
+
     /// 실시간 녹음 전사를 시작한다.
     pub fn start(cfg: PipelineConfig, sink: EventSink) -> Result<Pipeline> {
         validate(&cfg)?;
@@ -189,17 +213,18 @@ impl Pipeline {
         };
         let capture = Capture::start(&cfg.capture, raw_tx, notify)?;
 
-        let (encoder, note) = load_encoder(&cfg);
+        let (diarizer, note) = load_diarizer(&cfg);
         sink(Event::Started {
             mic: capture.mic_name.clone(),
             system: capture.system_name.clone(),
             engine: cfg.engine.label(),
-            diarization: encoder.is_some(),
+            diarization: diarizer.is_some(),
         });
         if let Some(message) = note {
             sink(Event::Status { message });
         }
-        let backend = spawn_backend(&cfg, encoder, sink.clone(), None);
+        let merges = SpeakerMerges::default();
+        let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, merges.clone());
         let flags = Arc::new(Flags::default());
         let dsp = {
             let sink = sink.clone();
@@ -217,6 +242,7 @@ impl Pipeline {
             backend: Some(backend.handle),
             sink,
             file_mode: false,
+            merges,
         })
     }
 
@@ -232,18 +258,19 @@ impl Pipeline {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
 
-        let (encoder, note) = load_encoder(&cfg);
+        let (diarizer, note) = load_diarizer(&cfg);
         sink(Event::Started {
             mic: None,
             system: Some(name),
             engine: cfg.engine.label(),
-            diarization: encoder.is_some(),
+            diarization: diarizer.is_some(),
         });
         if let Some(message) = note {
             sink(Event::Status { message });
         }
         let inflight = Arc::new(Inflight::default());
-        let backend = spawn_backend(&cfg, encoder, sink.clone(), Some(inflight.clone()));
+        let merges = SpeakerMerges::default();
+        let backend = spawn_backend(&cfg, diarizer, sink.clone(), Some(inflight.clone()), merges.clone());
         // 인식이 밀린 만큼만 앞서 디코딩한다 (결과가 차례로 나오고 메모리도 일정)
         let max_backlog = 2 * cfg.engine.concurrency();
         let flags = Arc::new(Flags::default());
@@ -261,6 +288,7 @@ impl Pipeline {
             backend: None,
             sink,
             file_mode: true,
+            merges,
         })
     }
 
@@ -326,14 +354,17 @@ fn validate(cfg: &PipelineConfig) -> Result<()> {
     Ok(())
 }
 
-/// 화자 임베딩 모델을 불러온다 → (인코더, 사용자에게 알릴 상태 메시지)
-fn load_encoder(cfg: &PipelineConfig) -> (Option<SpeakerEncoder>, Option<String>) {
+/// 화자 임베딩 모델을 불러와 화자 구분을 준비한다 → (화자 구분, 사용자에게 알릴 상태 메시지)
+fn load_diarizer(cfg: &PipelineConfig) -> (Option<Diarizer>, Option<String>) {
     if !cfg.diarization.enabled {
         return (None, None);
     }
     match cfg.speaker_model.as_deref() {
         Some(p) if p.exists() => match SpeakerEncoder::new(p) {
-            Ok(e) => (Some(e), None),
+            Ok(e) => (
+                Some(Diarizer::new(e, cfg.diarization.clone(), cfg.known_voices.clone())),
+                None,
+            ),
             Err(e) => (None, Some(format!("화자 분리를 끕니다: {e}"))),
         },
         _ => (None, Some("화자 인식 모델이 없어 화자 분리 없이 진행합니다.".into())),
@@ -358,9 +389,10 @@ impl Backend {
 /// `inflight` 를 주면 발화마다 인식이 끝났는지 기록한다 (파일 모드 진행률)
 fn spawn_backend(
     cfg: &PipelineConfig,
-    encoder: Option<SpeakerEncoder>,
+    diarizer: Option<Diarizer>,
     sink: EventSink,
     inflight: Option<Arc<Inflight>>,
+    merges: SpeakerMerges,
 ) -> Backend {
     let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<SpeechSegment>();
     let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
@@ -382,40 +414,49 @@ fn spawn_backend(
         );
     }
 
-    let dcfg = cfg.diarization.clone();
     let handle = std::thread::Builder::new()
         .name("bd-dispatch".into())
         .spawn(move || {
-            dispatcher(seg_rx, job_tx, encoder, dcfg, sink, inflight);
+            let diarizer = dispatcher(seg_rx, job_tx, diarizer, sink.clone(), inflight);
             for w in workers {
                 let _ = w.join();
+            }
+            // 모든 발화 인식이 끝난 뒤, 회의 전체를 보고 화자를 다시 정리한다 (Stopped 보다 먼저)
+            if let Some(d) = diarizer.filter(|d| !d.is_empty()) {
+                let t = Instant::now();
+                let merges = merges.lock().clone();
+                let r = d.finish(&merges);
+                log::info!(
+                    "화자 다시 정리: 조각 {}개 중 {}개 옮김 · 화자 {}명 ({}ms)",
+                    r.labels.len(),
+                    r.moved(),
+                    r.voices.len(),
+                    t.elapsed().as_millis()
+                );
+                sink(Event::SpeakersRefined {
+                    labels: r.labels.iter().map(|&(id, a, b)| [id, a as u64, b as u64]).collect(),
+                    utterances: r.utterances,
+                });
             }
         })
         .expect("spawn dispatcher");
     Backend { seg_tx, job_rx, handle }
 }
 
+/// 발화를 화자별 조각으로 나눠 ASR 워커에 넘긴다. 입력이 닫히면 화자 구분 상태를 돌려준다 (다시 정리용).
 fn dispatcher(
     seg_rx: Receiver<SpeechSegment>,
     job_tx: Sender<Job>,
-    mut encoder: Option<SpeakerEncoder>,
-    cfg: DiarizationConfig,
+    mut diarizer: Option<Diarizer>,
     sink: EventSink,
     inflight: Option<Arc<Inflight>>,
-) {
-    let mut tracker = SpeakerTracker::new(cfg.clone());
+) -> Option<Diarizer> {
     let mut next_id = 0u64;
     for seg in seg_rx {
         let origin = seg.start;
-        let parts = match encoder.as_mut() {
-            Some(enc) if cfg.split_turns => match speaker::find_turns(enc, &seg, cfg.threshold) {
-                Ok(cuts) => speaker::split_segment(seg, &cuts),
-                Err(e) => {
-                    log::warn!("화자 전환 감지 실패: {e}");
-                    vec![seg]
-                }
-            },
-            _ => vec![seg],
+        let parts = match diarizer.as_mut() {
+            Some(d) => d.split(seg),
+            None => vec![seg],
         };
         if let Some(t) = &inflight {
             // 원래 발화 1개 → 조각 n개 (늘린 뒤 줄여서 중간에 0 이 되지 않게)
@@ -423,21 +464,21 @@ fn dispatcher(
             t.done(origin);
         }
         for part in parts {
-            let speaker = encoder.as_mut().map(|enc| {
-                let emb = enc.embed(&part.samples).unwrap_or_else(|e| {
-                    log::warn!("화자 임베딩 실패: {e}");
-                    None
-                });
-                tracker.assign(emb.as_deref(), part.duration_ms())
-            });
             let id = next_id;
             next_id += 1;
+            let speaker = diarizer.as_mut().map(|d| d.assign(id, &part));
             sink(Event::Pending {
                 id,
                 start_ms: samples_to_ms(part.start),
                 end_ms: samples_to_ms(part.end),
                 speaker,
             });
+            if let (Some(d), Some(spk)) = (diarizer.as_mut(), speaker) {
+                if let Some(name) = d.recognize(spk) {
+                    log::info!("화자 {spk} 를 등록된 목소리로 알아봄");
+                    sink(Event::SpeakerNamed { speaker: spk, name });
+                }
+            }
             if job_tx
                 .send(Job {
                     id,
@@ -448,10 +489,11 @@ fn dispatcher(
                 })
                 .is_err()
             {
-                return;
+                return diarizer;
             }
         }
     }
+    diarizer
 }
 
 struct InflightDone<'a>(&'a Inflight, u64);

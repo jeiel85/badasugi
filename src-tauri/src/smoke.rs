@@ -297,6 +297,44 @@ fn run(app: &AppHandle, c: &mut Checks) {
         Err(e) => c.add("다시 듣기", false, e),
     };
 
+    // ── 1-2. 회의 후 화자 다시 정리 → 이름 붙이기 → 목소리 기억 ──
+    const VOICE_NAME: &str = "점검 화자";
+    let speaker_ready = {
+        let st = app.state::<AppState>();
+        badasugi_core::models::SPEAKER_MODEL.is_ready(&st.paths.models) && st.settings.lock().diarization.enabled
+    };
+    if speaker_ready {
+        let voices = crate::voices::read_session_voices(&sessions, &live.id);
+        let secs: f32 = voices.iter().map(|v| v.dur_ms as f32 / 1000.0).sum();
+        c.add(
+            "화자 다시 정리",
+            !voices.is_empty(),
+            format!("문장 {}개 목소리 · {secs:.0}초 ({}.voices)", voices.len(), live.id),
+        );
+        // 화면에서 화자 이름을 바꾼 것처럼 저장한다
+        let mut doc = live.clone();
+        match doc.utterances.iter().find_map(|u| u.speaker) {
+            Some(spk) => {
+                doc.speakers.insert(spk, VOICE_NAME.into());
+                let saved = app.state::<AppState>().store.lock().save_doc(doc);
+                crate::sync_session_voices(app, &live.id);
+                let remembered = app.state::<crate::voices::VoiceBook>().list().into_iter().find(|v| v.name == VOICE_NAME);
+                c.add(
+                    "목소리 기억",
+                    saved.is_ok() && remembered.is_some(),
+                    match (&saved, &remembered) {
+                        (Err(e), _) => format!("이름 저장 실패: {e}"),
+                        (_, Some(v)) => format!("'{VOICE_NAME}' {:.0}초 기억함", v.secs),
+                        _ => "기억한 목소리가 없어요".into(),
+                    },
+                );
+            }
+            None => {
+                c.add("목소리 기억", false, "화자가 정해진 문장이 없어요");
+            }
+        }
+    }
+
     // ── 2. 파일 받아쓰기 ──
     let file = std::env::var_os("BADASUGI_SMOKE_FILE").map(PathBuf::from).unwrap_or(wav);
     let t1 = Instant::now();
@@ -314,10 +352,38 @@ fn run(app: &AppHandle, c: &mut Checks) {
         Some(doc) => {
             c.add("파일 기록 저장", doc.source_file.is_some(), doc.source_file.clone().unwrap_or_default());
             check_doc(c, "파일", &doc, &expect);
+            if speaker_ready {
+                // 같은 목소리(같은 테스트 음성)이므로 기억해 둔 이름이 저절로 붙어야 한다
+                let names: Vec<&str> = doc.speakers.values().map(String::as_str).collect();
+                c.add(
+                    "목소리로 이름 붙이기",
+                    names.contains(&VOICE_NAME),
+                    if names.is_empty() { "이름 없음".to_string() } else { names.join(", ") },
+                );
+            }
         }
         None => {
             c.add("파일 기록 저장", false, "기록 파일이 없어요");
         }
+    }
+
+    // ── 2-2. 목소리 잊기: 잊은 뒤 예전 회의를 고쳐 저장해도 다시 기억되면 안 된다 ──
+    if speaker_ready {
+        crate::voices::strip_name(&sessions, VOICE_NAME, None);
+        app.state::<crate::voices::VoiceBook>().forget(VOICE_NAME);
+        // (기록 잠금을 한 문장 안에서 두 번 잡지 않게 나눠서)
+        let loaded = app.state::<AppState>().store.lock().load(&live.id);
+        let edited = loaded.and_then(|mut d| {
+            d.title.push_str(" (제목 고침)");
+            app.state::<AppState>().store.lock().save_doc(d)
+        });
+        crate::sync_session_voices(app, &live.id);
+        let back = app.state::<crate::voices::VoiceBook>().list().iter().any(|v| v.name == VOICE_NAME);
+        c.add(
+            "목소리 잊기",
+            edited.is_ok() && !back,
+            if back { "잊은 목소리가 기록을 고치자 다시 기억됐어요".to_string() } else { "잊은 뒤 기록을 고쳐도 다시 기억하지 않음".to_string() },
+        );
     }
 
     // ── 3. 진단 로그가 남는지 ──
