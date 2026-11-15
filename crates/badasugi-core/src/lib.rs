@@ -6,6 +6,7 @@
 pub mod asr;
 pub mod audio;
 pub mod decode;
+pub mod diarize;
 pub mod fbank;
 pub mod models;
 pub mod ogg_opus;

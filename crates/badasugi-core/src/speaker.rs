@@ -52,7 +52,7 @@ impl SpeakerEncoder {
     }
 }
 
-fn normalize(v: &mut [f32]) {
+pub(crate) fn normalize(v: &mut [f32]) {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if n > 1e-8 {
         v.iter_mut().for_each(|x| *x /= n);
@@ -92,6 +92,8 @@ struct Speaker {
     weight: f32,
     /// 짧은 발화로만 만들어진 임시 화자 (목소리 특징이 불안정)
     provisional: bool,
+    /// 중심에 들어간 믿을 만한 말의 길이 (초) — 목소리로 이름을 알아볼 만큼 쌓였는지
+    secs: f32,
 }
 
 pub struct SpeakerTracker {
@@ -101,7 +103,7 @@ pub struct SpeakerTracker {
 }
 
 /// 이 길이 미만의 발화는 임베딩이 불안정하므로 새 화자를 만들지 않는다
-const RELIABLE_MS: u64 = 1200;
+pub const RELIABLE_MS: u64 = 1200;
 
 impl SpeakerTracker {
     pub fn new(cfg: DiarizationConfig) -> Self {
@@ -164,9 +166,14 @@ impl SpeakerTracker {
                         s.centroid = emb.to_vec();
                         s.weight = 1.0;
                         s.provisional = false;
+                        s.secs = dur_ms as f32 / 1000.0;
                         id
                     }
-                    None => self.create(Some(emb), false),
+                    None => {
+                        let id = self.create(Some(emb), false);
+                        self.speakers[id as usize].secs = dur_ms as f32 / 1000.0;
+                        id
+                    }
                 }
             }
         };
@@ -193,6 +200,7 @@ impl SpeakerTracker {
             centroid: v,
             weight: 1.0,
             provisional,
+            secs: 0.0,
         });
         let id = (self.speakers.len() - 1) as u32;
         self.last = Some(id);
@@ -215,7 +223,14 @@ impl SpeakerTracker {
         normalize(&mut s.centroid);
         if dur_ms >= RELIABLE_MS {
             s.provisional = false;
+            s.secs += dur_ms as f32 / 1000.0;
         }
+    }
+
+    /// 화자의 지금 목소리 중심과 그 중심을 만든 믿을 만한 말의 길이(초). 아직 임시 화자면 None.
+    pub fn voice(&self, id: u32) -> Option<(&[f32], f32)> {
+        let s = self.speakers.get(id as usize)?;
+        (!s.provisional && !s.centroid.is_empty()).then_some((s.centroid.as_slice(), s.secs))
     }
 }
 

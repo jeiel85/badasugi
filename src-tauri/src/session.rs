@@ -1,10 +1,12 @@
 //! 회의 기록: 진행 중 자동 저장(JSON + Markdown), 기록 목록, 내보내기
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
+use badasugi_core::diarize::{match_voices, KnownVoice, SpeakerVoice};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,31 @@ pub struct SessionMeta {
     pub preview: String,
 }
 
+/// 회의가 끝난 뒤 목소리로 이름을 붙이려면 그 화자가 이만큼(초) 말해야 한다
+const NAME_MIN_SECS: f32 = 8.0;
+
+/// 다시 정리를 반영한 결과
+#[derive(Debug)]
+pub struct Refined {
+    /// 화자가 바뀐 문장 수
+    pub moved: usize,
+    /// 최종 화자 번호 기준 목소리
+    pub voices: Vec<SpeakerVoice>,
+    /// 목소리로 새로 이름을 붙인 화자 수
+    pub named: usize,
+}
+
+fn resolve_with(map: &BTreeMap<u32, u32>, s: Option<u32>) -> Option<u32> {
+    let mut s = s?;
+    for _ in 0..16 {
+        match map.get(&s) {
+            Some(&t) if t != s => s = t,
+            _ => break,
+        }
+    }
+    Some(s)
+}
+
 pub fn fmt_time(ms: u64) -> String {
     let s = ms / 1000;
     if s >= 3600 {
@@ -93,14 +120,167 @@ impl SessionDoc {
 
     /// 합친 화자를 따라가 최종 화자 번호를 돌려준다
     pub fn resolve(&self, s: Option<u32>) -> Option<u32> {
-        let mut s = s?;
-        for _ in 0..16 {
-            match self.speaker_map.get(&s) {
-                Some(&t) if t != s => s = t,
-                _ => break,
+        resolve_with(&self.speaker_map, s)
+    }
+
+    /// 회의가 끝난 뒤 다시 정리한 화자를 반영한다.
+    ///
+    /// - `labels`: [발화 id, 실시간 화자, 다시 정리한 화자]. 사람이 직접 화자를 바꾼 문장은 건드리지 않고,
+    ///   녹음 중에 합친 화자(`speaker_map`)는 그대로 지킨다.
+    /// - 화자가 합쳐져 사라지면 그 이름은 합쳐진 쪽이 이어받는다 (그쪽에 이름이 없을 때).
+    /// - `known` 목소리와 닮은 화자에 이름을 붙인다. 녹음 중에 목소리로 붙였던 이름(`auto_named`)은
+    ///   회의 전체로 다시 보고 아니면 거둔다. 사람이 붙인 이름은 그대로.
+    /// - 화자 번호를 1부터 빈틈없이 다시 매긴다 (합쳐져 "화자 3" 이 비는 일 없게).
+    pub fn apply_refinement(
+        &mut self,
+        labels: &[[u64; 3]],
+        voices: &[SpeakerVoice],
+        auto_named: &BTreeSet<String>,
+        known: &[KnownVoice],
+    ) -> Refined {
+        let smap = self.speaker_map.clone();
+        let map: HashMap<u64, (u32, u32)> = labels.iter().map(|l| (l[0], (l[1] as u32, l[2] as u32))).collect();
+        // 화자별로 말이 어디로 옮겨 갔나 (이름 이어받기)
+        let mut flow: BTreeMap<u32, BTreeMap<u32, u64>> = BTreeMap::new();
+        let mut moved = 0;
+        for u in self.utterances.iter_mut() {
+            let Some(&(on, re)) = map.get(&u.id) else {
+                continue;
+            };
+            let from = resolve_with(&smap, Some(on));
+            if u.speaker != from {
+                continue;
+            }
+            let to = resolve_with(&smap, Some(re));
+            if let (Some(f), Some(t)) = (from, to) {
+                *flow.entry(f).or_default().entry(t).or_default() += u.end_ms.saturating_sub(u.start_ms);
+            }
+            if to != u.speaker {
+                u.speaker = to;
+                moved += 1;
             }
         }
-        Some(s)
+        let used: BTreeSet<u32> = self.utterances.iter().filter_map(|u| u.speaker).collect();
+        for (f, dests) in &flow {
+            if used.contains(f) {
+                continue;
+            }
+            let Some(name) = self.speakers.get(f).cloned() else {
+                continue;
+            };
+            if let Some((&t, _)) = dests.iter().max_by_key(|x| *x.1) {
+                if !self.speakers.contains_key(&t) {
+                    self.speakers.insert(t, name);
+                }
+            }
+        }
+        self.speakers.retain(|k, _| used.contains(k));
+
+        // 화자별 목소리 (녹음 중에 합친 화자는 말한 길이만큼 섞는다)
+        let mut sums: BTreeMap<u32, (Vec<f32>, f32)> = BTreeMap::new();
+        for v in voices {
+            let Some(l) = resolve_with(&smap, Some(v.speaker)).filter(|l| used.contains(l)) else {
+                continue;
+            };
+            let e = sums.entry(l).or_insert_with(|| (vec![0.0; v.embedding.len()], 0.0));
+            if e.0.len() != v.embedding.len() {
+                continue;
+            }
+            let w = v.secs.max(0.1);
+            e.0.iter_mut().zip(&v.embedding).for_each(|(a, b)| *a += b * w);
+            e.1 += v.secs;
+        }
+        let mut finals: Vec<SpeakerVoice> = sums
+            .into_iter()
+            .map(|(speaker, (mut e, secs))| {
+                let n = e.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+                e.iter_mut().for_each(|x| *x /= n);
+                SpeakerVoice {
+                    speaker,
+                    embedding: e,
+                    secs,
+                }
+            })
+            .collect();
+
+        // 목소리로 이름 붙이기 (회의 전체 기준)
+        let mut named = 0;
+        if !known.is_empty() {
+            let matched: BTreeMap<u32, String> = match_voices(&finals, known, NAME_MIN_SECS).into_iter().collect();
+            let is_auto = |n: &String| auto_named.contains(n);
+            // 사람이 붙인 이름은 다른 화자가 가져가지 못한다
+            let manual: BTreeSet<String> = self.speakers.values().filter(|n| !is_auto(n)).cloned().collect();
+            for v in &finals {
+                let cur = self.speakers.get(&v.speaker).cloned();
+                if cur.as_ref().is_some_and(|n| !is_auto(n)) {
+                    continue;
+                }
+                match matched.get(&v.speaker).filter(|n| !manual.contains(*n)) {
+                    Some(n) => {
+                        if cur.as_ref() != Some(n) {
+                            if cur.is_none() {
+                                named += 1;
+                            }
+                            self.speakers.insert(v.speaker, n.clone());
+                        }
+                    }
+                    None => {
+                        if cur.is_some() {
+                            self.speakers.remove(&v.speaker);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 번호 다시 매기기 (사용자가 새로 나눈 100번대 화자는 그대로)
+        let renum: BTreeMap<u32, u32> = used
+            .iter()
+            .filter(|&&l| l < 100)
+            .enumerate()
+            .map(|(i, &l)| (l, i as u32))
+            .collect();
+        let re = |l: u32| renum.get(&l).copied().unwrap_or(l);
+        for u in self.utterances.iter_mut() {
+            u.speaker = u.speaker.map(re);
+        }
+        self.speakers = std::mem::take(&mut self.speakers).into_iter().map(|(k, v)| (re(k), v)).collect();
+        for v in finals.iter_mut() {
+            v.speaker = re(v.speaker);
+        }
+        // 모든 문장이 최종 화자로 정리됐으므로 합친 기록은 더 필요 없다
+        self.speaker_map.clear();
+        Refined {
+            moved,
+            voices: finals,
+            named,
+        }
+    }
+
+    /// 이름 붙은 화자의 목소리 (목소리 기억에 넣을 것): (이름, 목소리, 말한 초).
+    /// 회의가 끝난 뒤 합친 화자도 따라간다.
+    pub fn named_voices(&self, voices: &[SpeakerVoice]) -> Vec<(String, Vec<f32>, f32)> {
+        let mut by: BTreeMap<u32, (Vec<f32>, f32)> = BTreeMap::new();
+        for v in voices {
+            let Some(l) = self.resolve(Some(v.speaker)) else {
+                continue;
+            };
+            let e = by.entry(l).or_insert_with(|| (vec![0.0; v.embedding.len()], 0.0));
+            if e.0.len() != v.embedding.len() {
+                continue;
+            }
+            let w = v.secs.max(0.1);
+            e.0.iter_mut().zip(&v.embedding).for_each(|(a, b)| *a += b * w);
+            e.1 += v.secs;
+        }
+        by.into_iter()
+            .filter_map(|(l, (mut e, secs))| {
+                let name = self.speakers.get(&l)?.clone();
+                let n = e.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+                e.iter_mut().for_each(|x| *x /= n);
+                Some((name, e, secs))
+            })
+            .collect()
     }
 
     pub fn speaker_name(&self, s: Option<u32>) -> String {
@@ -245,7 +425,17 @@ pub struct SessionStore {
     pub current: Option<SessionDoc>,
     dirty: bool,
     last_save: Instant,
+    last_md: Instant,
 }
+
+/// 녹음 중 자동 저장 간격: 기록 전체를 다시 쓰므로 회의가 길수록(문장이 많을수록) 덜 자주 — 2초에서 최대 10초.
+/// (OneDrive 로 동기화되는 문서 폴더에서 몇 초마다 큰 파일을 다시 올리지 않게)
+fn autosave_every(utterances: usize) -> Duration {
+    Duration::from_millis((2_000 + utterances as u64 * 5).min(10_000))
+}
+
+/// 녹음 중 Markdown 사본은 이 간격으로만 (녹음이 끝나면 바로 최종본을 쓴다)
+const MD_EVERY: Duration = Duration::from_secs(30);
 
 impl SessionStore {
     pub fn new(dir: PathBuf) -> Self {
@@ -254,6 +444,7 @@ impl SessionStore {
             current: None,
             dirty: false,
             last_save: Instant::now(),
+            last_md: Instant::now(),
         }
     }
 
@@ -275,17 +466,26 @@ impl SessionStore {
         self.dirty = true;
     }
 
-    /// 자주 부르면 2초에 한 번만 실제로 쓴다
+    /// 자주 불러도 몇 초에 한 번만 실제로 쓴다 ([`autosave_every`]). Markdown 사본은 30초마다.
     pub fn autosave(&mut self) -> Result<()> {
-        if self.dirty && self.last_save.elapsed() > Duration::from_secs(2) {
-            let r = self.flush();
-            if r.is_err() {
-                // 실패해도 2초 뒤에 다시 시도한다 (매 발화마다 디스크를 두드리지 않게)
-                self.last_save = Instant::now();
-            }
-            return r;
+        let n = self.current.as_ref().map_or(0, |d| d.utterances.len());
+        if !self.dirty || self.last_save.elapsed() <= autosave_every(n) {
+            return Ok(());
         }
-        Ok(())
+        let Some(doc) = self.current.as_ref().filter(|d| !d.utterances.is_empty()) else {
+            return Ok(());
+        };
+        let md = self.last_md.elapsed() >= MD_EVERY;
+        let r = write_json(&self.dir, doc).and_then(|_| if md { write_md(&self.dir, doc) } else { Ok(()) });
+        // 실패해도 간격만큼 뒤에 다시 시도한다 (매 발화마다 디스크를 두드리지 않게)
+        self.last_save = Instant::now();
+        if r.is_ok() {
+            self.dirty = false;
+            if md {
+                self.last_md = Instant::now();
+            }
+        }
+        r
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -298,19 +498,38 @@ impl SessionStore {
         write_doc(&self.dir, doc)?;
         self.dirty = false;
         self.last_save = Instant::now();
+        self.last_md = Instant::now();
         Ok(())
     }
 
+    /// 기록 목록. 파일 크기 · 수정 시각이 그대로인 기록은 지난번에 읽은 요약을 다시 쓴다
+    /// (긴 회의 기록 수백 개를 열 때마다 모두 다시 읽지 않게).
     pub fn list(&self) -> Vec<SessionMeta> {
+        let mut cache = META_CACHE.lock();
+        let mut seen = BTreeSet::new();
         let mut out: Vec<SessionMeta> = std::fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
             .flatten()
             .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-            .filter_map(|s| serde_json::from_str::<SessionDoc>(&s).ok())
-            .map(|d| d.meta())
+            .filter_map(|e| {
+                let path = e.path();
+                let md = e.metadata().ok()?;
+                let stamp = (md.len(), md.modified().ok());
+                seen.insert(path.clone());
+                if let Some((st, meta)) = cache.get(&path) {
+                    if *st == stamp {
+                        return Some(meta.clone());
+                    }
+                }
+                let doc = serde_json::from_str::<SessionDoc>(&std::fs::read_to_string(&path).ok()?).ok()?;
+                let meta = doc.meta();
+                cache.insert(path, (stamp, meta.clone()));
+                Some(meta)
+            })
             .collect();
+        // 지운 기록 · 다른 폴더의 기록은 비운다
+        cache.retain(|p, _| seen.contains(p) || p.parent() != Some(self.dir.as_path()));
         out.sort_by(|a, b| b.id.cmp(&a.id));
         out
     }
@@ -424,7 +643,7 @@ impl SessionStore {
 
     pub fn delete(&mut self, id: &str) -> Result<()> {
         let id = safe_id(id)?;
-        for ext in ["json", "md", "opus", "wav"] {
+        for ext in ["json", "md", "opus", "wav", "voices"] {
             let p = self.dir.join(format!("{id}.{ext}"));
             if p.exists() {
                 std::fs::remove_file(p)?;
@@ -463,7 +682,17 @@ pub(crate) fn safe_id(id: &str) -> Result<&str> {
     Ok(id)
 }
 
+/// 기록 목록용 요약 캐시: 파일 경로 → ((크기, 수정 시각), 요약)
+type MetaCache = HashMap<PathBuf, ((u64, Option<SystemTime>), SessionMeta)>;
+static META_CACHE: std::sync::LazyLock<Mutex<MetaCache>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 기록(JSON) + 읽기용 Markdown
 pub(crate) fn write_doc(dir: &Path, doc: &SessionDoc) -> Result<()> {
+    write_json(dir, doc)?;
+    write_md(dir, doc)
+}
+
+fn write_json(dir: &Path, doc: &SessionDoc) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let json = dir.join(format!("{}.json", doc.id));
     let tmp = dir.join(format!("{}.json.tmp", doc.id));
@@ -475,6 +704,125 @@ pub(crate) fn write_doc(dir: &Path, doc: &SessionDoc) -> Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &json)?;
+    Ok(())
+}
+
+fn write_md(dir: &Path, doc: &SessionDoc) -> Result<()> {
     std::fs::write(dir.join(format!("{}.md", doc.id)), doc.to_markdown())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn u(id: u64, start: u64, speaker: u32) -> Utterance {
+        Utterance {
+            id,
+            start_ms: start,
+            end_ms: start + 4000,
+            speaker: Some(speaker),
+            text: format!("문장 {id}"),
+        }
+    }
+
+    fn voice(speaker: u32, e: [f32; 3], secs: f32) -> SpeakerVoice {
+        let n = e.iter().map(|x| x * x).sum::<f32>().sqrt();
+        SpeakerVoice {
+            speaker,
+            embedding: e.iter().map(|x| x / n).collect(),
+            secs,
+        }
+    }
+
+    #[test]
+    fn refinement_keeps_manual_edits_and_names_and_renumbers() {
+        let mut d = SessionDoc::new("로컬".into());
+        // 실시간: 0, 1, 2, 3 — 2는 사실 0과 같은 사람, 3번 화자 문장 하나는 사람이 100번(새 화자)으로 옮겨 둠
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2), u(3, 15000, 3), u(4, 20000, 100), u(5, 25000, 1)];
+        d.speakers.insert(2, "김 팀장".into());
+        let labels = [[0, 0, 0], [1, 1, 1], [2, 2, 0], [3, 3, 3], [4, 3, 1], [5, 1, 1]];
+        let voices = [voice(0, [1.0, 0.0, 0.0], 20.0), voice(1, [0.0, 1.0, 0.0], 20.0), voice(3, [0.0, 0.0, 1.0], 9.0)];
+        let r = d.apply_refinement(&labels, &voices, &BTreeSet::new(), &[]);
+        assert_eq!(r.moved, 1);
+        let spk: Vec<Option<u32>> = d.utterances.iter().map(|u| u.speaker).collect();
+        // 0,2 → 0 · 1 → 1 · 3 → 2 (번호를 빈틈없이) · 사람이 옮긴 100번은 그대로
+        assert_eq!(spk, vec![Some(0), Some(1), Some(0), Some(2), Some(100), Some(1)]);
+        // 사라진 2번 화자의 이름은 합쳐진 0번이 이어받는다
+        assert_eq!(d.speakers.get(&0).map(String::as_str), Some("김 팀장"));
+        assert_eq!(r.voices.iter().map(|v| v.speaker).collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn refinement_follows_merges_made_during_recording() {
+        let mut d = SessionDoc::new("로컬".into());
+        // 녹음 중에 사람이 1번을 0번에 합쳐 둠
+        d.speaker_map.insert(1, 0);
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 10000, 2)];
+        let labels = [[0, 0, 0], [1, 1, 1], [2, 2, 2]];
+        let r = d.apply_refinement(&labels, &[], &BTreeSet::new(), &[]);
+        assert_eq!(r.moved, 0);
+        assert_eq!(d.utterances.iter().map(|u| u.speaker).collect::<Vec<_>>(), vec![Some(0), Some(0), Some(1)]);
+        assert!(d.speaker_map.is_empty());
+    }
+
+    #[test]
+    fn refinement_names_by_voice_but_never_over_a_manual_name() {
+        let known = vec![
+            KnownVoice {
+                name: "김 팀장".into(),
+                embedding: vec![1.0, 0.0, 0.0],
+            },
+            KnownVoice {
+                name: "박 대리".into(),
+                embedding: vec![0.0, 1.0, 0.0],
+            },
+            KnownVoice {
+                name: "이 과장".into(),
+                embedding: vec![0.0, 0.0, 1.0],
+            },
+        ];
+        let mut d = SessionDoc::new("로컬".into());
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2)];
+        // 0번: 녹음 중 목소리로 "박 대리"라고 붙였지만 회의 전체로 보면 김 팀장 · 2번: 사람이 직접 "최 부장"
+        d.speakers.insert(0, "박 대리".into());
+        d.speakers.insert(2, "최 부장".into());
+        let voices = [voice(0, [1.0, 0.05, 0.0], 30.0), voice(1, [0.0, 1.0, 0.1], 30.0), voice(2, [0.0, 0.0, 1.0], 30.0)];
+        let auto: BTreeSet<String> = ["박 대리".to_string()].into();
+        let labels = [[0, 0, 0], [1, 1, 1], [2, 2, 2]];
+        let r = d.apply_refinement(&labels, &voices, &auto, &known);
+        assert_eq!(d.speakers.get(&0).map(String::as_str), Some("김 팀장"));
+        assert_eq!(d.speakers.get(&1).map(String::as_str), Some("박 대리"));
+        assert_eq!(d.speakers.get(&2).map(String::as_str), Some("최 부장"));
+        assert_eq!(r.named, 1);
+        // 이름 붙은 화자의 목소리 → 목소리 기억으로
+        let named: Vec<String> = d.named_voices(&r.voices).into_iter().map(|x| x.0).collect();
+        assert_eq!(named, vec!["김 팀장", "박 대리", "최 부장"]);
+    }
+
+    #[test]
+    fn autosave_slows_down_for_long_meetings() {
+        assert_eq!(autosave_every(0), Duration::from_secs(2));
+        assert!(autosave_every(400) > Duration::from_secs(3));
+        assert_eq!(autosave_every(5000), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn list_reuses_unchanged_records() {
+        let dir = std::env::temp_dir().join(format!("bd-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-15_090000".into();
+        d.utterances = vec![u(0, 0, 0)];
+        write_doc(&dir, &d).unwrap();
+        let mut store = SessionStore::new(dir.clone());
+        assert_eq!(store.list()[0].count, 1);
+        d.utterances.push(u(1, 5000, 1));
+        write_doc(&dir, &d).unwrap();
+        // 크기가 바뀌었으니 다시 읽는다
+        assert_eq!(store.list()[0].count, 2);
+        store.delete(&d.id).unwrap();
+        assert!(store.list().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

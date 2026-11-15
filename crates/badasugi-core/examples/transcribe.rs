@@ -86,6 +86,7 @@ fn main() -> anyhow::Result<()> {
         language: "ko".into(),
         prompt,
         record_path: None,
+        known_voices: Vec::new(),
     };
 
     let t0 = Instant::now();

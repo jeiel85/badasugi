@@ -169,6 +169,20 @@ function scheduleRender() {
   requestAnimationFrame(() => { renderQueued = false; renderDoc(); });
 }
 
+// 긴 회의에서 새 문장이 올 때마다 녹취록 전체를 다시 그리지 않게, 앞에서부터 같은 문단은 그대로 두고
+// 처음 달라진 문단부터만 다시 그린다 (새 문장은 대개 맨 끝 문단만 바꾼다)
+let shownGroups = [];
+function patchTranscript(tr, html) {
+  const kids = tr.children;
+  let i = 0;
+  while (i < html.length && i < shownGroups.length && i < kids.length && html[i] === shownGroups[i]) i++;
+  while (kids.length > i) tr.lastElementChild.remove();
+  if (i < html.length) tr.insertAdjacentHTML('beforeend', html.slice(i).join(''));
+  shownGroups = html;
+}
+// 화면에서 직접 고친 문단(편집 등)이 있으면 다음에는 처음부터 다시 그린다
+function invalidateTranscript() { shownGroups = []; }
+
 function renderDoc() {
   if (editing) return;
   const d = doc();
@@ -197,7 +211,7 @@ function renderDoc() {
       groups.push({ speaker: it.speaker, startMs: it.startMs, endMs: it.endMs, items: [it] });
     }
   }
-  tr.innerHTML = groups.map((g) => `
+  patchTranscript(tr, groups.map((g) => `
     <div class="group" style="--c:${spkColor(g.speaker)}">
       <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}" data-ids="${g.items.filter((x) => x.kind === 'u').map((x) => x.id).join(',')}" title="이름 바꾸기 · 화자 바꾸기">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
       ${g.items.map((it) => it.kind === 'u'
@@ -205,7 +219,7 @@ function renderDoc() {
         : it.kind === 'p'
           ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
           : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
-    </div>`).join('');
+    </div>`));
 
   $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking && !S.paused && !S.fileMode);
   renderMeta();
@@ -360,7 +374,7 @@ function tickTimer() {
   const ms = S.rec === 'recording' || S.rec === 'stopping' ? Date.now() - S.timerStart : d ? d.durationMs : 0;
   $('#timer').textContent = fmt(S.live || S.rec !== 'idle' ? ms : d?.durationMs);
 }
-setInterval(() => { if (S.rec === 'recording') tickTimer(); }, 250);
+setInterval(() => { if (S.rec === 'recording' && !document.hidden) tickTimer(); }, 250);
 
 const meterBars = $$('#meter i');
 const ring = $('#rec-ring');
@@ -428,7 +442,10 @@ function onRec(state) {
   if (state === 'idle') {
     S.speaking = false;
     S.paused = false;
-    if (S.fileMode && prev !== 'idle' && S.liveDoc?.utterances.length) toast('파일 받아쓰기를 마쳤어요');
+    const note = S.refineMsg ? `\n${S.refineMsg}` : '';
+    if (S.fileMode && prev !== 'idle' && S.liveDoc?.utterances.length) toast(`파일 받아쓰기를 마쳤어요${note}`);
+    else if (note && prev !== 'idle') toast(S.refineMsg);
+    S.refineMsg = '';
     S.fileMode = false;
     S.progress = null;
     resetLevel();
@@ -443,7 +460,8 @@ function onEvent(e) {
   const d = S.liveDoc;
   switch (e.type) {
     case 'level':
-      setLevel(e.rms);
+      // 창이 트레이에 숨어 있으면 소리 막대는 그리지 않는다 (초당 14번)
+      if (!document.hidden) setLevel(e.rms);
       if (S.speaking !== e.speaking) {
         S.speaking = e.speaking;
         $('#listening').hidden = !(S.live && S.speaking);
@@ -484,6 +502,35 @@ function onEvent(e) {
       if (p) S.failed.set(e.id, { ...p, message: e.message });
       if (S.failed.size === 1) toast(`인식 실패: ${e.message}`, 'error');
       renderLive();
+      break;
+    }
+    case 'speakerNamed':
+      // 기억해 둔 목소리로 알아본 화자
+      if (d) {
+        d.speakers = d.speakers || {};
+        if (d.speakers[e.speaker] == null) {
+          d.speakers[e.speaker] = e.name;
+          $('#speakers').innerHTML = '';
+          toast(`목소리로 '${e.name}'님을 알아봤어요`);
+          renderLive();
+        }
+      }
+      break;
+    case 'speakersRefined': {
+      // 녹음이 끝난 뒤 회의 전체를 보고 화자를 다시 정리했다 → 정리된 기록으로 바꿔 둔다
+      const parts = [];
+      if (e.moved) parts.push(`문장 ${e.moved}개의 화자를 바로잡았어요`);
+      if (e.named) parts.push(`목소리로 ${e.named}명의 이름을 붙였어요`);
+      S.refineMsg = parts.length ? `회의 전체를 다시 듣고 ${parts.join(' · ')}` : '';
+      const id = S.liveDoc?.id;
+      if (id) {
+        api.invoke('load_session', { id }).then((fresh) => {
+          if (S.liveDoc?.id !== id) return;
+          S.liveDoc = fresh;
+          $('#speakers').innerHTML = '';
+          renderLive();
+        }).catch(() => {});
+      }
       break;
     }
     case 'status':
@@ -686,6 +733,7 @@ $('#transcript').addEventListener('dblclick', (e) => {
   const finish = (save) => {
     el.contentEditable = 'false';
     editing = false;
+    invalidateTranscript();
     // innerText 는 화면 배치에 기대므로(가려진 문단은 빈 값) 글자 그대로인 textContent 로 읽는다 — 빈 값이면 발화가 지워지므로 중요
     const v = (el.textContent || '').replace(/\s+/g, ' ').trim();
     if (save && !v) {
@@ -1408,6 +1456,8 @@ function renderSettings() {
   $('#opt-thr').value = s.diarization.threshold;
   $('#thr-label').textContent = s.diarization.threshold.toFixed(2);
   $('#opt-maxspk').value = String(s.diarization.maxSpeakers);
+  $('#opt-voices').checked = s.rememberVoices !== false;
+  renderVoices();
 
   $('#opt-lang').value = s.language;
   $('#opt-glossary').value = s.glossary;
@@ -1439,6 +1489,28 @@ function renderSettings() {
   $('#app-version').textContent = `v${S.app.version}`;
   renderUsage();
 }
+
+/* 기억한 목소리 */
+async function renderVoices() {
+  // 기억하기를 꺼도 이미 기억한 목소리는 보여 준다 (지울 수 있게)
+  const box = $('#voice-list');
+  let list = [];
+  try { list = await api.invoke('list_voices'); } catch { /* 비움 */ }
+  box.innerHTML = list.map((v) => `<span class="voice-chip" title="회의 ${v.meetings}번 · ${minutes(v.secs)}">${esc(v.name)} <small>${v.meetings}회</small><button data-forget="${esc(v.name)}" title="이 목소리 잊기" aria-label="${esc(v.name)} 잊기">×</button></span>`).join('')
+    + (list.length > 1 ? '<button class="link danger" data-forget-all>모두 잊기</button>' : '');
+}
+$('#voice-list').addEventListener('click', async (e) => {
+  const one = e.target.closest('[data-forget]');
+  if (one) {
+    await call('forget_voice', { name: one.dataset.forget });
+    toast(`'${one.dataset.forget}' 목소리를 잊었어요`);
+    return renderVoices();
+  }
+  if (e.target.closest('[data-forget-all]')) {
+    const ok = await api.ask('기억한 목소리를 모두 지울까요?\n(회의 기록은 그대로예요)', { title: '받아쓰기', kind: 'warning' });
+    if (ok) { await call('forget_all_voices'); renderVoices(); }
+  }
+});
 
 /* API 사용량 */
 const PROVIDER = {
@@ -1566,6 +1638,7 @@ bind('opt-custom-model', (t) => (S.settings.customModel = t.value.trim()));
 bind('opt-diar', (t) => { S.settings.diarization.enabled = t.checked; });
 bind('opt-thr', (t) => { S.settings.diarization.threshold = +t.value; $('#thr-label').textContent = (+t.value).toFixed(2); }, 'input');
 bind('opt-maxspk', (t) => (S.settings.diarization.maxSpeakers = +t.value));
+bind('opt-voices', (t) => { S.settings.rememberVoices = t.checked; renderVoices(); });
 bind('opt-mic', (t) => (S.settings.micDevice = t.value || null));
 bind('opt-lang', (t) => (S.settings.language = t.value));
 bind('opt-glossary', (t) => (S.settings.glossary = t.value));
@@ -1739,6 +1812,7 @@ function demoWavUrl() {
   return demoWav;
 }
 
+let mockVoices = [{ name: '김 팀장', meetings: 4, secs: 812 }, { name: '이 개발', meetings: 2, secs: 240 }, { name: '박 디자인', meetings: 1, secs: 95 }];
 function createMock() {
   const handlers = {};
   const st = {
@@ -1746,7 +1820,7 @@ function createMock() {
       engine: 'local', localModel: 'large-v3-turbo-q5_0', beamSize: 1, threads: 0,
       openaiModel: 'gpt-4o-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
-      diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true },
+      diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', alwaysOnTop: false, theme: 'system',
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
@@ -1780,6 +1854,9 @@ function createMock() {
         rates: [{ provider: 'groq', at: Math.floor(Date.now() / 1000) - 180, items: [['x-ratelimit-limit-requests', '2000'], ['x-ratelimit-remaining-requests', '1904'], ['x-ratelimit-reset-requests', '1h9m7.2s'], ['x-ratelimit-limit-tokens', '6000'], ['x-ratelimit-remaining-tokens', '5560'], ['x-ratelimit-reset-tokens', '4.4s']] }],
       };
       if (cmd === 'session_audio') return demoWavUrl();
+      if (cmd === 'list_voices') return mockVoices;
+      if (cmd === 'forget_voice') { mockVoices = mockVoices.filter((v) => v.name !== args.name); return; }
+      if (cmd === 'forget_all_voices') { mockVoices = []; return; }
       if (cmd === 'set_mini') { st.settings.miniMode = args.mini; handlers['bd://mini'] && handlers['bd://mini']({ payload: args.mini }); return; }
       if (cmd === 'list_sessions') return [{ id: 'demo', title: '앱 출시 일정 회의', startedAt: '2026-11-12 14:30', durationMs: 61000, count: 7, speakers: 3, preview: '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.' }];
       if (cmd === 'load_session') return demoDoc();

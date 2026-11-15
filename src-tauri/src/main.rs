@@ -11,7 +11,9 @@ mod status;
 mod summary;
 mod update;
 mod usage_book;
+mod voices;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -34,6 +36,7 @@ use tauri_plugin_opener::OpenerExt;
 use session::{SearchHit, SessionDoc, SessionMeta, SessionStore, Utterance};
 use settings::Settings;
 use update::{UpdateStatus, Updates};
+use voices::VoiceBook;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +91,8 @@ pub(crate) struct AppState {
     sleep_paused: AtomicBool,
     /// 이번 잠에 대해 화면에 이미 알렸다 (깨어남 알림이 여러 번 와도 한 번만)
     sleep_notified: AtomicBool,
+    /// 이번 녹음에서 목소리로 자동으로 붙인 이름 (회의가 끝나면 전체를 보고 다시 확인한다)
+    auto_named: Mutex<BTreeSet<String>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -473,7 +478,7 @@ pub(crate) fn on_power(app: &AppHandle, ev: power::PowerEvent) {
         power::PowerEvent::Suspend => {
             st.sleep_notified.store(false, Ordering::SeqCst);
             // 잠든 사이 전원이 꺼져도 여기까지는 남게
-            if let Err(e) = st.store.lock().autosave() {
+            if let Err(e) = st.store.lock().flush() {
                 log::warn!("절전 전 저장 실패: {e}");
             }
         }
@@ -525,6 +530,12 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
             None
         };
         let speaker_model = models::SPEAKER_MODEL.path_in(&st.paths.models);
+        // 이름을 기억해 둔 목소리 → 녹음 중 같은 목소리가 들리면 이름을 붙인다
+        let known_voices = if s.remember_voices && s.diarization.enabled {
+            app.state::<VoiceBook>().known()
+        } else {
+            Vec::new()
+        };
         let cfg = PipelineConfig {
             capture: CaptureConfig {
                 source: s.source,
@@ -537,6 +548,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
             language: s.language.clone(),
             prompt: glossary_prompt(&s.glossary),
             record_path,
+            known_voices,
         };
         st.store.lock().begin(doc);
         badasugi_core::perf::disable_power_throttling();
@@ -549,6 +561,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         st.sleep_paused.store(false, Ordering::SeqCst);
         st.sleep_notified.store(false, Ordering::SeqCst);
         st.echo.lock().clear();
+        st.auto_named.lock().clear();
         match file {
             Some(f) => Pipeline::start_file(f, cfg, sink).map_err(err),
             None => Pipeline::start(cfg, sink).map_err(err),
@@ -672,6 +685,35 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 }
             }
         }
+        Event::SpeakerNamed { speaker, name } => {
+            // 기억해 둔 목소리로 알아본 화자: 아직 이름이 없고, 그 이름을 다른 화자가 쓰고 있지 않을 때만
+            let target = {
+                let mut store = st.store.lock();
+                let Some(doc) = store.current.as_mut() else {
+                    return;
+                };
+                let target = doc.resolve(Some(*speaker)).unwrap_or(*speaker);
+                if doc.speakers.contains_key(&target) || doc.speakers.values().any(|n| n == name) {
+                    return;
+                }
+                doc.speakers.insert(target, name.clone());
+                store.mark_dirty();
+                target
+            };
+            st.auto_named.lock().insert(name.clone());
+            let _ = app.emit(
+                "bd://event",
+                &Event::SpeakerNamed {
+                    speaker: target,
+                    name: name.clone(),
+                },
+            );
+            return;
+        }
+        Event::SpeakersRefined { labels, voices } => {
+            on_speakers_refined(app, labels, voices);
+            return;
+        }
         Event::Pending { start_ms, end_ms, .. } => {
             let provider = *st.api_provider.lock();
             if let Some(p) = provider {
@@ -768,6 +810,82 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
         _ => {}
     }
     let _ = app.emit("bd://event", &ev);
+}
+
+/// 회의가 끝난 뒤 다시 정리한 화자를 기록에 반영하고, 이름 붙은 목소리를 기억한다
+fn on_speakers_refined(app: &AppHandle, labels: &[[u64; 3]], voices: &[badasugi_core::diarize::SpeakerVoice]) {
+    let st = app.state::<AppState>();
+    let remember = st.settings.lock().remember_voices;
+    let known = if remember { app.state::<VoiceBook>().known() } else { Vec::new() };
+    let auto = st.auto_named.lock().clone();
+    let (id, dir, r, named) = {
+        let mut store = st.store.lock();
+        let dir = store.dir.clone();
+        let Some(doc) = store.current.as_mut().filter(|d| !d.utterances.is_empty()) else {
+            return;
+        };
+        let r = doc.apply_refinement(labels, voices, &auto, &known);
+        let named = doc.named_voices(&r.voices);
+        let id = doc.id.clone();
+        store.mark_dirty();
+        (id, dir, r, named)
+    };
+    log::info!(
+        "화자 다시 정리 반영: 문장 {}개 옮김 · 화자 {}명 · 목소리로 이름 {}명",
+        r.moved,
+        r.voices.len(),
+        r.named
+    );
+    if remember && !r.voices.is_empty() {
+        // 회의가 끝난 뒤에 이름을 붙여도 기억할 수 있게 화자별 목소리를 기록 옆에 둔다
+        match voices::write_session_voices(&dir, &id, &r.voices) {
+            Ok(()) => app.state::<VoiceBook>().sync_session(&id, &named),
+            Err(e) => log::warn!("화자 목소리 저장 실패: {e}"),
+        }
+    }
+    let _ = app.emit(
+        "bd://event",
+        serde_json::json!({ "type": "speakersRefined", "moved": r.moved, "named": r.named, "speakers": r.voices.len() }),
+    );
+}
+
+/// 기록에서 이름 붙은 화자의 목소리를 목소리 기억에 반영한다 (이름을 바꾸거나 화자를 합친 뒤)
+fn sync_session_voices(app: &AppHandle, id: &str) {
+    let st = app.state::<AppState>();
+    if !st.settings.lock().remember_voices {
+        return;
+    }
+    let (doc, dir) = {
+        let store = st.store.lock();
+        // 녹음 중인 기록은 끝날 때 한꺼번에
+        if store.current.as_ref().is_some_and(|c| c.id == id) {
+            return;
+        }
+        (store.load(id), store.dir.clone())
+    };
+    let Ok(doc) = doc else {
+        return;
+    };
+    let voices = voices::read_session_voices(&dir, id);
+    if !voices.is_empty() {
+        app.state::<VoiceBook>().sync_session(id, &doc.named_voices(&voices));
+    }
+}
+
+/// 설정 › 화자 구분: 기억한 목소리 목록
+#[tauri::command]
+fn list_voices(app: AppHandle) -> Vec<voices::VoiceInfo> {
+    app.state::<VoiceBook>().list()
+}
+
+#[tauri::command]
+fn forget_voice(app: AppHandle, name: String) {
+    app.state::<VoiceBook>().forget(&name);
+}
+
+#[tauri::command]
+fn forget_all_voices(app: AppHandle) {
+    app.state::<VoiceBook>().forget_all();
 }
 
 // ───────────────────────── 기록 ─────────────────────────
@@ -886,7 +1004,10 @@ fn load_session(app: AppHandle, id: String) -> CmdResult<SessionDoc> {
 
 #[tauri::command]
 fn save_session(app: AppHandle, doc: SessionDoc) -> CmdResult<()> {
-    app.state::<AppState>().store.lock().save_doc(doc).map_err(err)
+    let id = doc.id.clone();
+    app.state::<AppState>().store.lock().save_doc(doc).map_err(err)?;
+    sync_session_voices(&app, &id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -896,6 +1017,10 @@ fn delete_session(app: AppHandle, id: String) -> CmdResult<()> {
         return Err("녹음 중인 기록은 지울 수 없습니다".into());
     }
     let r = st.store.lock().delete(&id).map_err(err);
+    if r.is_ok() {
+        // 이 회의에서 기억한 목소리도 함께 잊는다
+        app.state::<VoiceBook>().forget_session(&id);
+    }
     r
 }
 
@@ -1492,8 +1617,10 @@ fn main() {
                 quit_after_stop: AtomicBool::new(false),
                 sleep_paused: AtomicBool::new(false),
                 sleep_notified: AtomicBool::new(false),
+                auto_named: Mutex::new(BTreeSet::new()),
             });
             app.manage(Updates::default());
+            app.manage(VoiceBook::load(config_dir_for_usage.join("voices.json")));
             app.manage(usage_book::UsageBook::load(config_dir_for_usage.join("usage.json")));
             app.manage(status::Status::new(tray_base));
             log::info!(
@@ -1586,6 +1713,9 @@ fn main() {
             ui_ready,
             smoke::smoke_probe,
             get_usage,
+            list_voices,
+            forget_voice,
+            forget_all_voices,
             update_notes,
             open_folder,
             open_url,
