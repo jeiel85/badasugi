@@ -315,7 +315,7 @@ mark.cur { background: var(--warn); color: #111; }
 .drop small { font-size: 12px; color: var(--muted); }
 
 /* ── 일시정지 ── */
-.paused-tag { font-size: 11px; font-weight: 700; color: var(--warn); padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--warn) 14%, transparent); animation: blink 1.6s ease-in-out infinite; }
+.paused-tag { font-size: 11px; font-weight: 700; color: var(--warn); padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--warn) 14%, transparent); animation: blink 1.6s ease-in-out infinite; white-space: nowrap; }
 .app.paused .timer { color: var(--warn) !important; }
 .app.paused .meter i { background: var(--line-strong) !important; }
 .app.paused .rec .ring { opacity: 0 !important; }

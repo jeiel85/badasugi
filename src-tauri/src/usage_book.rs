@@ -87,9 +87,10 @@ impl UsageBook {
         self.with(provider, |t| t.stt_failures += 1);
     }
 
-    pub fn summary(&self, provider: &str, in_tokens: u64, out_tokens: u64) {
+    /// 요약 한 번 (긴 회의는 요청 여러 개)
+    pub fn summary(&self, provider: &str, requests: u64, in_tokens: u64, out_tokens: u64) {
         self.with(provider, |t| {
-            t.sum_requests += 1;
+            t.sum_requests += requests.max(1);
             t.sum_in_tokens += in_tokens;
             t.sum_out_tokens += out_tokens;
         });
@@ -145,8 +146,8 @@ mod tests {
         book.stt("groq", 3.5);
         book.stt("groq", 2.0);
         book.stt_failed("groq");
-        book.summary("gemini", 1200, 300);
-        book.summary("ollama", 999, 999); // 로컬은 세지 않음
+        book.summary("gemini", 1, 1200, 300);
+        book.summary("ollama", 1, 999, 999); // 로컬은 세지 않음
         book.save();
         let again = UsageBook::load(path);
         let r = again.report();

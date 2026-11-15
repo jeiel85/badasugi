@@ -234,12 +234,20 @@ function renderMeta() {
     .join('');
 }
 
+// 긴 회의는 구간으로 나눠 정리한다 → "긴 회의라 나눠서 정리하는 중… (2/5)"
+function summaryStep(p) {
+  if (!p || p.total <= 1) return '회의 내용을 정리하는 중…';
+  const at = `(${Math.min(p.done + 1, p.total)}/${p.total})`;
+  if (p.waitSecs > 0) return `요청 한도 때문에 ${p.waitSecs}초 기다렸다가 이어서 정리해요… ${at}`;
+  if (p.done >= p.total - 1) return `구간 메모를 합쳐 회의록을 만드는 중… ${at}`;
+  return `긴 회의라 구간으로 나눠 정리하는 중… ${at}`;
+}
 function renderSummary() {
   const d = doc();
   const card = $('#summary-card');
   if (S.summarizing && d) {
     card.hidden = false;
-    $('#summary-body').innerHTML = '<div class="loading"><span class="dot"></span>회의 내용을 정리하는 중…</div>';
+    $('#summary-body').innerHTML = `<div class="loading"><span class="dot"></span>${esc(summaryStep(S.sumProgress))}</div>`;
     return;
   }
   card.hidden = !(d && d.summary);
@@ -310,6 +318,7 @@ function renderDock() {
   pb.title = S.paused ? '이어서 받아쓰기' : '일시정지';
   $('#btn-pause use').setAttribute('href', S.paused ? '#i-play' : '#i-pause');
   $('#paused-tag').hidden = !(rec && S.paused);
+  $('#paused-tag').textContent = S.sleepPaused ? '절전으로 멈춤' : '일시정지';
   $('#fprog').hidden = !(S.fileMode && S.rec !== 'idle');
   renderProgress();
   renderMiniCap();
@@ -403,6 +412,7 @@ function onRec(state) {
     S.liveDoc = null;
     S.slowHinted = false;
     S.paused = false;
+    S.sleepPaused = false;
     S.progress = null;
   }
   if (state === 'recording' && prev !== 'recording') {
@@ -770,6 +780,8 @@ $('#btn-summary').addEventListener('click', async () => {
   if (!d || S.summarizing) return;
   if (S.rec !== 'idle' && S.live) toast('지금까지의 내용으로 요약할게요');
   S.summarizing = true;
+  S.sumProgress = null;
+  S.sumId = d.id;
   $('#summary-card').classList.remove('folded');
   renderSummary();
   updateActions();
@@ -782,6 +794,7 @@ $('#btn-summary').addEventListener('click', async () => {
     toast(String(e), 'error');
   } finally {
     S.summarizing = false;
+    S.sumProgress = null;
     renderSummary();
     updateActions();
   }
@@ -1216,7 +1229,7 @@ function renderMiniCap() {
   if (!S.mini || !cap) return;
   const d = S.live ? S.liveDoc : null;
   const last = d?.utterances?.[d.utterances.length - 1];
-  if (S.rec === 'recording' && S.paused) cap.textContent = '일시정지 중 — 이 동안은 받아 적지 않아요';
+  if (S.rec === 'recording' && S.paused) cap.textContent = S.sleepPaused ? 'PC가 잠들어서 일시정지했어요 — ▶ 로 이어서' : '일시정지 중 — 이 동안은 받아 적지 않아요';
   else if (last && S.rec !== 'idle') cap.innerHTML = `<b>${esc(speakerName(d, resolveSpk(d, last.speaker)))}</b>${esc(last.text)}`;
   else if (S.rec === 'starting') cap.textContent = '준비하는 중…';
   else if (S.rec === 'stopping') cap.textContent = '남은 발화를 정리하는 중…';
@@ -1249,10 +1262,19 @@ $('.titlebar').addEventListener('mousedown', (e) => {
 $('#btn-pause').addEventListener('click', () => call('set_paused', { paused: !S.paused }));
 function onPaused(p) {
   S.paused = p;
-  if (p) { S.speaking = false; resetLevel(); }
+  if (p) { S.speaking = false; resetLevel(); } else S.sleepPaused = false;
   renderDock();
   scheduleRender();
   toast(p ? '일시정지했어요. 이 동안의 소리는 받아 적지 않아요.' : '이어서 받아 적어요');
+}
+
+// 녹음 중 PC 가 잠들었다 깨어남 → 앱이 일시정지해 둠 (덮개 닫고 가방에 넣었다 열어도 저절로 이어 녹음되지 않게)
+function onSleep(secs) {
+  S.sleepPaused = true;
+  const long = secs ? ` (${secs >= 90 ? `${Math.round(secs / 60)}분` : `${secs}초`} 동안 잠들어 있었어요)` : '';
+  toast(`PC가 절전에 들어가서 녹음을 일시정지했어요${long}.\n이어서 받아 적으려면 ▶ 를 누르세요.`, 'warn');
+  renderDock();
+  renderMiniCap();
 }
 
 /* ───────────── 업데이트 ───────────── */
@@ -1641,6 +1663,12 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://download', (e) => onDownload(e.payload));
   await api.listen('bd://toast', (e) => toast(String(e.payload), 'error'));
   await api.listen('bd://paused', (e) => onPaused(!!e.payload));
+  await api.listen('bd://sleep', (e) => onSleep(e.payload));
+  await api.listen('bd://summary-progress', (e) => {
+    if (!S.summarizing || e.payload?.id !== S.sumId) return;
+    S.sumProgress = e.payload;
+    renderSummary();
+  });
   await api.listen('bd://mini', (e) => setMini(!!e.payload));
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await refreshState();
