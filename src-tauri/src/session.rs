@@ -46,6 +46,9 @@ pub struct SessionDoc {
     /// 화면에서 지운 발화 id (저장 요청에만 쓰고 파일에는 남기지 않는다)
     #[serde(skip_serializing)]
     pub deleted: Vec<u64>,
+    /// 회의 후 화자 다시 정리를 반영할 때마다 1씩 오른다. 이보다 오래된 화면 사본이 늦게 저장되면
+    /// 화자 배정 · 이름은 지키고 제목 · 글자 · 삭제만 반영한다 (정리 결과를 덮어쓰지 않게).
+    pub speaker_rev: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -233,6 +236,7 @@ impl SessionDoc {
         self.speakers = std::mem::take(&mut self.speakers).into_iter().map(|(k, v)| (re(k), v)).collect();
         // 모든 문장이 최종 화자로 정리됐으므로 합친 기록은 더 필요 없다
         self.speaker_map.clear();
+        self.speaker_rev += 1;
         Refined {
             moved,
             speakers: finals.len(),
@@ -543,10 +547,14 @@ impl SessionStore {
         safe_id(&doc.id)?;
         if let Some(cur) = self.current.as_mut().filter(|c| c.id == doc.id) {
             // 녹음 중인 기록: 화면에서 고친 것만 반영하고, 그 사이 새로 들어온 발화는 지킨다
+            // 화자 다시 정리 전에 만든 사본이면 화자 배정 · 이름은 정리된 것을 지킨다
+            let stale = doc.speaker_rev < cur.speaker_rev;
             cur.title = doc.title.clone();
             cur.auto_title = doc.auto_title;
-            cur.speakers = doc.speakers.clone();
-            cur.speaker_map = doc.speaker_map.clone();
+            if !stale {
+                cur.speakers = doc.speakers.clone();
+                cur.speaker_map = doc.speaker_map.clone();
+            }
             cur.summary = doc.summary.clone();
             // 화면이 지웠다고 알린 발화만 지우고, 그 사이 새로 들어온 발화는 지킨다
             cur.utterances.retain_mut(|x| {
@@ -555,7 +563,9 @@ impl SessionStore {
                 }
                 if let Some(u) = doc.utterances.iter().find(|u| u.id == x.id) {
                     x.text = u.text.clone();
-                    x.speaker = u.speaker;
+                    if !stale {
+                        x.speaker = u.speaker;
+                    }
                 }
                 true
             });
@@ -578,6 +588,19 @@ impl SessionStore {
             return Err(anyhow!("지운 기록이에요"));
         };
         let mut doc = doc;
+        if doc.speaker_rev < old.speaker_rev {
+            // 화자 다시 정리 전에 만든 화면 사본이 늦게 저장됨: 화자 배정 · 이름은 저장된(정리된) 것을 지키고
+            // 제목 · 글자 · 삭제만 반영한다
+            let by_id: HashMap<u64, Option<u32>> = old.utterances.iter().map(|u| (u.id, u.speaker)).collect();
+            for u in doc.utterances.iter_mut() {
+                if let Some(&s) = by_id.get(&u.id) {
+                    u.speaker = s;
+                }
+            }
+            doc.speakers = old.speakers.clone();
+            doc.speaker_map = old.speaker_map.clone();
+            doc.speaker_rev = old.speaker_rev;
+        }
         // 화면 사본은 발화가 도착 순서로 쌓여 있을 수 있다 → 시간 순으로 저장 (MD·TXT·SRT 순서)
         doc.utterances.sort_by(|a, b| a.start_ms.cmp(&b.start_ms).then(a.id.cmp(&b.id)));
         doc.duration_ms = doc.duration_ms.max(old.duration_ms);
@@ -823,6 +846,38 @@ mod tests {
         d.apply_refinement(&labels, &voices, &auto, &known);
         assert_eq!(d.speakers.get(&0).map(String::as_str), Some("밥"));
         assert_eq!(d.speakers.get(&1).map(String::as_str), Some("앨리스"));
+    }
+
+    #[test]
+    fn a_stale_screen_copy_cannot_undo_refinement() {
+        let dir = std::env::temp_dir().join(format!("bd-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-15_140000".into();
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2)];
+        // 화면이 녹음 중에 들고 있던 사본 (정리 전)
+        let mut screen = d.clone();
+        store.begin(d);
+        // 회의가 끝나 다시 정리: 2번은 0번과 같은 사람
+        store.current.as_mut().unwrap().apply_refinement(&[[0, 0, 0], [1, 1, 1], [2, 2, 0]], &[], &BTreeMap::new(), &[]);
+        // 그 순간 사람이 제목 · 글자를 고친 사본이 늦게 저장됨 (녹음 중 경로)
+        screen.title = "고친 제목".into();
+        screen.utterances[1].text = "고친 글자".into();
+        store.save_doc(screen.clone()).unwrap();
+        let cur = store.current.clone().unwrap();
+        assert_eq!(cur.utterances.iter().map(|u| u.speaker).collect::<Vec<_>>(), vec![Some(0), Some(1), Some(0)]);
+        assert_eq!((cur.title.as_str(), cur.utterances[1].text.as_str()), ("고친 제목", "고친 글자"));
+        // 녹음이 끝난 뒤(저장된 기록) 경로도 마찬가지
+        store.flush().unwrap();
+        store.current = None;
+        screen.utterances[0].text = "또 고침".into();
+        store.save_doc(screen).unwrap();
+        let saved = store.load("2026-11-15_140000").unwrap();
+        assert_eq!(saved.utterances.iter().map(|u| u.speaker).collect::<Vec<_>>(), vec![Some(0), Some(1), Some(0)]);
+        assert_eq!(saved.utterances[0].text, "또 고침");
+        assert_eq!(saved.speaker_rev, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
