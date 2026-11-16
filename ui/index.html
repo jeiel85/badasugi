@@ -133,9 +133,10 @@
         <button class="icon-btn sm" id="btn-notes-close" title="노트 닫기 (Ctrl+M)"><svg><use href="#i-x"/></svg></button>
       </div>
       <div class="notes-page memo-page" data-npage="memo" role="tabpanel">
-        <textarea id="memo" spellcheck="false" placeholder="회의를 보면서 자유롭게 적어 두세요.&#10;적는 대로 저장되고, Markdown 회의록에도 함께 남아요.&#10;&#10;⏱ 시각 넣기로 지금 녹음 · 듣는 곳의 시각을 붙일 수 있어요."></textarea>
+        <textarea id="memo" spellcheck="false" placeholder="회의를 보면서 자유롭게 적어 두세요.&#10;적는 대로 저장되고, Markdown 회의록에도 함께 남아요.&#10;&#10;💬 [12:34] 처럼 시각으로 시작하는 줄은 그 시각 문장의 코멘트가 돼요 (빈 줄 전까지).&#10;⏱ 시각 넣기로 지금 녹음 · 듣는 곳의 시각을 붙일 수 있어요."></textarea>
         <div class="memo-foot">
-          <button class="chip-btn" id="btn-memo-time" title="지금 녹음 · 듣고 있는 곳의 시각을 넣어요 (Ctrl+;)"><svg><use href="#i-clock"/></svg>시각 넣기</button>
+          <button class="chip-btn" id="btn-memo-time" title="지금 녹음 · 듣고 있는 곳의 시각을 넣어요 (Ctrl+;) — 시각으로 시작하는 줄은 그 시각 문장의 코멘트가 돼요"><svg><use href="#i-clock"/></svg>시각 넣기</button>
+          <button class="chip-btn" id="btn-memo-goto" hidden title="이 줄이 코멘트로 붙은 문장을 녹취록에서 보기 (줄을 Ctrl+클릭해도 돼요)"><svg><use href="#i-comment"/></svg><span></span></button>
           <span class="memo-state" id="memo-state"></span>
         </div>
       </div>
@@ -196,7 +197,7 @@
     <!-- 문장 코멘트: 바깥을 누르거나 Enter 로 저장, Esc 로 그만두기 -->
     <div class="popover cmt-pop" id="pop-cmt" hidden>
       <div class="cmt-quote" id="cmt-quote"></div>
-      <textarea id="cmt-input" rows="3" spellcheck="false" placeholder="이 문장에 대한 코멘트 (확인할 점 · 생각 · 할 일)"></textarea>
+      <textarea id="cmt-input" rows="3" spellcheck="false" placeholder="이 문장에 대한 코멘트 (확인할 점 · 생각 · 할 일)&#10;메모에도 [시각] 줄로 함께 적혀요"></textarea>
       <div class="cmt-foot">
         <small>Enter 저장 · Shift+Enter 줄바꿈 · Esc 취소</small>
         <button class="link danger" id="cmt-del">지우기</button>

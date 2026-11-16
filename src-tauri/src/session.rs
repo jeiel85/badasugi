@@ -37,10 +37,12 @@ pub struct SessionDoc {
     /// 사람이 요약을 직접 고쳤다 (AI 로 다시 요약하기 전에 물어본다)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub summary_edited: bool,
-    /// 회의를 보면서 적은 메모 (사람만 고친다 — 앱은 손대지 않는다)
+    /// 회의를 보면서 적은 메모 (사람만 고친다). `[시각]` 으로 시작하는 줄은 그 시각 문장에 단 코멘트다
+    /// ([`note_comments`]) — 코멘트는 따로 저장하지 않고 메모 한 곳에만 있다.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub notes: String,
-    /// 문장마다 단 코멘트: 발화 id → 코멘트
+    /// 예전 버전(0.4.9 까지)의 문장 코멘트: 발화 id → 코멘트. 읽을 때 메모의 `[시각]` 줄로 옮기고
+    /// ([`SessionDoc::fold_comments`]) 비우므로 새로 저장하는 파일에는 남지 않는다.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub comments: BTreeMap<u64, String>,
     pub audio_file: Option<String>,
@@ -127,6 +129,105 @@ pub fn fmt_time(ms: u64) -> String {
     } else {
         format!("{:02}:{:02}", s / 60, s % 60)
     }
+}
+
+/// 메모 속 코멘트 하나: `[시각]` 으로 시작하는 줄부터 다음 `[시각]` 줄 · 빈 줄 바로 앞까지.
+/// (`- [12:34] …` 처럼 목록 표시가 앞에 있어도 된다)
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteComment {
+    /// 적힌 시각 (ms)
+    pub ms: u64,
+    /// 메모의 몇째 줄부터 (0부터, `\n` 기준)
+    pub from: usize,
+    /// 몇째 줄 앞까지
+    pub to: usize,
+    /// 시각을 뺀 글 (여러 줄이면 줄바꿈으로 잇는다)
+    pub text: String,
+}
+
+/// 줄이 `[mm:ss]` · `[h:mm:ss]` 로 시작하면 (시각 ms, 시각 뒤의 글)
+fn parse_stamp(line: &str) -> Option<(u64, &str)> {
+    let mut s = line.trim_start();
+    if let Some(r) = s.strip_prefix(['-', '*']) {
+        if r.starts_with(char::is_whitespace) {
+            s = r.trim_start();
+        }
+    }
+    let r = s.strip_prefix('[')?;
+    let end = r.find(']')?;
+    let parts: Vec<&str> = r[..end].split(':').collect();
+    if !(2..=3).contains(&parts.len())
+        || parts.iter().any(|p| p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()))
+        || parts[parts.len() - 1].len() != 2
+    {
+        return None;
+    }
+    let n: Vec<u64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
+    let (h, m, sec) = if n.len() == 3 { (n[0], n[1], n[2]) } else { (0, n[0], n[1]) };
+    if sec >= 60 || (n.len() == 3 && m >= 60) {
+        return None;
+    }
+    let rest = &r[end + 1..];
+    Some(((h * 3600 + m * 60 + sec) * 1000, rest.strip_prefix(' ').unwrap_or(rest)))
+}
+
+/// 메모에서 코멘트(`[시각]` 줄)를 찾는다 — 글이 없는 시각 줄은 코멘트가 아니다
+pub fn note_comments(notes: &str) -> Vec<NoteComment> {
+    let lines: Vec<&str> = notes.split('\n').collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((ms, first)) = parse_stamp(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        let from = i;
+        let mut text = vec![first.trim_end()];
+        i += 1;
+        while i < lines.len() && !lines[i].trim().is_empty() && parse_stamp(lines[i]).is_none() {
+            text.push(lines[i].trim_end());
+            i += 1;
+        }
+        let text = text.join("\n").trim().to_string();
+        if !text.is_empty() {
+            out.push(NoteComment { ms, from, to: i, text });
+        }
+    }
+    out
+}
+
+/// 메모에 `[시각] 글` 코멘트를 시각 순서에 맞는 자리에 넣는다: 시각이 같거나 이른 코멘트 중 메모에서
+/// 마지막 것 바로 뒤, 그런 게 없으면 더 늦은 첫 코멘트 바로 앞, 코멘트가 하나도 없으면 맨 끝.
+/// (빈 줄은 코멘트를 끝내므로 글 속 빈 줄은 뺀다)
+pub fn insert_note_comment(notes: &str, ms: u64, text: &str) -> String {
+    let body: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let Some(first) = body.first() else {
+        return notes.to_string();
+    };
+    let mut add = vec![format!("[{}] {}", fmt_time(ms), first.trim_start())];
+    add.extend(body[1..].iter().map(|s| s.to_string()));
+    let blocks = note_comments(notes);
+    let at = blocks
+        .iter()
+        .filter(|b| b.ms <= ms)
+        .last()
+        .map(|b| b.to)
+        .or_else(|| blocks.iter().find(|b| b.ms > ms).map(|b| b.from));
+    let mut lines: Vec<String> = if notes.is_empty() {
+        Vec::new()
+    } else {
+        notes.split('\n').map(String::from).collect()
+    };
+    let at = at.unwrap_or_else(|| {
+        // 맨 끝에: 끝 줄바꿈(마지막 빈 줄)은 그대로 끝에 둔다
+        if lines.last().is_some_and(|l| l.is_empty()) {
+            lines.len() - 1
+        } else {
+            lines.len()
+        }
+    });
+    lines.splice(at..at, add);
+    lines.join("\n")
 }
 
 impl SessionDoc {
@@ -419,8 +520,74 @@ impl SessionDoc {
         out
     }
 
+    /// 메모의 코멘트와 그 코멘트가 붙는 문장 id — 그 시각에 말하던 문장, 말 사이 빈 곳이면 앞뒤 중 가까운 문장.
+    /// 시각은 초 단위라 `[20:35]` 는 20:35.000 ~ 20:35.999 를 뜻한다 (문장에서 단 코멘트는 그 문장의 시작 초를
+    /// 적으므로 다시 그 문장에 붙는다). 문장이 하나도 없으면 None.
+    pub fn anchored_comments(&self) -> Vec<(NoteComment, Option<u64>)> {
+        let blocks = note_comments(&self.notes);
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+        let mut sorted: Vec<&Utterance> = self.utterances.iter().collect();
+        sorted.sort_by_key(|u| (u.start_ms, u.id));
+        blocks
+            .into_iter()
+            .map(|b| {
+                let i = sorted.partition_point(|u| u.start_ms < b.ms + 1000);
+                let prev = i.checked_sub(1).map(|k| sorted[k]);
+                let at = match (prev, sorted.get(i)) {
+                    (None, next) => next.map(|u| u.id),
+                    (Some(p), None) => Some(p.id),
+                    (Some(p), Some(n)) => Some(if p.end_ms >= b.ms || b.ms - p.end_ms <= n.start_ms - b.ms {
+                        p.id
+                    } else {
+                        n.id
+                    }),
+                };
+                (b, at)
+            })
+            .collect()
+    }
+
+    /// 예전 버전의 문장 코멘트(발화 id → 글)를 메모의 `[문장 시각] 글` 줄로 옮긴다 (시각 순서에 맞는 자리로).
+    /// 이미 지운 문장의 코멘트 · 빈 코멘트는 버린다.
+    pub fn fold_comments(&mut self) {
+        if self.comments.is_empty() {
+            return;
+        }
+        let starts: HashMap<u64, u64> = self.utterances.iter().map(|u| (u.id, u.start_ms)).collect();
+        let mut items: Vec<(u64, u64, String)> = std::mem::take(&mut self.comments)
+            .into_iter()
+            .filter(|(_, c)| !c.trim().is_empty())
+            .filter_map(|(id, c)| Some((*starts.get(&id)?, id, c)))
+            .collect();
+        items.sort();
+        for (ms, _, c) in items {
+            self.notes = insert_note_comment(&self.notes, ms, &c);
+        }
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut s = format!("# {}\n\n", self.title);
+        // 문장에 붙는 코멘트는 녹취록 그 문단 아래에만 — 메모 칸에는 나머지 줄만 (같은 글이 두 번 나오지 않게)
+        let comments = self.anchored_comments();
+        let mut by_id: HashMap<u64, Vec<&NoteComment>> = HashMap::new();
+        let mut taken = vec![false; self.notes.split('\n').count()];
+        for (c, at) in &comments {
+            if let Some(id) = at {
+                by_id.entry(*id).or_default().push(c);
+                taken[c.from..c.to].iter_mut().for_each(|t| *t = true);
+            }
+        }
+        let mut memo: Vec<&str> = Vec::new();
+        for (line, _) in self.notes.split('\n').zip(&taken).filter(|(_, t)| !**t) {
+            let line = line.trim_end();
+            if line.is_empty() && memo.last().is_none_or(|l| l.is_empty()) {
+                continue;
+            }
+            memo.push(line);
+        }
+        let memo = memo.join("\n");
         s.push_str(&format!(
             "- 일시: {}\n- 길이: {}\n- 참석(화자): {}\n- 엔진: {}\n\n",
             self.started_at,
@@ -433,27 +600,24 @@ impl SessionDoc {
             s.push_str(sum.trim());
             s.push_str("\n\n");
         }
-        if !self.notes.trim().is_empty() {
+        if !memo.trim().is_empty() {
             s.push_str("## 메모\n\n");
-            s.push_str(self.notes.trim());
+            s.push_str(memo.trim());
             s.push_str("\n\n");
         }
         s.push_str("## 녹취록\n\n");
-        let starts: HashMap<u64, u64> = if self.comments.is_empty() {
-            HashMap::new()
-        } else {
-            self.utterances.iter().map(|u| (u.id, u.start_ms)).collect()
-        };
         for (spk, start, _, text, ids) in self.paragraphs() {
             s.push_str(&format!("**{}** `{}`  \n{}\n\n", self.speaker_name(spk), fmt_time(start), text));
-            // 문단 안 문장에 단 코멘트는 문단 바로 아래 인용으로 (어느 문장인지 시각을 붙여)
+            // 문단 안 문장에 붙는 코멘트는 문단 바로 아래 인용으로 (메모에 적힌 시각을 붙여, 문장 순서 · 시각 순으로)
             for id in ids {
-                let Some(c) = self.comments.get(&id).map(|c| c.trim()).filter(|c| !c.is_empty()) else {
+                let Some(list) = by_id.get_mut(&id) else {
                     continue;
                 };
-                let at = starts.get(&id).copied().unwrap_or(start);
-                let body = c.lines().collect::<Vec<_>>().join("  \n> ");
-                s.push_str(&format!("> 💬 `{}` {}\n\n", fmt_time(at), body));
+                list.sort_by_key(|c| (c.ms, c.from));
+                for c in list.iter() {
+                    let body = c.text.lines().collect::<Vec<_>>().join("  \n> ");
+                    s.push_str(&format!("> 💬 `{}` {}\n\n", fmt_time(c.ms), body));
+                }
             }
         }
         s
@@ -633,11 +797,14 @@ impl SessionStore {
             return Ok(cur.clone());
         }
         let s = std::fs::read_to_string(self.json_path(safe_id(id)?))?;
-        Ok(serde_json::from_str(&s)?)
+        let mut doc: SessionDoc = serde_json::from_str(&s)?;
+        doc.fold_comments(); // 예전 버전의 문장 코멘트 → 메모의 [시각] 줄
+        Ok(doc)
     }
 
-    pub fn save_doc(&mut self, doc: SessionDoc) -> Result<()> {
+    pub fn save_doc(&mut self, mut doc: SessionDoc) -> Result<()> {
         safe_id(&doc.id)?;
+        doc.fold_comments();
         if let Some(cur) = self.current.as_mut().filter(|c| c.id == doc.id) {
             // 녹음 중인 기록: 화면에서 고친 것만 반영하고, 그 사이 새로 들어온 발화는 지킨다
             // 화자 다시 정리 전에 만든 사본이면 화자 배정 · 이름은 정리된 것을 지킨다
@@ -650,9 +817,8 @@ impl SessionStore {
             }
             cur.summary = doc.summary.clone();
             cur.summary_edited = doc.summary_edited;
-            // 메모 · 코멘트는 화면에서만 고친다 → 화면 것을 그대로
+            // 메모(코멘트 포함)는 화면에서만 고친다 → 화면 것을 그대로
             cur.notes = doc.notes.clone();
-            cur.comments = doc.comments.clone();
             // 화면이 지웠다고 알린 발화만 지우고, 그 사이 새로 들어온 발화는 지킨다
             // (긴 회의에서 편집할 때마다 문장 수의 제곱만큼 찾지 않게 id 로 한 번에)
             let deleted: std::collections::HashSet<u64> = doc.deleted.iter().copied().collect();
@@ -669,11 +835,7 @@ impl SessionStore {
                 }
                 true
             });
-            // 지운 문장에 달려 있던 코멘트는 함께 지운다
-            if !cur.comments.is_empty() {
-                let ids: std::collections::HashSet<u64> = cur.utterances.iter().map(|u| u.id).collect();
-                cur.comments.retain(|id, c| ids.contains(id) && !c.trim().is_empty());
-            }
+            // (지운 문장에 붙어 있던 코멘트는 메모의 시각 그대로라 가장 가까운 문장으로 옮겨 붙는다)
             let map = cur.speaker_map.clone();
             if !map.is_empty() {
                 let resolved: Vec<Option<u32>> = cur.utterances.iter().map(|u| cur.resolve(u.speaker)).collect();
@@ -709,10 +871,6 @@ impl SessionStore {
         }
         // 화면 사본은 발화가 도착 순서로 쌓여 있을 수 있다 → 시간 순으로 저장 (MD·TXT·SRT 순서)
         doc.utterances.sort_by(|a, b| a.start_ms.cmp(&b.start_ms).then(a.id.cmp(&b.id)));
-        if !doc.comments.is_empty() {
-            let ids: std::collections::HashSet<u64> = doc.utterances.iter().map(|u| u.id).collect();
-            doc.comments.retain(|id, c| ids.contains(id) && !c.trim().is_empty());
-        }
         doc.duration_ms = doc.duration_ms.max(old.duration_ms);
         write_doc(&self.dir, &doc)
     }
@@ -1139,42 +1297,119 @@ mod tests {
         d.utterances = vec![u(0, 0, 0), u(1, 5000, 1)];
         let mut screen = d.clone();
         store.begin(d);
-        // 녹음 중: 화면에서 메모 · 코멘트 · 요약을 고침 (그 사이 새 문장이 들어옴)
+        // 녹음 중: 화면에서 메모(시각 줄 = 코멘트) · 요약을 고침 (그 사이 새 문장이 들어옴)
         store.current.as_mut().unwrap().upsert(u(2, 10000, 0));
-        screen.notes = "결제 일정 다시 확인".into();
-        screen.comments.insert(1, "숫자 확인 필요".into());
+        screen.notes = "결제 일정 다시 확인\n[00:05] 숫자 확인 필요".into();
         screen.summary = Some("직접 쓴 요약".into());
         screen.summary_edited = true;
         store.save_doc(screen.clone()).unwrap();
         let cur = store.current.clone().unwrap();
         assert_eq!(cur.utterances.len(), 3);
-        assert_eq!(cur.notes, "결제 일정 다시 확인");
-        assert_eq!(cur.comments.get(&1).map(String::as_str), Some("숫자 확인 필요"));
+        assert_eq!(cur.notes, "결제 일정 다시 확인\n[00:05] 숫자 확인 필요");
+        assert_eq!(cur.anchored_comments()[0].1, Some(1));
         assert!(cur.summary_edited);
-        // 문장을 지우면 그 문장의 코멘트도 함께 사라진다
+        // 문장을 지워도 코멘트는 메모에 남아 가장 가까운 문장으로 옮겨 붙는다 (00:05 → 00:00~00:04 문장)
         screen.utterances.retain(|x| x.id != 1);
         screen.deleted = vec![1];
         store.save_doc(screen.clone()).unwrap();
-        assert!(store.current.as_ref().unwrap().comments.is_empty());
+        let cur = store.current.clone().unwrap();
+        assert_eq!(cur.anchored_comments()[0].1, Some(0));
         // 녹음이 끝난 뒤(저장된 기록)에도
         store.flush().unwrap();
         store.current = None;
         screen.deleted.clear();
-        screen.comments.insert(0, "첫 문장\n두 줄".into());
-        // 빈 코멘트는 남기지 않는다
-        screen.comments.insert(2, "  ".into());
+        screen.notes.push_str("\n\n[00:00] 첫 문장\n두 줄\n\n- 다음 회의 때 확인");
         store.save_doc(screen).unwrap();
         let saved = store.load("2026-11-16_100000").unwrap();
-        assert_eq!(saved.notes, "결제 일정 다시 확인");
-        assert_eq!(saved.comments.len(), 1);
+        assert!(saved.comments.is_empty());
         let md = saved.to_markdown();
-        assert!(md.contains("## 메모\n\n결제 일정 다시 확인"));
-        assert!(md.contains("> 💬 `00:00` 첫 문장  \n> 두 줄"));
+        // 메모 칸에는 시각 없는 줄만, 시각 줄은 녹취록 그 문단 아래에만
+        assert!(md.contains("## 메모\n\n결제 일정 다시 확인\n\n- 다음 회의 때 확인\n\n## 녹취록"));
+        assert!(md.contains("> 💬 `00:00` 첫 문장  \n> 두 줄\n\n> 💬 `00:05` 숫자 확인 필요"));
+        assert_eq!(md.matches("숫자 확인 필요").count(), 1);
         // 요약에 보내는 녹취록에는 메모 · 코멘트가 섞이지 않는다
         assert!(!saved.to_text().contains("첫 문장"));
         // 메모 · 코멘트로도 찾는다
         assert_eq!(store.search("두 줄").len(), 1);
         assert_eq!(store.search("결제 일정").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memo_lines_with_a_time_are_comments() {
+        assert_eq!(parse_stamp("[20:35] 인수인계"), Some((1_235_000, "인수인계")));
+        assert_eq!(parse_stamp("  - [1:02:03]  둘"), Some((3_723_000, " 둘")));
+        assert_eq!(parse_stamp("* [75:00]"), Some((4_500_000, "")));
+        for no in ["- [ ] 할 일", "[20:5] 짧음", "[20:61] 초 넘침", "[1:60:00] 분 넘침", "글 [20:35]", "-[20:35] 붙음", "[ab:cd]"] {
+            assert_eq!(parse_stamp(no), None, "{no}");
+        }
+        let notes = "회의 전체 메모\n[00:07] 결제 모듈\n- 금요일 공유\n[00:35] 인덱스\n\n- 피드백 양식\n[00:40]\n\n[00:50]\n이어서 적음";
+        let c = note_comments(notes);
+        let got: Vec<(u64, usize, usize, &str)> = c.iter().map(|c| (c.ms, c.from, c.to, c.text.as_str())).collect();
+        // 빈 줄 · 다음 시각 줄에서 끝나고, 글이 없는 시각 줄([00:40])은 코멘트가 아니다
+        assert_eq!(
+            got,
+            vec![
+                (7000, 1, 3, "결제 모듈\n- 금요일 공유"),
+                (35000, 3, 4, "인덱스"),
+                (50000, 8, 10, "이어서 적음")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_memo_comment_sticks_to_the_sentence_spoken_at_that_time() {
+        let mut d = SessionDoc::new("로컬".into());
+        // 0: 0~4초 · 1: 5.4~9.4초 · 2: 30~34초
+        d.utterances = vec![u(0, 0, 0), u(1, 5400, 1), u(2, 30000, 0)];
+        d.notes = "[00:05] 문장에서 단 코멘트(시작 초)\n[00:08] 말하는 중\n[00:12] 빈 곳 · 앞이 가까움\n[00:25] 빈 곳 · 뒤가 가까움\n[01:00] 끝 뒤".into();
+        let at: Vec<Option<u64>> = d.anchored_comments().into_iter().map(|x| x.1).collect();
+        assert_eq!(at, vec![Some(1), Some(1), Some(1), Some(2), Some(2)]);
+        // 문장이 아직 없으면(녹음 직후) 붙을 곳이 없다
+        d.utterances.clear();
+        assert_eq!(d.anchored_comments()[0].1, None);
+    }
+
+    #[test]
+    fn a_new_comment_goes_into_the_memo_in_time_order() {
+        // 메모가 비었으면 그대로 · 끝 줄바꿈은 끝에 둔다
+        assert_eq!(insert_note_comment("", 7000, "결제"), "[00:07] 결제");
+        assert_eq!(insert_note_comment("자유 메모\n", 7000, "결제"), "자유 메모\n[00:07] 결제\n");
+        let notes = "자유 메모\n[00:10] 둘째\n이어짐\n\n[00:30] 넷째\n- 목록";
+        // 같거나 이른 코멘트 중 마지막 것 뒤 (그 코멘트의 이어진 줄 뒤)
+        assert_eq!(
+            insert_note_comment(notes, 20_000, "셋째\n\n여러 줄"),
+            "자유 메모\n[00:10] 둘째\n이어짐\n[00:20] 셋째\n여러 줄\n\n[00:30] 넷째\n- 목록"
+        );
+        // 가장 이르면 첫 코멘트 바로 앞 · 가장 늦으면 마지막 코멘트 뒤
+        assert_eq!(insert_note_comment(notes, 1000, "첫째"), "자유 메모\n[00:01] 첫째\n[00:10] 둘째\n이어짐\n\n[00:30] 넷째\n- 목록");
+        assert_eq!(insert_note_comment(notes, 40_000, "다섯째"), format!("{notes}\n[00:40] 다섯째"));
+        // 넣은 코멘트는 다시 읽어도 같은 글
+        let back = note_comments(&insert_note_comment(notes, 20_000, "셋째\n여러 줄"));
+        assert_eq!(back[1].text, "셋째\n여러 줄");
+        // 빈 글은 넣지 않는다
+        assert_eq!(insert_note_comment(notes, 20_000, " \n "), notes);
+    }
+
+    #[test]
+    fn old_sentence_comments_move_into_the_memo() {
+        let old = r#"{"version":1,"id":"2026-11-01_090000","title":"t","notes":"[00:07] 메모에 적은 것\n\n- 자유 메모",
+            "utterances":[{"id":0,"startMs":1000,"endMs":5000,"speaker":0,"text":"a"},{"id":1,"startMs":65000,"endMs":70000,"speaker":1,"text":"b"}],
+            "comments":{"1":"늦은 코멘트","0":"이른 코멘트","9":"지운 문장","2":"  "}}"#;
+        let dir = std::env::temp_dir().join(format!("bd-fold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026-11-01_090000.json"), old).unwrap();
+        let mut store = SessionStore::new(dir.clone());
+        let d = store.load("2026-11-01_090000").unwrap();
+        assert!(d.comments.is_empty());
+        assert_eq!(d.notes, "[00:01] 이른 코멘트\n[00:07] 메모에 적은 것\n[01:05] 늦은 코멘트\n\n- 자유 메모");
+        let at: Vec<Option<u64>> = d.anchored_comments().into_iter().map(|x| x.1).collect();
+        assert_eq!(at, vec![Some(0), Some(0), Some(1)]);
+        // 저장하면 파일에서도 코멘트 칸이 사라진다
+        store.save_doc(d).unwrap();
+        let json = std::fs::read_to_string(dir.join("2026-11-01_090000.json")).unwrap();
+        assert!(!json.contains("\"comments\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
