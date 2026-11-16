@@ -269,10 +269,20 @@ pub fn reapply_taskbar(app: &AppHandle) {
 pub fn spawn_ticker(app: AppHandle) {
     let _ = std::thread::Builder::new().name("bd-status".into()).spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
-        let recording = app
-            .try_state::<AppState>()
-            .is_some_and(|st| *st.rec.lock() == RecState::Recording);
-        if recording {
+        let Some(st) = app.try_state::<AppState>() else {
+            continue;
+        };
+        let rec = *st.rec.lock();
+        if rec != RecState::Idle {
+            // 자동 저장은 새 문장이 들어올 때만 돌아서, 말이 끊긴 조용한 구간(휴식 등)에는 마지막 문장이
+            // 다음 문장이 올 때까지 디스크에 안 남을 수 있다 → 여기서도 간격이 지났으면 저장한다 (바쁘면 다음 초에)
+            if let Some(mut store) = st.store.try_lock() {
+                if let Err(e) = store.autosave() {
+                    log::debug!("자동 저장 다시 시도 예정: {e}");
+                }
+            }
+        }
+        if rec == RecState::Recording {
             refresh(&app);
         }
     });

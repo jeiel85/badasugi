@@ -97,8 +97,12 @@ pub enum Event {
     },
     #[serde(rename_all = "camelCase")]
     Discarded { id: u64 },
+    /// 인식 실패. `retry` 면 들고 있다가 녹음이 끝나면 한 번 더 받아 적는다 (그때 `Transcript` 나 다시 `Failed` 가 온다)
     #[serde(rename_all = "camelCase")]
-    Failed { id: u64, message: String },
+    Failed { id: u64, message: String, retry: bool },
+    /// API 로 실제로 보낸 인식 요청 (사용량 집계용 — 화면에는 보내지 않아도 된다)
+    #[serde(rename_all = "camelCase")]
+    ApiUsage { audio_ms: u64, ok: bool },
     #[serde(rename_all = "camelCase")]
     Status { message: String },
     /// 사용자가 꼭 봐야 하는 문제 (마이크 무음 · 장치 끊김/재연결)
@@ -224,7 +228,7 @@ impl Pipeline {
             sink(Event::Status { message });
         }
         let merges = SpeakerMerges::default();
-        let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, merges.clone());
+        let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, merges.clone(), None);
         let flags = Arc::new(Flags::default());
         let dsp = {
             let sink = sink.clone();
@@ -270,10 +274,17 @@ impl Pipeline {
         }
         let inflight = Arc::new(Inflight::default());
         let merges = SpeakerMerges::default();
-        let backend = spawn_backend(&cfg, diarizer, sink.clone(), Some(inflight.clone()), merges.clone());
+        let flags = Arc::new(Flags::default());
+        let backend = spawn_backend(
+            &cfg,
+            diarizer,
+            sink.clone(),
+            Some(inflight.clone()),
+            merges.clone(),
+            Some(flags.clone()),
+        );
         // 인식이 밀린 만큼만 앞서 디코딩한다 (결과가 차례로 나오고 메모리도 일정)
         let max_backlog = 2 * cfg.engine.concurrency();
-        let flags = Arc::new(Flags::default());
         let worker = {
             let sink = sink.clone();
             let flags = flags.clone();
@@ -393,23 +404,33 @@ fn spawn_backend(
     sink: EventSink,
     inflight: Option<Arc<Inflight>>,
     merges: SpeakerMerges,
+    file_flags: Option<Arc<Flags>>,
 ) -> Backend {
     let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<SpeechSegment>();
     let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
 
+    let ctx = Arc::new(WorkerCtx {
+        lang: cfg.language.clone(),
+        prompt: cfg.prompt.clone(),
+        sink: sink.clone(),
+        inflight: inflight.clone(),
+        recorded: cfg.record_path.is_some(),
+        file_flags,
+        waiting_noted: Default::default(),
+        retry_noted: AtomicBool::new(false),
+        gave_up: AtomicBool::new(false),
+        offline: AtomicBool::new(false),
+    });
     let n = cfg.engine.concurrency();
     let mut workers = Vec::with_capacity(n);
     for i in 0..n {
         let rx = job_rx.clone();
-        let sink = sink.clone();
         let engine = cfg.engine.clone();
-        let lang = cfg.language.clone();
-        let prompt = cfg.prompt.clone();
-        let inflight = inflight.clone();
+        let ctx = ctx.clone();
         workers.push(
             std::thread::Builder::new()
                 .name(format!("bd-asr-{i}"))
-                .spawn(move || asr_worker(i, rx, engine, lang, prompt, sink, inflight))
+                .spawn(move || asr_worker(i, rx, engine, ctx))
                 .expect("spawn asr worker"),
         );
     }
@@ -504,26 +525,66 @@ impl Drop for InflightDone<'_> {
     }
 }
 
-fn asr_worker(
-    idx: usize,
-    rx: Receiver<Job>,
-    engine_cfg: EngineConfig,
+/// ASR 워커들이 함께 보는 설정 · 상태
+struct WorkerCtx {
     lang: String,
     prompt: String,
     sink: EventSink,
     inflight: Option<Arc<Inflight>>,
-) {
+    /// 실시간 녹음이 파일로도 남는지 (실패 안내 문구용)
+    recorded: bool,
+    /// 파일 모드: 연결 문제면 건너뛰지 않고 기다렸다가 다시 보내고, 오래 안 되면 받아쓰기를 멈춘다
+    file_flags: Option<Arc<Flags>>,
+    /// 마지막으로 "다시 보낼게요" 를 알린 때 (워커 여럿이 같은 안내를 겹쳐 띄우지 않게)
+    waiting_noted: parking_lot::Mutex<Option<Instant>>,
+    /// "받아 적지 못한 발화를 다시…" 를 알렸는지
+    retry_noted: AtomicBool,
+    /// 파일 모드에서 연결이 계속 안 돼 멈췄는지 — 남은 발화는 기다리지 않고 바로 실패
+    gave_up: AtomicBool,
+    /// 파일 모드에서 마지막 요청이 연결 문제로 실패했는지 — 그 상태로 멈추면 남은 발화를 하나씩 기다리지 않는다
+    offline: AtomicBool,
+}
+
+impl WorkerCtx {
+    fn emit(&self, e: Event) {
+        (self.sink)(e)
+    }
+
+    fn fail(&self, id: u64, message: String, retry: bool) {
+        self.emit(Event::Failed { id, message, retry });
+    }
+
+    /// 다시 받아 적지 못하고 버릴 때 덧붙이는 말
+    fn kept_note(&self) -> &'static str {
+        if self.recorded {
+            " (녹음 파일에는 남아요)"
+        } else {
+            ""
+        }
+    }
+
+    fn should_note_waiting(&self) -> bool {
+        let mut last = self.waiting_noted.lock();
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return false;
+        }
+        *last = Some(Instant::now());
+        true
+    }
+}
+
+fn asr_worker(idx: usize, rx: Receiver<Job>, engine_cfg: EngineConfig, ctx: Arc<WorkerCtx>) {
     let is_local = matches!(engine_cfg, EngineConfig::Local { .. });
     if is_local && idx == 0 {
-        sink(Event::Status {
+        ctx.emit(Event::Status {
             message: "음성 인식 모델을 불러오는 중…".into(),
         });
     }
     let t = Instant::now();
-    let mut engine = match asr::create(&engine_cfg) {
+    let engine = match asr::create(&engine_cfg) {
         Ok(e) => {
             if is_local && idx == 0 {
-                sink(Event::Status {
+                ctx.emit(Event::Status {
                     message: format!("모델 준비 완료 ({:.1}초)", t.elapsed().as_secs_f32()),
                 });
             }
@@ -531,72 +592,218 @@ fn asr_worker(
         }
         Err(e) => {
             if idx == 0 {
-                sink(Event::Error {
+                ctx.emit(Event::Error {
                     message: format!("음성 인식 엔진을 시작하지 못했습니다: {e}"),
                 });
             }
             None
         }
     };
-    // API 가 연달아 실패하면(인터넷 끊김·키 오류) 20초 동안은 부르지 않고 바로 실패 처리한다.
-    // 한 번에 30초 넘게 걸리는 재시도가 쌓여 정지·종료가 몇 시간씩 걸리지 않게. (녹음 파일은 남는다)
+    run_worker(rx, engine, !is_local, &ctx);
+}
+
+/// 실시간 녹음에서 연결 문제로 받아 적지 못한 발화를 녹음이 끝날 때까지 들고 있는 양 (워커마다, 16 kHz 샘플) — 5분
+const LATER_MAX_SAMPLES: usize = 5 * 60 * SAMPLE_RATE as usize;
+
+/// 녹음이 끝나면 다시 받아 적을 발화
+#[derive(Default)]
+struct Later {
+    jobs: Vec<Job>,
+    samples: usize,
+}
+
+impl Later {
+    /// 넣을 자리가 없으면 돌려준다
+    fn keep(&mut self, job: Job) -> std::result::Result<(), Job> {
+        let n = job.seg.samples.len();
+        if self.samples + n > LATER_MAX_SAMPLES {
+            return Err(job);
+        }
+        self.samples += n;
+        self.jobs.push(job);
+        Ok(())
+    }
+}
+
+fn run_worker(rx: Receiver<Job>, mut engine: Option<Box<dyn asr::Transcriber>>, is_api: bool, ctx: &WorkerCtx) {
+    // API 가 연달아 실패하면(인터넷 끊김 등) 20초 동안은 부르지 않는다 — 한 번에 수십 초 걸리는 재시도가 쌓여
+    // 정지·종료가 몇 시간씩 걸리지 않게. 그동안 들어온 발화는 들고 있다가 녹음이 끝나면 다시 받아 적는다.
     let mut fails = 0u32;
     let mut skip_until: Option<Instant> = None;
+    let mut later = Later::default();
+    let defer = |later: &mut Later, job: Job, reason: String| {
+        let id = job.id;
+        match later.keep(job) {
+            Ok(()) => ctx.fail(id, format!("{reason} — 녹음을 멈추면 다시 받아 적어요"), true),
+            Err(_) => ctx.fail(id, format!("{reason}{}", ctx.kept_note()), false),
+        }
+    };
     for job in rx {
         // 결과가 어떻든 이 조각 처리가 끝나면 진행률에 반영
-        let _done = inflight.as_deref().map(|t| InflightDone(t, job.origin));
-        if skip_until.is_some_and(|t| Instant::now() < t) {
-            sink(Event::Failed {
-                id: job.id,
-                message: "연결 문제로 잠시 건너뜀 (녹음 파일에는 남아요)".into(),
-            });
-            continue;
-        }
-        let Some(engine) = engine.as_mut() else {
-            sink(Event::Failed {
-                id: job.id,
-                message: "엔진 초기화 실패".into(),
-            });
+        let _done = ctx.inflight.as_deref().map(|t| InflightDone(t, job.origin));
+        let Some(engine) = engine.as_deref_mut() else {
+            ctx.fail(job.id, "엔진 초기화 실패".into(), false);
             continue;
         };
-        let t0 = Instant::now();
-        let req = AsrRequest {
-            samples: &job.seg.samples,
-            language: &lang,
-            prompt: &prompt,
-        };
-        let result = engine.transcribe(&req);
-        if result.is_ok() {
-            fails = 0;
-            skip_until = None;
-        } else if !is_local {
-            fails += 1;
-            if fails >= 3 {
-                skip_until = Some(Instant::now() + Duration::from_secs(20));
-            }
-        }
-        match result {
-            Ok(raw) => {
-                let text = crate::text::clean(&raw);
-                if text.is_empty() {
-                    sink(Event::Discarded { id: job.id });
-                } else {
-                    sink(Event::Transcript {
-                        id: job.id,
-                        start_ms: samples_to_ms(job.seg.start),
-                        end_ms: samples_to_ms(job.seg.end),
-                        speaker: job.speaker,
-                        text,
-                        latency_ms: job.queued.elapsed().as_millis() as u64,
-                        asr_ms: t0.elapsed().as_millis() as u64,
-                    });
+        if let Some(flags) = &ctx.file_flags {
+            if is_api {
+                transcribe_patiently(engine, &job, flags, ctx);
+            } else {
+                let t0 = Instant::now();
+                match recognize(engine, &job, ctx, false) {
+                    Ok(raw) => emit_text(ctx, &job, raw, t0),
+                    Err(e) => ctx.fail(job.id, e.to_string(), false),
                 }
             }
-            Err(e) => sink(Event::Failed {
-                id: job.id,
-                message: e.to_string(),
-            }),
+            continue;
         }
+        if skip_until.is_some_and(|t| Instant::now() < t) {
+            defer(&mut later, job, "연결 문제로 잠시 미뤄 둠".into());
+            continue;
+        }
+        let t0 = Instant::now();
+        match recognize(engine, &job, ctx, is_api) {
+            Ok(raw) => {
+                fails = 0;
+                skip_until = None;
+                emit_text(ctx, &job, raw, t0);
+            }
+            // 연결 문제 · 요청 한도 · 서비스 장애: 들고 있다가 녹음이 끝나면 다시
+            Err(e) if is_api && asr::retryable(&e) => {
+                fails += 1;
+                if fails >= 3 {
+                    skip_until = Some(Instant::now() + Duration::from_secs(20));
+                }
+                defer(&mut later, job, e.to_string());
+            }
+            Err(e) => ctx.fail(job.id, e.to_string(), false),
+        }
+    }
+    if let Some(engine) = engine.as_deref_mut() {
+        retry_later(later, engine, ctx);
+    }
+}
+
+/// 녹음을 멈춘 뒤: 미뤄 둔 발화를 한 번 더 받아 적는다. 그래도 안 되면 나머지는 바로 실패로 (정지가 길어지지 않게)
+fn retry_later(later: Later, engine: &mut dyn asr::Transcriber, ctx: &WorkerCtx) {
+    if later.jobs.is_empty() {
+        return;
+    }
+    if !ctx.retry_noted.swap(true, Ordering::SeqCst) {
+        ctx.emit(Event::Status {
+            message: "받아 적지 못한 발화를 다시 받아 적는 중…".into(),
+        });
+    }
+    let mut gave_up: Option<String> = None;
+    for job in later.jobs {
+        if let Some(m) = &gave_up {
+            ctx.fail(job.id, m.clone(), false);
+            continue;
+        }
+        let t0 = Instant::now();
+        match recognize(engine, &job, ctx, true) {
+            Ok(raw) => emit_text(ctx, &job, raw, t0),
+            Err(e) => {
+                let m = format!("{e}{}", ctx.kept_note());
+                ctx.fail(job.id, m.clone(), false);
+                gave_up = Some(m);
+            }
+        }
+    }
+}
+
+/// 파일 모드에서 기다리는 단위 — 5초, 10초, 20초, 30초, 30초… 쉬었다 다시 보내고, 3분 넘게 안 되면 멈춘다
+#[cfg(not(test))]
+const FILE_WAIT_UNIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const FILE_WAIT_UNIT: Duration = Duration::from_millis(5);
+
+/// 파일 모드: 연결 문제면 건너뛰지 않고 기다렸다가 같은 발화를 다시 보낸다 (그동안 공급도 함께 쉰다).
+/// 오래 안 되면 파일 받아쓰기를 멈춘다 — 받아 적은 데까지는 기록에 남는다.
+fn transcribe_patiently(engine: &mut dyn asr::Transcriber, job: &Job, flags: &Flags, ctx: &WorkerCtx) {
+    let started = Instant::now();
+    let mut attempt = 0usize;
+    loop {
+        let offline_stop = flags.stop.load(Ordering::SeqCst) && ctx.offline.load(Ordering::SeqCst);
+        if ctx.gave_up.load(Ordering::SeqCst) || offline_stop {
+            ctx.fail(job.id, "연결 문제로 받아쓰기를 멈춤".into(), false);
+            return;
+        }
+        let t0 = Instant::now();
+        let e = match recognize(engine, job, ctx, true) {
+            Ok(raw) => {
+                ctx.offline.store(false, Ordering::SeqCst);
+                return emit_text(ctx, job, raw, t0);
+            }
+            Err(e) => e,
+        };
+        if asr::retryable(&e) {
+            ctx.offline.store(true, Ordering::SeqCst);
+        }
+        if !asr::retryable(&e) || flags.stop.load(Ordering::SeqCst) {
+            return ctx.fail(job.id, e.to_string(), false);
+        }
+        if started.elapsed() >= FILE_WAIT_UNIT * 36 {
+            if !ctx.gave_up.swap(true, Ordering::SeqCst) {
+                flags.stop.store(true, Ordering::SeqCst);
+                ctx.emit(Event::Error {
+                    message: format!(
+                        "연결이 계속 안 돼 파일 받아쓰기를 멈췄어요. 받아 적은 데까지는 기록에 남아요. ({e})"
+                    ),
+                });
+            }
+            return ctx.fail(job.id, e.to_string(), false);
+        }
+        let wait = FILE_WAIT_UNIT * [1, 2, 4, 6][attempt.min(3)];
+        // 요청 한도에 걸렸으면 공급자가 알려 준 만큼 (1분까지)
+        let wait = e
+            .downcast_ref::<asr::openai::ApiError>()
+            .and_then(asr::openai::ApiError::retry_after)
+            .map_or(wait, |d| d.clamp(wait, FILE_WAIT_UNIT * 12));
+        if ctx.should_note_waiting() {
+            ctx.emit(Event::Warning {
+                message: format!("{e} — {}초 뒤 다시 보내요", wait.as_secs().max(1)),
+            });
+        }
+        // 기다리는 동안 멈추면 바로 그만둔다
+        let until = Instant::now() + wait;
+        while Instant::now() < until && !flags.stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(50).min(wait));
+        }
+        attempt += 1;
+    }
+}
+
+/// 한 번 인식한다. API 면 실제로 보낸 요청을 사용량으로 알린다.
+fn recognize(engine: &mut dyn asr::Transcriber, job: &Job, ctx: &WorkerCtx, is_api: bool) -> Result<String> {
+    let r = engine.transcribe(&AsrRequest {
+        samples: &job.seg.samples,
+        language: &ctx.lang,
+        prompt: &ctx.prompt,
+    });
+    if is_api {
+        ctx.emit(Event::ApiUsage {
+            audio_ms: samples_to_ms(job.seg.samples.len() as u64),
+            ok: r.is_ok(),
+        });
+    }
+    r
+}
+
+fn emit_text(ctx: &WorkerCtx, job: &Job, raw: String, t0: Instant) {
+    let text = crate::text::clean(&raw);
+    if text.is_empty() {
+        ctx.emit(Event::Discarded { id: job.id });
+    } else {
+        ctx.emit(Event::Transcript {
+            id: job.id,
+            start_ms: samples_to_ms(job.seg.start),
+            end_ms: samples_to_ms(job.seg.end),
+            speaker: job.speaker,
+            text,
+            latency_ms: job.queued.elapsed().as_millis() as u64,
+            asr_ms: t0.elapsed().as_millis() as u64,
+        });
     }
 }
 
@@ -996,6 +1203,137 @@ mod tests {
         assert_eq!(p, r#"{"type":"progress","doneMs":1500,"totalMs":60000}"#);
         let w = serde_json::to_string(&Event::Warning { message: "경고".into() }).unwrap();
         assert_eq!(w, r#"{"type":"warning","message":"경고"}"#);
+    }
+
+    /// 정해 둔 순서대로 실패하다가 그다음부터는 성공하는 가짜 엔진
+    struct Scripted(std::collections::VecDeque<anyhow::Error>, Arc<parking_lot::Mutex<u32>>);
+
+    impl asr::Transcriber for Scripted {
+        fn transcribe(&mut self, _req: &AsrRequest) -> Result<String> {
+            *self.1.lock() += 1;
+            match self.0.pop_front() {
+                Some(e) => Err(e),
+                None => Ok("결제 모듈은 금요일까지 배포할게요".into()),
+            }
+        }
+    }
+
+    fn net() -> anyhow::Error {
+        asr::openai::ApiError::Network("서버에 연결할 수 없어요".into()).into()
+    }
+
+    fn status(code: u16) -> anyhow::Error {
+        asr::openai::ApiError::Status { status: code, retry_after: None, message: "x".into() }.into()
+    }
+
+    fn job(id: u64) -> Job {
+        Job {
+            id,
+            seg: SpeechSegment { start: id * 32_000, end: id * 32_000 + 16_000, samples: vec![0.0; 16_000], probs: vec![] },
+            speaker: Some(0),
+            queued: Instant::now(),
+            origin: id * 32_000,
+        }
+    }
+
+    /// 일을 차례로 넣고 입력을 닫은 뒤 워커를 끝까지 돌려 이벤트를 모은다
+    fn run(errors: Vec<anyhow::Error>, jobs: Vec<Job>, file_flags: Option<Arc<Flags>>) -> (Vec<Event>, u32) {
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink: EventSink = {
+            let events = events.clone();
+            Arc::new(move |e| events.lock().push(e))
+        };
+        let ctx = WorkerCtx {
+            lang: "ko".into(),
+            prompt: String::new(),
+            sink,
+            inflight: None,
+            recorded: false,
+            file_flags,
+            waiting_noted: Default::default(),
+            retry_noted: AtomicBool::new(false),
+            gave_up: AtomicBool::new(false),
+            offline: AtomicBool::new(false),
+        };
+        let calls = Arc::new(parking_lot::Mutex::new(0));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        for j in jobs {
+            tx.send(j).unwrap();
+        }
+        drop(tx);
+        run_worker(rx, Some(Box::new(Scripted(errors.into(), calls.clone()))), true, &ctx);
+        let out = std::mem::take(&mut *events.lock());
+        let n = *calls.lock();
+        (out, n)
+    }
+
+    fn texts(events: &[Event]) -> Vec<u64> {
+        events.iter().filter_map(|e| match e { Event::Transcript { id, .. } => Some(*id), _ => None }).collect()
+    }
+
+    #[test]
+    fn live_failures_are_kept_and_retried_after_stop() {
+        // 연결 문제로 발화 0 이 실패 → 들고 있다가 녹음이 끝나면 다시 받아 적는다
+        let (ev, calls) = run(vec![net()], vec![job(0), job(1)], None);
+        assert!(ev.iter().any(|e| matches!(e, Event::Failed { id: 0, retry: true, .. })));
+        assert_eq!(texts(&ev), vec![1, 0], "다시 받아 적은 발화도 문장으로 나온다");
+        assert_eq!(calls, 3);
+        // 실제로 보낸 요청마다 사용량 (실패 1 + 성공 2)
+        let usage: Vec<bool> = ev.iter().filter_map(|e| match e { Event::ApiUsage { ok, .. } => Some(*ok), _ => None }).collect();
+        assert_eq!(usage, vec![false, true, true]);
+    }
+
+    #[test]
+    fn wrong_key_is_not_retried() {
+        // 키 오류는 다시 보내도 같다 — 미루지 않고, "연결 문제" 로 건너뛰지도 않는다
+        let (ev, calls) = run((0..4).map(|_| status(401)).collect(), (0..4).map(job).collect(), None);
+        let failed: Vec<(u64, bool)> = ev.iter().filter_map(|e| match e { Event::Failed { id, retry, .. } => Some((*id, *retry)), _ => None }).collect();
+        assert_eq!(failed, vec![(0, false), (1, false), (2, false), (3, false)]);
+        assert!(texts(&ev).is_empty());
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn file_mode_stop_while_offline_does_not_wait_job_by_job() {
+        let flags = Arc::new(Flags::default());
+        flags.stop.store(true, Ordering::SeqCst);
+        // 멈춘 상태에서 첫 발화가 연결 문제로 실패 → 남은 발화는 보내지 않고 바로 실패
+        let (ev, calls) = run((0..10).map(|_| net()).collect(), (0..4).map(job).collect(), Some(flags));
+        assert_eq!(calls, 1);
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::Failed { .. })).count(), 4);
+    }
+
+    #[test]
+    fn retry_after_stop_gives_up_quickly_when_still_offline() {
+        // 연달아 3번 실패 → 남은 발화는 보내지 않고 미뤄 둠 → 녹음 뒤 다시 보낸 첫 발화도 실패하면 나머지는 바로 실패
+        let (ev, calls) = run((0..4).map(|_| net()).collect(), (0..6).map(job).collect(), None);
+        assert_eq!(calls, 4, "실시간 3번 + 녹음 뒤 1번");
+        let failed: Vec<(u64, bool)> = ev.iter().filter_map(|e| match e { Event::Failed { id, retry, .. } => Some((*id, *retry)), _ => None }).collect();
+        assert_eq!(failed.iter().filter(|(_, r)| *r).count(), 6, "모두 한 번은 미뤄 둠");
+        assert_eq!(failed.iter().filter(|(_, r)| !*r).count(), 6, "그리고 모두 최종 실패");
+        assert!(texts(&ev).is_empty());
+        let st = ev.iter().filter(|e| matches!(e, Event::Status { .. })).count();
+        assert_eq!(st, 1, "다시 받아 적는다는 안내는 한 번");
+    }
+
+    #[test]
+    fn file_mode_waits_instead_of_skipping() {
+        let flags = Arc::new(Flags::default());
+        let (ev, calls) = run(vec![net(), net(), status(503)], vec![job(0), job(1)], Some(flags.clone()));
+        assert_eq!(texts(&ev), vec![0, 1], "기다렸다가 같은 발화를 다시 보내 순서대로 받아 적음");
+        assert_eq!(calls, 5);
+        assert!(!ev.iter().any(|e| matches!(e, Event::Failed { .. })));
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::Warning { .. })).count(), 1, "기다린다는 안내는 한 번");
+        assert!(!flags.stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn file_mode_stops_when_offline_for_too_long() {
+        let flags = Arc::new(Flags::default());
+        let (ev, _) = run((0..200).map(|_| net()).collect(), vec![job(0), job(1)], Some(flags.clone()));
+        assert!(flags.stop.load(Ordering::SeqCst), "파일 받아쓰기를 멈춘다");
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::Error { .. })).count(), 1);
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::Failed { .. })).count(), 2);
     }
 
     #[test]

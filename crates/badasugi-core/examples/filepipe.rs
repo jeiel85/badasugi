@@ -191,7 +191,7 @@ fn main() -> anyhow::Result<()> {
             }
             Event::Pending { .. } => pendings += 1,
             Event::Discarded { .. } => completed += 1,
-            Event::Failed { id, message } => {
+            Event::Failed { id, message, .. } => {
                 completed += 1;
                 println!("[{:>6.2}s] #{id} 실패: {message}", secs());
             }

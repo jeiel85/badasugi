@@ -114,6 +114,25 @@ impl ApiError {
     }
 }
 
+/// 사용자가 요약을 멈춤
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(CANCELLED_MSG)
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+pub const CANCELLED_MSG: &str = "요약을 멈췄어요";
+
+/// 네트워크 오류를 우리말로 (끊김 · 시간 초과를 가려서)
+fn net(e: reqwest::Error) -> anyhow::Error {
+    anyhow!(badasugi_core::asr::openai::describe_http_error(&e))
+}
+
 fn too_large(e: &anyhow::Error) -> bool {
     e.downcast_ref::<ApiError>().is_some_and(ApiError::too_large)
 }
@@ -438,6 +457,7 @@ pub fn summarize(
     doc: &SessionDoc,
     progress: &dyn Fn(Progress),
     on_usage: &dyn Fn(&str, &Reply),
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Summary> {
     if doc.utterances.is_empty() {
         bail!("요약할 내용이 없습니다");
@@ -461,7 +481,14 @@ pub fn summarize(
     };
     let head = format!("회의 제목: {}\n일시: {}\n\n", doc.title, doc.started_at);
     let on_reply = |r: &Reply| on_usage(&provider, r);
-    let raw = run_summary(&mut *call, progress, &on_reply, &head, &doc.to_text(), chunk_budget(&provider))?;
+    // 멈추면 다음 요청부터 보내지 않는다 (보내 둔 요청은 끝날 때까지 기다릴 수밖에 없어 화면은 먼저 돌려보낸다)
+    let mut guarded = |s: &str, u: &str| -> Result<Reply> {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow::Error::new(Cancelled));
+        }
+        call(s, u)
+    };
+    let raw = run_summary(&mut guarded, progress, &on_reply, &head, &doc.to_text(), chunk_budget(&provider))?;
     if raw.trim().is_empty() {
         bail!("요약 결과가 비어 있습니다");
     }
@@ -523,12 +550,17 @@ fn ollama(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
         ]
     });
     let resp = client(900)?.post(&url).json(&body).send().map_err(|e| {
-        anyhow!(
-            "Ollama 에 연결할 수 없어요. Ollama 를 설치·실행했는지 확인하거나, 설정에서 Groq·Gemini 같은 API 를 골라 주세요. ({e})"
-        )
+        if e.is_timeout() {
+            anyhow!("Ollama 가 15분 안에 답하지 못했어요. 더 가벼운 모델을 고르거나 Groq·Gemini 같은 API 를 써 보세요.")
+        } else {
+            anyhow!(
+                "Ollama 에 연결할 수 없어요. Ollama 를 설치·실행했는지 확인하거나, 설정에서 Groq·Gemini 같은 API 를 골라 주세요. ({})",
+                badasugi_core::asr::openai::describe_http_error(&e)
+            )
+        }
     })?;
     let status = resp.status();
-    let text = resp.text()?;
+    let text = resp.text().map_err(net)?;
     if !status.is_success() {
         if status.as_u16() == 404 && text.contains("not found") {
             bail!(
@@ -566,11 +598,11 @@ fn openai_compat(base: &str, key: Option<&str>, model: &str, system: &str, user:
     if let Some(k) = key {
         rb = rb.bearer_auth(k);
     }
-    let resp = rb.send()?;
+    let resp = rb.send().map_err(net)?;
     badasugi_core::usage::record_headers(&url, resp.headers());
     let status = resp.status();
     let wait = retry_after(resp.headers());
-    let text = resp.text()?;
+    let text = resp.text().map_err(net)?;
     if !status.is_success() {
         return Err(error_message(status, wait, &text));
     }
@@ -594,6 +626,19 @@ fn supports_fallbacks(model: &str) -> bool {
     )
 }
 
+/// `output_config.effort` 를 받는 모델인지 — Claude Opus 4.5 부터 받고, Sonnet 4.5 · Haiku 4.5 와 그 이전 모델은
+/// 보내면 400 으로 거절한다 (설정에서 모델 목록을 불러와 옛 모델을 고를 수 있다)
+fn supports_effort(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    let old = m.starts_with("claude-3")
+        || m.starts_with("claude-2")
+        || m.starts_with("claude-instant")
+        || ["sonnet-4-5", "haiku-4-5", "opus-4-1", "opus-4-0", "sonnet-4-0", "opus-4-2025", "sonnet-4-2025"]
+            .iter()
+            .any(|k| m.contains(k));
+    !old
+}
+
 fn anthropic_key() -> Result<String> {
     get_key("anthropic").ok_or_else(|| anyhow!("Anthropic API 키를 설정 › AI 요약에서 입력해 주세요"))
 }
@@ -609,9 +654,11 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
         "model": model,
         "max_tokens": 16000,
         "system": system,
-        "messages": [ { "role": "user", "content": user } ],
-        "output_config": { "effort": "medium" }
+        "messages": [ { "role": "user", "content": user } ]
     });
+    if supports_effort(model) {
+        body["output_config"] = json!({ "effort": "medium" });
+    }
     let mut rb = client(600)?
         .post(format!("{ANTHROPIC_URL}/messages"))
         .header("x-api-key", key)
@@ -622,11 +669,11 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
         body["fallbacks"] = json!("default");
         rb = rb.header("anthropic-beta", "server-side-fallback-2026-07-01");
     }
-    let resp = rb.json(&body).send()?;
+    let resp = rb.json(&body).send().map_err(net)?;
     badasugi_core::usage::record_headers(ANTHROPIC_URL, resp.headers());
     let status = resp.status();
     let wait = retry_after(resp.headers());
-    let text = resp.text()?;
+    let text = resp.text().map_err(net)?;
     if !status.is_success() {
         return Err(error_message(status, wait, &text));
     }
@@ -668,7 +715,8 @@ pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
             c.get(format!("{ANTHROPIC_URL}/models?limit=100"))
                 .header("x-api-key", anthropic_key()?)
                 .header("anthropic-version", ANTHROPIC_VERSION)
-                .send()?,
+                .send()
+                .map_err(net)?,
             false,
         ),
         _ => {
@@ -680,11 +728,11 @@ pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
             if let Some(k) = key {
                 rb = rb.bearer_auth(k);
             }
-            (rb.send()?, false)
+            (rb.send().map_err(net)?, false)
         }
     };
     let status = resp.status();
-    let text = resp.text()?;
+    let text = resp.text().map_err(net)?;
     if !status.is_success() {
         return Err(error_message(status, None, &text));
     }
@@ -721,6 +769,31 @@ pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_is_sent_only_to_models_that_take_it() {
+        for m in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2", "claude-opus-4-5", "claude-opus-4-8"] {
+            assert!(supports_effort(m), "{m}");
+        }
+        for m in ["claude-sonnet-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929", "claude-opus-4-1-20250805", "claude-3-5-haiku-latest", "claude-sonnet-4-20250514"] {
+            assert!(!supports_effort(m), "{m}");
+        }
+    }
+
+    #[test]
+    fn cancel_stops_before_the_next_request() {
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        let doc: SessionDoc = serde_json::from_value(json!({
+            "version": 1, "id": "t", "title": "t", "startedAt": "2026-11-16 09:00", "durationMs": 1000, "engine": "x",
+            "utterances": [ { "id": 0, "startMs": 0, "endMs": 1000, "speaker": 0, "text": "안녕하세요" } ]
+        }))
+        .unwrap();
+        let cfg = SummarySettings { provider: "ollama".into(), ollama_url: "http://127.0.0.1:9".into(), ..Default::default() };
+        let Err(e) = summarize(&cfg, &doc, &|_| {}, &|_, _| {}, &flag) else {
+            panic!("멈췄는데 요약이 됐다");
+        };
+        assert_eq!(e.to_string(), CANCELLED_MSG);
+    }
 
     #[test]
     fn title_is_split_out() {

@@ -113,7 +113,7 @@ fn main() -> anyhow::Result<()> {
                 asr_ms
             );
         }
-        Event::Failed { id, message } => eprintln!("#{id} 실패: {message}"),
+        Event::Failed { id, message, .. } => eprintln!("#{id} 실패: {message}"),
         Event::Discarded { id } => eprintln!("#{id} (버림)"),
         Event::Pending { id, start_ms, end_ms, speaker } if std::env::var("BD_TRACE").is_ok() => {
             eprintln!("  pending #{id} {start_ms}~{end_ms} spk={speaker:?}")

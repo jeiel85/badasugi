@@ -77,6 +77,12 @@ pub trait Transcriber: Send {
     fn transcribe(&mut self, req: &AsrRequest) -> Result<String>;
 }
 
+/// API 인식 오류가 나중에 다시 보내 볼 만한지 — 연결 문제 · 요청 한도 · 서비스 장애는 그렇고,
+/// 키 · 모델 이름 · 요청 형식 오류는 아니다. 응답 해석 실패 같은 그 밖의 오류도 한 번 더 해 볼 만하다.
+pub fn retryable(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<openai::ApiError>().is_none_or(|a| !a.is_fatal())
+}
+
 pub fn create(cfg: &EngineConfig) -> Result<Box<dyn Transcriber>> {
     match cfg {
         #[cfg(feature = "local-whisper")]

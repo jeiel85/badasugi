@@ -64,6 +64,8 @@ pub(crate) struct AppState {
     pub downloading: Mutex<Option<String>>,
     /// 진행 중인 요약 등 (업데이트 설치를 미룬다)
     pub busy_ops: AtomicUsize,
+    /// 지금 요약을 멈추라는 신호 (요약 중일 때만)
+    summary_cancel: Mutex<Option<Arc<AtomicBool>>>,
     /// 지금 세션이 파일 받아쓰기인지
     pub file_mode: AtomicBool,
     /// 파일 받아쓰기 진행률 + 1 (0 = 모름)
@@ -215,17 +217,23 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
         settings.last_version = cur.last_version.clone();
         cur.hotkey.clone()
     };
+    // 새 단축키부터 등록해 본다 — 다른 프로그램이 쓰는 조합이면 원래 단축키를 되살리고 그 값은 저장하지 않는다
+    // (그대로 두면 단축키가 하나도 없게 되고, 켤 때마다 같은 오류가 난다)
+    let mut hotkey_err = None;
+    if old_hotkey != settings.hotkey {
+        if let Err(e) = register_hotkey(&app, &settings.hotkey) {
+            let _ = register_hotkey(&app, &old_hotkey);
+            settings.hotkey = old_hotkey;
+            hotkey_err = Some(e);
+        }
+    }
     settings.save(&st.paths.settings).map_err(err)?;
     if let Some(w) = app.get_webview_window("main") {
         // 미니 창은 늘 위에
         let _ = w.set_always_on_top(settings.always_on_top || settings.mini_mode);
     }
-    let new_hotkey = settings.hotkey.clone();
     *st.settings.lock() = settings;
-    if old_hotkey != new_hotkey {
-        register_hotkey(&app, &new_hotkey)?;
-    }
-    Ok(())
+    hotkey_err.map_or(Ok(()), Err)
 }
 
 #[tauri::command]
@@ -257,8 +265,9 @@ fn register_hotkey(app: &AppHandle, hotkey: &str) -> CmdResult<()> {
     if hotkey.trim().is_empty() {
         return Ok(());
     }
-    gs.register(hotkey.trim())
-        .map_err(|e| format!("단축키 '{hotkey}' 를 등록할 수 없습니다: {e}"))
+    gs.register(hotkey.trim()).map_err(|e| {
+        format!("단축키 '{hotkey}' 는 다른 프로그램이 쓰고 있거나 쓸 수 없는 조합이에요. 다른 조합을 골라 주세요. ({e})")
+    })
 }
 
 // ───────────────────────── 엔진 ─────────────────────────
@@ -648,7 +657,9 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
         } => log::info!("녹음 시작됨: 엔진 {engine}, 마이크 {mic:?}, 시스템/파일 {system:?}, 화자 구분 {diarization}"),
         Event::Error { message } => log::error!("{message}"),
         Event::Warning { message } => log::warn!("{message}"),
-        Event::Failed { id, message } => log::warn!("발화 {id} 인식 실패: {message}"),
+        Event::Failed { id, message, retry } => {
+            log::warn!("발화 {id} 인식 실패{}: {message}", if *retry { " (녹음 뒤 다시 시도)" } else { "" })
+        }
         Event::Status { message } => log::info!("{message}"),
         _ => {}
     }
@@ -718,18 +729,18 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             on_speakers_refined(app, labels, utterances);
             return;
         }
-        Event::Pending { start_ms, end_ms, .. } => {
+        Event::ApiUsage { audio_ms, ok } => {
+            // 실제로 보낸 요청만 센다 (연결 문제로 미뤄 두거나 건너뛴 발화는 세지 않는다)
             let provider = *st.api_provider.lock();
             if let Some(p) = provider {
-                app.state::<usage_book::UsageBook>()
-                    .stt(p, end_ms.saturating_sub(*start_ms) as f64 / 1000.0);
+                let book = app.state::<usage_book::UsageBook>();
+                if *ok {
+                    book.stt(p, *audio_ms as f64 / 1000.0);
+                } else {
+                    book.stt_failed(p);
+                }
             }
-        }
-        Event::Failed { .. } => {
-            let provider = *st.api_provider.lock();
-            if let Some(p) = provider {
-                app.state::<usage_book::UsageBook>().stt_failed(p);
-            }
+            return;
         }
         Event::Progress { done_ms, total_ms } if *total_ms > 0 => {
             let pct = (done_ms * 100 / total_ms).min(100) as usize + 1;
@@ -990,11 +1001,22 @@ fn set_playback(app: AppHandle, playing: bool, texts: Vec<String>) {
 ///   예전 기록은 `<id>.wav`.
 /// - 파일 받아쓰기: 원본 파일
 #[tauri::command]
-fn session_audio(app: AppHandle, id: String) -> CmdResult<Option<String>> {
+async fn session_audio(app: AppHandle, id: String) -> CmdResult<Option<String>> {
+    off_main(move || session_audio_now(&app, &id)).await
+}
+
+/// 기록 파일을 읽고 쓰는 명령은 작업 스레드에서 — 동기 명령은 화면(메인) 스레드에서 돌아, 녹음 중 자동 저장이
+/// 기록 잠금을 쥐고 있거나 문서 폴더(OneDrive)에 쓰는 동안 창이 멈칫한다.
+/// (화면은 이 명령들을 보낸 순서대로 하나씩 보내 저장 · 읽기 순서가 뒤바뀌지 않는다)
+async fn off_main<T: Send + 'static>(f: impl FnOnce() -> CmdResult<T> + Send + 'static) -> CmdResult<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(err)?
+}
+
+fn session_audio_now(app: &AppHandle, id: &str) -> CmdResult<Option<String>> {
     let st = app.state::<AppState>();
     let (doc, dir) = {
         let store = st.store.lock();
-        (store.load(&id).map_err(err)?, store.dir.clone())
+        (store.load(id).map_err(err)?, store.dir.clone())
     };
     let wav = doc
         .audio_file
@@ -1028,12 +1050,16 @@ fn is_local_disk(p: &Path) -> bool {
 }
 
 #[tauri::command]
-fn load_session(app: AppHandle, id: String) -> CmdResult<SessionDoc> {
-    app.state::<AppState>().store.lock().load(&id).map_err(err)
+async fn load_session(app: AppHandle, id: String) -> CmdResult<SessionDoc> {
+    off_main(move || app.state::<AppState>().store.lock().load(&id).map_err(err)).await
 }
 
 #[tauri::command]
-fn save_session(app: AppHandle, doc: SessionDoc) -> CmdResult<()> {
+async fn save_session(app: AppHandle, doc: SessionDoc) -> CmdResult<()> {
+    off_main(move || save_session_now(&app, doc)).await
+}
+
+fn save_session_now(app: &AppHandle, doc: SessionDoc) -> CmdResult<()> {
     let id = doc.id.clone();
     let st = app.state::<AppState>();
     let live = {
@@ -1052,28 +1078,34 @@ fn save_session(app: AppHandle, doc: SessionDoc) -> CmdResult<()> {
             *h.lock() = map;
         }
     }
-    sync_session_voices(&app, &id);
+    sync_session_voices(app, &id);
     Ok(())
 }
 
 #[tauri::command]
-fn delete_session(app: AppHandle, id: String) -> CmdResult<()> {
+async fn delete_session(app: AppHandle, id: String) -> CmdResult<()> {
+    off_main(move || delete_session_now(&app, &id)).await
+}
+
+fn delete_session_now(app: &AppHandle, id: &str) -> CmdResult<()> {
     let st = app.state::<AppState>();
     if st.store.lock().current.as_ref().is_some_and(|c| c.id == id) {
         return Err("녹음 중인 기록은 지울 수 없습니다".into());
     }
-    let r = st.store.lock().delete(&id).map_err(err);
-    if r.is_ok() {
-        // 이 회의에서 기억한 목소리도 함께 잊는다
-        app.state::<VoiceBook>().forget_session(&id);
-    }
+    let r = st.store.lock().delete(id).map_err(err);
+    // 이 회의에서 기억한 목소리도 함께 잊는다 — 파일 하나를 못 지웠어도 지우려던 회의다
+    app.state::<VoiceBook>().forget_session(id);
     r
 }
 
 #[tauri::command]
-fn export_session(app: AppHandle, id: String, format: String, path: String) -> CmdResult<()> {
-    let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
-    let body = match format.as_str() {
+async fn export_session(app: AppHandle, id: String, format: String, path: String) -> CmdResult<()> {
+    off_main(move || export_session_now(&app, &id, &format, path)).await
+}
+
+fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String) -> CmdResult<()> {
+    let doc = app.state::<AppState>().store.lock().load(id).map_err(err)?;
+    let body = match format {
         "md" => doc.to_markdown(),
         "txt" => doc.to_text(),
         "srt" => doc.to_srt(),
@@ -1090,12 +1122,15 @@ fn export_session(app: AppHandle, id: String, format: String, path: String) -> C
 }
 
 #[tauri::command]
-fn session_text(app: AppHandle, id: String, format: String) -> CmdResult<String> {
-    let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
-    Ok(match format.as_str() {
-        "md" => doc.to_markdown(),
-        _ => doc.to_text(),
+async fn session_text(app: AppHandle, id: String, format: String) -> CmdResult<String> {
+    off_main(move || {
+        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        Ok(match format.as_str() {
+            "md" => doc.to_markdown(),
+            _ => doc.to_text(),
+        })
     })
+    .await
 }
 
 #[derive(Serialize)]
@@ -1137,7 +1172,31 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
     let on_usage = move |provider: &str, r: &summary::Reply| {
         app3.state::<usage_book::UsageBook>().summary(provider, r.in_tokens, r.out_tokens);
     };
-    let res = tauri::async_runtime::spawn_blocking(move || summary::summarize(&cfg, &doc, &progress, &on_usage)).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    *st.summary_cancel.lock() = Some(cancel.clone());
+    // 요약은 따로 돌리고, 멈추면 보내 둔 요청(로컬 LLM 은 몇 분)을 기다리지 않고 화면을 먼저 돌려보낸다.
+    // 따로 도는 쪽은 다음 요청부터 보내지 않고 끝난다.
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let cancel = cancel.clone();
+        let _ = std::thread::Builder::new().name("bd-summary".into()).spawn(move || {
+            let _ = tx.send(summary::summarize(&cfg, &doc, &progress, &on_usage, &cancel));
+        });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(r) => return r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::SeqCst) => {
+                return Err(anyhow::Error::new(summary::Cancelled))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow::anyhow!("요약하다 문제가 생겼어요"))
+            }
+        }
+    })
+    .await;
+    *st.summary_cancel.lock() = None;
     app.state::<usage_book::UsageBook>().save();
     let sum = res.map_err(err)?.map_err(err)?;
     // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
@@ -1152,6 +1211,15 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
     let saved = st.store.lock().save_doc(latest);
     saved.map_err(err)?;
     Ok(SummaryDto { text: sum.text, title })
+}
+
+/// 진행 중인 요약을 멈춘다 (요약 중이 아니면 아무 일도 없다)
+#[tauri::command]
+fn cancel_summary(app: AppHandle) {
+    if let Some(c) = app.state::<AppState>().summary_cancel.lock().as_ref() {
+        log::info!("요약 멈춤");
+        c.store(true, Ordering::SeqCst);
+    }
 }
 
 /// 요약 제공자 연결 확인 + 모델 목록
@@ -1647,6 +1715,7 @@ fn main() {
                 dl_cancel: Arc::new(AtomicBool::new(false)),
                 downloading: Mutex::new(None),
                 busy_ops: AtomicUsize::new(0),
+                summary_cancel: Mutex::new(None),
                 file_mode: AtomicBool::new(false),
                 file_pct: AtomicUsize::new(0),
                 save_warned: AtomicBool::new(false),
@@ -1751,6 +1820,7 @@ fn main() {
             export_session,
             session_text,
             summarize,
+            cancel_summary,
             list_llm_models,
             check_update,
             install_update,
