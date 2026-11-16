@@ -326,13 +326,29 @@ function renderMeta() {
     .join('') + undo;
 }
 
-// 긴 회의는 구간으로 나눠 정리한다 → "긴 회의라 나눠서 정리하는 중… (2/5)"
+// 받침이 있으면 '을', 없으면 '를' (한글로 끝나지 않으면 '을')
+function objJosa(w) {
+  const c = String(w).charCodeAt(String(w).length - 1) - 0xac00;
+  return c >= 0 && c < 11172 && c % 28 === 0 ? '를' : '을';
+}
+// 요약 진행 문구 — 모델이 쓰고 있는 섹션("주요 논의를 정리하는 중…"),
+// 긴 회의는 구간으로 나눠 정리한다 → "긴 회의라 구간으로 나눠 정리하는 중… (2/5)"
 function summaryStep(p) {
-  if (!p || p.total <= 1) return '회의 내용을 정리하는 중…';
-  const at = `(${Math.min(p.done + 1, p.total)}/${p.total})`;
-  if (p.waitSecs > 0) return `요청 한도 때문에 ${p.waitSecs}초 기다렸다가 이어서 정리해요… ${at}`;
-  if (p.done >= p.total - 1) return `구간 메모를 합쳐 회의록을 만드는 중… ${at}`;
-  return `긴 회의라 구간으로 나눠 정리하는 중… ${at}`;
+  const at = p && p.total > 1 ? ` (${Math.min(p.done + 1, p.total)}/${p.total})` : '';
+  if (p && p.waitSecs > 0) return `요청 한도 때문에 ${p.waitSecs}초 기다렸다가 이어서 정리해요…${at}`;
+  if (!p || p.total <= 1) {
+    if (!p || !p.writing) return '회의 내용을 읽는 중…';
+    if (p.section === '제목') return '회의 제목을 정하는 중…';
+    return p.section ? `${p.section}${objJosa(p.section)} 정리하는 중…` : '회의록을 쓰는 중…';
+  }
+  if (p.done >= p.total - 1) return `구간 메모를 합쳐 회의록을 만드는 중…${at}`;
+  return `긴 회의라 구간으로 나눠 정리하는 중…${at}`;
+}
+// 진행률 0~99 — 끝난 요청 + 지금 요청에서 쓴 만큼 (100은 요약이 끝나 카드가 바뀔 때)
+function summaryPct(p) {
+  if (!p) return 0;
+  const pct = Math.floor((100 * (p.done + (p.frac || 0))) / Math.max(p.total, 1));
+  return Math.max(0, Math.min(99, pct));
 }
 function renderSummary() {
   const d = doc();
@@ -349,10 +365,15 @@ function renderSummary() {
     empty.hidden = true;
     $('#btn-edit-summary').hidden = true;
     $('#sum-mark').hidden = true;
-    const stop = S.sumCancelling
-      ? '<button class="link" id="btn-cancel-summary" disabled>멈추는 중…</button>'
-      : '<button class="link" id="btn-cancel-summary" title="보내 둔 요청은 버리고 여기서 그만둬요">멈추기</button>';
-    $('#summary-body').innerHTML = `<div class="loading"><span class="dot"></span>${esc(summaryStep(S.sumProgress))}${stop}</div>`;
+    const box = $('#summary-body');
+    // 진행은 1초에 몇 번씩 바뀌므로 틀은 한 번만 그리고 글자 · 막대만 바꾼다 (멈추기 버튼을 누르는 중에 다시 그려지지 않게)
+    if (!box.querySelector('.sum-progress')) {
+      box.innerHTML = '<div class="sum-progress">'
+        + '<div class="sum-row"><span class="sum-step"></span><button class="link" id="btn-cancel-summary" title="보내 둔 요청은 버리고 여기서 그만둬요">멈추기</button></div>'
+        + '<div class="sum-track"><div class="sum-bar" role="progressbar" aria-label="요약 진행" aria-valuemin="0" aria-valuemax="100"><i></i></div><span class="sum-meta"></span></div>'
+        + '</div>';
+    }
+    renderSumProgress();
     return;
   }
   card.hidden = !(d && d.summary);
@@ -361,6 +382,24 @@ function renderSummary() {
   $('#btn-summary-ai').disabled = !(d && d.utterances.length);
   $('#sum-mark').hidden = !(d && d.summary && d.summaryEdited);
   if (d && d.summary) $('#summary-body').innerHTML = md(d.summary);
+}
+// 진행 막대 · 퍼센트 · 걸린 시간. 막대는 되돌아가지 않는다 (긴 회의 구간이 더 잘게 나뉘어 전체가 늘어도)
+function renderSumProgress() {
+  const box = $('#summary-body .sum-progress');
+  if (!box || !S.summarizing) return;
+  const p = S.sumProgress;
+  S.sumPct = Math.max(S.sumPct || 0, summaryPct(p));
+  $('.sum-step', box).textContent = summaryStep(p);
+  const bar = $('.sum-bar', box);
+  // 아직 읽는 중(첫 글자 전) · 한도 때문에 기다리는 중에는 얼마나 걸릴지 모르니 막대 위로 빛만 흐른다
+  bar.classList.toggle('busy', !p || !p.writing);
+  bar.firstElementChild.style.width = `${S.sumPct}%`;
+  const known = S.sumPct > 0 || (p && p.total > 1);
+  if (known) bar.setAttribute('aria-valuenow', S.sumPct); else bar.removeAttribute('aria-valuenow');
+  $('.sum-meta', box).textContent = (known ? `${S.sumPct}% · ` : '') + fmt(Date.now() - S.sumStarted);
+  const stop = $('#btn-cancel-summary', box);
+  stop.disabled = !!S.sumCancelling;
+  stop.textContent = S.sumCancelling ? '멈추는 중…' : '멈추기';
 }
 
 function updateActions() {
@@ -1474,6 +1513,11 @@ async function runSummary() {
   S.summarizing = true;
   S.sumCancelling = false;
   S.sumProgress = null;
+  S.sumPct = 0;
+  S.sumStarted = Date.now();
+  // 걸린 시간은 진행 소식이 없어도 (녹취록을 읽는 동안에도) 1초마다
+  clearInterval(S.sumTimer);
+  S.sumTimer = setInterval(renderSumProgress, 1000);
   S.sumId = d.id;
   // 요약마다 번호 — 앞선 저장을 기다리는 동안 멈춰도 앱이 그 요약을 알아보고 시작하자마자 멈춘다
   S.sumToken = Date.now();
@@ -1498,6 +1542,7 @@ async function runSummary() {
     const msg = String(e);
     toast(msg, msg === '요약을 멈췄어요' ? undefined : 'error');
   } finally {
+    clearInterval(S.sumTimer);
     S.summarizing = false;
     S.sumCancelling = false;
     S.sumProgress = null;
@@ -2602,7 +2647,8 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://paused', (e) => onPaused(!!e.payload));
   await api.listen('bd://sleep', (e) => onSleep(e.payload));
   await api.listen('bd://summary-progress', (e) => {
-    if (!S.summarizing || e.payload?.id !== S.sumId) return;
+    // 멈춘 앞 요약이 끝까지 받는 답의 진행은 버린다 (같은 회의를 바로 다시 요약해도)
+    if (!S.summarizing || e.payload?.id !== S.sumId || e.payload?.token !== S.sumToken) return;
     S.sumProgress = e.payload;
     renderSummary();
   });
@@ -2700,6 +2746,18 @@ function mockSessions() {
 let mockVoices = [{ name: '김 팀장', meetings: 4, secs: 812 }, { name: '이 개발', meetings: 2, secs: 240 }, { name: '박 디자인', meetings: 1, secs: 95 }];
 function createMock() {
   const handlers = {};
+  let mockSumCancel = null;
+  // 브라우저 미리보기: 앱처럼 녹취록을 읽은 뒤 섹션을 차례로 쓰며 진행을 보낸다 (?sumslow 면 느리게)
+  async function mockSummarize({ id, token }) {
+    const slow = new URLSearchParams(location.search).has('sumslow') ? 4 : 1;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms * slow));
+    const send = (p) => handlers['bd://summary-progress'] && handlers['bd://summary-progress']({ payload: { id, token, done: 0, total: 1, waitSecs: 0, ...p } });
+    const check = () => { if (mockSumCancel === token) throw '요약을 멈췄어요'; };
+    await wait(1500); check();
+    const steps = [['제목', 0.0], ['제목', 0.01], ['한 줄 요약', 0.02], ['주요 논의', 0.08], ['주요 논의', 0.3], ['주요 논의', 0.45], ['결정 사항', 0.53], ['결정 사항', 0.62], ['할 일', 0.68], ['할 일', 0.85], ['남은 질문', 0.9], ['남은 질문', 0.97]];
+    for (const [section, frac] of steps) { send({ writing: true, section, frac }); await wait(450); check(); }
+    return { text: '### 한 줄 요약\n15일 출시를 확정했다.\n\n### 주요 논의\n- 김 팀장: 출시 일정 확인\n\n### 결정 사항\n- 15일 출시\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일\n\n### 남은 질문\n- 없음', title: null };
+  }
   const st = {
     settings: {
       engine: 'local', localModel: 'large-v3-turbo-q5_0', beamSize: 1, threads: 0,
@@ -2768,6 +2826,8 @@ function createMock() {
         return d;
       }
       if (cmd === 'session_text') return '데모';
+      if (cmd === 'summarize') return mockSummarize(args);
+      if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
       if (cmd === 'toggle_recording') { const h = handlers['bd://rec']; st.rec = st.rec === 'idle' ? 'recording' : 'idle'; h && h({ payload: st.rec }); return; }
       return null;
     },
