@@ -4,7 +4,7 @@
 //! - Groq (OpenAI 호환 · 무료 등급 있음 · 음성 인식 Groq 키를 같이 씀)
 //! - Google Gemini (OpenAI 호환 엔드포인트 · 무료 등급 있음)
 //! - OpenAI (Chat Completions · 음성 인식 OpenAI 키를 같이 씀)
-//! - Anthropic Claude (Messages API, raw HTTP)
+//! - Anthropic Claude (Messages API, raw HTTP · API 키 또는 Anthropic CLI `ant auth login` 로그인)
 //! - OpenAI 호환 사용자 지정 서버 (LM Studio, vLLM, OpenRouter 등)
 //!
 //! 긴 회의는 한 번에 보내면 로컬 모델 문맥(앞부분이 잘림)이나 무료 등급 분당 토큰 한도(거절)에 걸리므로,
@@ -639,12 +639,62 @@ fn supports_effort(model: &str) -> bool {
     !old
 }
 
-fn anthropic_key() -> Result<String> {
-    get_key("anthropic").ok_or_else(|| anyhow!("Anthropic API 키를 설정 › 요약에서 입력해 주세요"))
+/// Claude 인증: 저장한 API 키, 없으면 Anthropic CLI(`ant auth login`) 로그인 토큰
+enum ClaudeAuth {
+    Key(String),
+    Login(String),
+}
+
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+impl ClaudeAuth {
+    fn get() -> Result<Self> {
+        if let Some(k) = get_key("anthropic") {
+            return Ok(Self::Key(k));
+        }
+        let ant = crate::ant::find().ok_or_else(|| {
+            anyhow!("Anthropic API 키를 설정 › 요약에서 입력하거나, Anthropic CLI(ant)를 설치하고 ant auth login 으로 로그인해 주세요")
+        })?;
+        Ok(Self::Login(crate::ant::access_token(&ant)?))
+    }
+
+    /// 인증 · 버전 · 베타 헤더를 붙인다. 로그인 토큰은 `x-api-key` 가 아니라 Bearer 로 보내고 OAuth 베타를 켜야 한다
+    fn apply(&self, rb: reqwest::blocking::RequestBuilder, betas: &[&str]) -> reqwest::blocking::RequestBuilder {
+        let rb = match self {
+            Self::Key(k) => rb.header("x-api-key", k),
+            Self::Login(t) => rb.bearer_auth(t),
+        };
+        let rb = rb.header("anthropic-version", ANTHROPIC_VERSION);
+        match beta_header(betas, matches!(self, Self::Login(_))) {
+            Some(b) => rb.header("anthropic-beta", b),
+            None => rb,
+        }
+    }
+
+    /// 로그인 토큰이 거절되면 API 키가 아니라 ant 로그인을 다시 하라고 알린다
+    fn explain(&self, e: anyhow::Error) -> anyhow::Error {
+        match (self, e.downcast_ref::<ApiError>()) {
+            (Self::Login(_), Some(a)) if matches!(a.status, 401 | 403) => anyhow!(
+                "ant 로그인으로 Claude 를 쓸 수 없어요: {} — 명령 프롬프트에서 ant auth login 을 다시 실행해 주세요",
+                a.msg
+            ),
+            _ => e,
+        }
+    }
+}
+
+/// `anthropic-beta` 값 (여러 개는 쉼표로 잇는다)
+fn beta_header(betas: &[&str], login: bool) -> Option<String> {
+    let mut all = betas.to_vec();
+    if login {
+        all.push(OAUTH_BETA);
+    }
+    (!all.is_empty()).then(|| all.join(","))
 }
 
 fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
-    let key = anthropic_key()?;
+    // 로그인 토큰은 짧게 유효하니 요청마다 받는다 (긴 회의는 요약에 수십 분 걸리기도 한다)
+    let auth = ClaudeAuth::get()?;
     let model = if cfg.anthropic_model.trim().is_empty() {
         "claude-opus-5-5"
     } else {
@@ -659,23 +709,22 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
     if supports_effort(model) {
         body["output_config"] = json!({ "effort": "medium" });
     }
-    let mut rb = client(600)?
-        .post(format!("{ANTHROPIC_URL}/messages"))
-        .header("x-api-key", key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("content-type", "application/json");
+    let mut betas = Vec::new();
     if supports_fallbacks(model) {
         // 안전 분류기가 거절하면 서버가 알아서 다른 모델로 다시 시도
         body["fallbacks"] = json!("default");
-        rb = rb.header("anthropic-beta", "server-side-fallback-2026-07-01");
+        betas.push("server-side-fallback-2026-07-01");
     }
-    let resp = rb.json(&body).send().map_err(net)?;
+    let rb = client(600)?
+        .post(format!("{ANTHROPIC_URL}/messages"))
+        .header("content-type", "application/json");
+    let resp = auth.apply(rb, &betas).json(&body).send().map_err(net)?;
     badasugi_core::usage::record_headers(ANTHROPIC_URL, resp.headers());
     let status = resp.status();
     let wait = retry_after(resp.headers());
     let text = resp.text().map_err(net)?;
     if !status.is_success() {
-        return Err(error_message(status, wait, &text));
+        return Err(auth.explain(error_message(status, wait, &text)));
     }
     let v: Value = serde_json::from_str(&text)?;
     if v["stop_reason"].as_str() == Some("refusal") {
@@ -703,6 +752,7 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
 /// 연결 확인 겸 사용할 수 있는 모델 목록 (설정 화면 자동 완성용)
 pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
     let c = client(20)?;
+    let mut claude: Option<ClaudeAuth> = None;
     let (resp, ollama) = match cfg.provider.as_str() {
         "ollama" => {
             let url = format!("{}/api/tags", cfg.ollama_url.trim().trim_end_matches('/'));
@@ -711,14 +761,10 @@ pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
             })?;
             (r, true)
         }
-        "anthropic" => (
-            c.get(format!("{ANTHROPIC_URL}/models?limit=100"))
-                .header("x-api-key", anthropic_key()?)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .send()
-                .map_err(net)?,
-            false,
-        ),
+        "anthropic" => {
+            let auth = claude.insert(ClaudeAuth::get()?);
+            (auth.apply(c.get(format!("{ANTHROPIC_URL}/models?limit=100")), &[]).send().map_err(net)?, false)
+        }
         _ => {
             let (base, key, _) = openai_like(cfg)?.ok_or_else(|| anyhow!("알 수 없는 요약 제공자"))?;
             if base.trim().is_empty() {
@@ -734,7 +780,11 @@ pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
     let status = resp.status();
     let text = resp.text().map_err(net)?;
     if !status.is_success() {
-        return Err(error_message(status, None, &text));
+        let e = error_message(status, None, &text);
+        return Err(match &claude {
+            Some(auth) => auth.explain(e),
+            None => e,
+        });
     }
     let v: Value = serde_json::from_str(&text)?;
     let mut names: Vec<String> = if ollama {
@@ -769,6 +819,27 @@ pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_turns_on_the_oauth_beta() {
+        assert_eq!(beta_header(&[], false), None);
+        assert_eq!(beta_header(&[], true).as_deref(), Some("oauth-2025-04-20"));
+        let fb = ["server-side-fallback-2026-07-01"];
+        assert_eq!(beta_header(&fb, false).as_deref(), Some("server-side-fallback-2026-07-01"));
+        assert_eq!(beta_header(&fb, true).as_deref(), Some("server-side-fallback-2026-07-01,oauth-2025-04-20"));
+    }
+
+    #[test]
+    fn rejected_login_points_to_ant_not_the_api_key() {
+        let rejected = || anyhow::Error::new(ApiError { status: 401, retry_after: None, msg: "Invalid bearer token".into() });
+        let login = ClaudeAuth::Login("t".into()).explain(rejected()).to_string();
+        assert!(login.contains("ant auth login") && login.contains("Invalid bearer token"), "{login}");
+        let key = ClaudeAuth::Key("k".into()).explain(rejected()).to_string();
+        assert!(key.contains("API 키를 확인"), "{key}");
+        // 한도 초과 같은 다른 오류는 그대로 둬야 기다렸다 다시 보내기가 동작한다
+        let busy = anyhow::Error::new(ApiError { status: 429, retry_after: Some(5), msg: "rate".into() });
+        assert!(ClaudeAuth::Login("t".into()).explain(busy).downcast_ref::<ApiError>().is_some());
+    }
 
     #[test]
     fn effort_is_sent_only_to_models_that_take_it() {
