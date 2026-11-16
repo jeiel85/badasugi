@@ -62,8 +62,8 @@ const MAX_WAIT_SECS: u64 = 75;
 /// 너무 크다고 거절돼도 이보다 잘게는 나누지 않는다
 const MIN_CHUNK: usize = 600;
 
-/// 요약 진행 (긴 회의를 나눠 정리할 때 화면에 보여 줌)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 요약 진행 (화면의 진행 막대 · 문구)
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Progress {
     /// 끝난 요청 수
     pub done: usize,
@@ -71,6 +71,116 @@ pub struct Progress {
     pub total: usize,
     /// 요청 한도 때문에 기다리는 중이면 그 시간(초)
     pub wait_secs: u64,
+    /// 지금 요청의 답을 쓴 만큼 (0~1) — 모델이 회의록 형식의 어느 섹션을 쓰는지로 어림한다
+    pub frac: f32,
+    /// 모델이 답을 쓰기 시작했는지 (아니면 아직 녹취록을 읽는 중)
+    pub writing: bool,
+    /// 지금 쓰는 섹션 이름 (모르면 "")
+    pub section: &'static str,
+}
+
+/// 쓰는 동안 진행을 이보다 자주 알리지 않는다 (섹션이 바뀔 때는 바로)
+const REPORT_EVERY: Duration = Duration::from_millis(200);
+
+/// 답 형식의 섹션: (이름, 답 전체에서 차지하는 몫, 보통 길이(글자))
+type Sections = &'static [(&'static str, f32, f32)];
+
+/// [`SYSTEM`] 형식 — 몫은 실제 회의록에서 섹션마다 차지하는 대략의 비율
+const FINAL_SECTIONS: Sections = &[
+    ("제목", 0.02, 20.0),
+    ("한 줄 요약", 0.06, 80.0),
+    ("주요 논의", 0.45, 700.0),
+    ("결정 사항", 0.15, 250.0),
+    ("할 일", 0.22, 350.0),
+    ("남은 질문", 0.10, 150.0),
+];
+
+/// [`PART_SYSTEM`] 형식 (구간 메모 · 메모 합치기 · 줄이기)
+const PART_SECTIONS: Sections = &[
+    ("논의", 0.55, 600.0),
+    ("결정 사항", 0.15, 200.0),
+    ("할 일", 0.20, 250.0),
+    ("남은 질문", 0.10, 120.0),
+];
+
+/// 받아 오는 답에서 지금 어느 섹션을 쓰는지 따라가며 진행을 어림한다.
+/// 섹션 안에서는 보통 길이만큼 쓰면 그 섹션 몫의 63%, 세 배면 95% — 다음 섹션 제목이 나와야 넘어간다
+struct Writing {
+    sections: Sections,
+    /// 지금 줄 (제목 줄인지 보려고 앞부분만)
+    line: String,
+    at: Option<usize>,
+    in_section: usize,
+    chars: usize,
+    /// 지금까지 알린 가장 큰 진행 — 첫 섹션 제목이 나올 때 글자 수 어림보다 낮아져도 막대가 되돌아가지 않게
+    best: f32,
+}
+
+impl Writing {
+    fn new(sections: Sections) -> Self {
+        Writing { sections, line: String::new(), at: None, in_section: 0, chars: 0, best: 0.0 }
+    }
+
+    /// 받은 글 조각을 더한다. 새 섹션으로 넘어갔으면 true
+    fn push(&mut self, delta: &str) -> bool {
+        let mut moved = false;
+        for ch in delta.chars() {
+            self.chars += 1;
+            self.in_section += 1;
+            if ch != '\n' {
+                // 섹션 제목은 짧다 — 긴 줄은 앞부분만 있어도 제목이 아님을 안다
+                if self.line.chars().count() < 40 {
+                    self.line.push(ch);
+                }
+                continue;
+            }
+            if let Some(i) = self.header(&self.line) {
+                // 앞으로만 (모델이 같은 이름을 본문에 한 줄로 다시 써도 되돌아가지 않게)
+                if self.at.is_none_or(|a| i > a) {
+                    self.at = Some(i);
+                    self.in_section = 0;
+                    moved = true;
+                }
+            }
+            self.line.clear();
+        }
+        self.best = self.best.max(self.estimate());
+        moved
+    }
+
+    /// "### 주요 논의", "## 결정 사항", "**할 일**:" 같은 줄이 몇 번째 섹션인지
+    fn header(&self, line: &str) -> Option<usize> {
+        let t = line
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .trim_end_matches(':')
+            .trim_matches('*')
+            .trim_end_matches(':')
+            .trim();
+        self.sections.iter().position(|s| s.0 == t)
+    }
+
+    fn frac(&self) -> f32 {
+        self.best
+    }
+
+    fn estimate(&self) -> f32 {
+        let ease = |n: usize, len: f32| 1.0 - (-(n as f32) / len).exp();
+        match self.at {
+            Some(i) => {
+                let start: f32 = self.sections[..i].iter().map(|s| s.1).sum();
+                let (_, share, len) = self.sections[i];
+                (start + share * ease(self.in_section, len)).min(0.99)
+            }
+            // 섹션 제목 없이 쓰는 모델 — 쓴 글자 수로만 (끝을 모르니 90%까지)
+            None => 0.9 * ease(self.chars, self.sections.iter().map(|s| s.2).sum()),
+        }
+    }
+
+    fn section(&self) -> &'static str {
+        self.at.map_or("", |i| self.sections[i].0)
+    }
 }
 
 /// 요청 하나의 결과
@@ -245,9 +355,12 @@ const MERGE_ASK: &str = "다음은 이 회의 여러 구간의 메모입니다. 
 const SHRINK_ASK: &str = "다음은 이 회의 한 구간의 메모입니다. 결정 사항 · 할 일 · 숫자 · 이름은 그대로 두고, \
 나머지 논의는 핵심만 남겨 절반 길이로 줄이세요.";
 
-/// 요청 보내기 · 진행 알림 (긴 회의 나눠 정리용). 요청이 성공할 때마다 `on_reply` 로 사용량을 바로 알린다
+/// 요청 하나 보내기: (지시, 내용, 받는 대로 글 조각을 넘길 곳) → 결과
+type Ask<'a> = dyn FnMut(&str, &str, &mut dyn FnMut(&str)) -> Result<Reply> + 'a;
+
+/// 요청 보내기 · 진행 알림. 요청이 성공할 때마다 `on_reply` 로 사용량을 바로 알린다
 struct Run<'a> {
-    call: &'a mut dyn FnMut(&str, &str) -> Result<Reply>,
+    call: &'a mut Ask<'a>,
     progress: &'a dyn Fn(Progress),
     on_reply: &'a dyn Fn(&Reply),
     done: usize,
@@ -256,14 +369,33 @@ struct Run<'a> {
 
 impl Run<'_> {
     fn report(&self, wait_secs: u64) {
-        (self.progress)(Progress { done: self.done, total: self.total, wait_secs });
+        (self.progress)(Progress {
+            done: self.done,
+            total: self.total,
+            wait_secs,
+            frac: 0.0,
+            writing: false,
+            section: "",
+        });
     }
 
-    /// 한도 초과(429)면 알려 준 시간만큼 기다렸다 다시 (몇 번까지만)
+    /// 한도 초과(429)면 알려 준 시간만큼 기다렸다 다시 (몇 번까지만).
+    /// 답을 받는 동안 어느 섹션을 쓰는지로 진행을 알린다
     fn ask(&mut self, system: &str, user: &str) -> Result<String> {
+        let sections = if system == SYSTEM { FINAL_SECTIONS } else { PART_SECTIONS };
         let mut tries = 0;
         loop {
-            match (self.call)(system, user) {
+            let (done, total, progress) = (self.done, self.total, self.progress);
+            let mut w = Writing::new(sections);
+            let mut last: Option<std::time::Instant> = None;
+            let mut on_text = |delta: &str| {
+                let moved = w.push(delta);
+                if moved || last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
+                    last = Some(std::time::Instant::now());
+                    progress(Progress { done, total, wait_secs: 0, frac: w.frac(), writing: true, section: w.section() });
+                }
+            };
+            match (self.call)(system, user, &mut on_text) {
                 Ok(r) => {
                     // 뒤 요청이 실패해도 이미 쓴 만큼은 사용량에 남게 바로 알린다
                     (self.on_reply)(&r);
@@ -310,7 +442,7 @@ impl Run<'_> {
 /// 녹취록(`text`)을 요약한다. 한 번에 보내기엔 길면(`budget` 글자 초과) 구간별로 메모한 뒤 합친다.
 /// `head` 는 회의 제목 · 일시 줄
 fn run_summary(
-    call: &mut dyn FnMut(&str, &str) -> Result<Reply>,
+    call: &mut Ask,
     progress: &dyn Fn(Progress),
     on_reply: &dyn Fn(&Reply),
     head: &str,
@@ -450,9 +582,9 @@ fn openai_like(cfg: &SummarySettings) -> Result<Option<(String, Option<String>, 
     })
 }
 
-type Caller = Box<dyn FnMut(&str, &str) -> Result<Reply>>;
+type Caller = Box<Ask<'static>>;
 
-/// 회의록을 요약한다. 긴 회의는 구간으로 나눠 정리하며 `progress` 로 진행을,
+/// 회의록을 요약한다. 답은 받는 대로 읽어 `progress` 로 진행(긴 회의는 구간까지)을,
 /// `on_usage(제공자, 응답)` 로 요청마다 사용량을 알린다 (중간에 실패해도 이미 쓴 만큼은 셀 수 있게)
 pub fn summarize(
     cfg: &SummarySettings,
@@ -467,16 +599,18 @@ pub fn summarize(
     let (provider, mut call): (String, Caller) = match cfg.provider.as_str() {
         "ollama" => {
             let c = cfg.clone();
-            ("ollama".into(), Box::new(move |s: &str, u: &str| ollama(&c, s, u)))
+            ("ollama".into(), Box::new(move |s: &str, u: &str, t: &mut dyn FnMut(&str)| ollama(&c, s, u, t)))
         }
         "anthropic" => {
             let c = cfg.clone();
-            ("anthropic".into(), Box::new(move |s: &str, u: &str| anthropic(&c, s, u)))
+            ("anthropic".into(), Box::new(move |s: &str, u: &str, t: &mut dyn FnMut(&str)| anthropic(&c, s, u, t)))
         }
         _ => match openai_like(cfg)? {
             Some((base, key, model)) => (
                 badasugi_core::usage::provider_of(&base).to_string(),
-                Box::new(move |s: &str, u: &str| openai_compat(&base, key.as_deref(), &model, s, u)),
+                Box::new(move |s: &str, u: &str, t: &mut dyn FnMut(&str)| {
+                    openai_compat(&base, key.as_deref(), &model, s, u, t)
+                }),
             ),
             None => bail!("알 수 없는 요약 제공자: {}", cfg.provider),
         },
@@ -484,11 +618,11 @@ pub fn summarize(
     let head = format!("회의 제목: {}\n일시: {}\n\n", doc.title, doc.started_at);
     let on_reply = |r: &Reply| on_usage(&provider, r);
     // 멈추면 다음 요청부터 보내지 않는다 (보내 둔 요청은 끝날 때까지 기다릴 수밖에 없어 화면은 먼저 돌려보낸다)
-    let mut guarded = |s: &str, u: &str| -> Result<Reply> {
+    let mut guarded = |s: &str, u: &str, t: &mut dyn FnMut(&str)| -> Result<Reply> {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(anyhow::Error::new(Cancelled));
         }
-        call(s, u)
+        call(s, u, t)
     };
     let raw = run_summary(&mut guarded, progress, &on_reply, &head, &doc.to_text(), chunk_budget(&provider))?;
     if raw.trim().is_empty() {
@@ -539,11 +673,111 @@ fn split_title(raw: &str) -> Summary {
     }
 }
 
-fn ollama(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
+/// 답을 받다가 응답이 끊김 없이 너무 오래 멈춤 (읽기 한 번마다 클라이언트 시간 제한이 걸린다)
+#[derive(Debug)]
+struct StreamStalled(String);
+
+impl std::fmt::Display for StreamStalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StreamStalled {}
+
+fn read_error(e: std::io::Error) -> anyhow::Error {
+    // reqwest 오류가 io 오류에 싸여 온다
+    match e.get_ref().and_then(|i| i.downcast_ref::<reqwest::Error>()) {
+        Some(re) if re.is_timeout() => anyhow::Error::new(StreamStalled(format!(
+            "요약 답을 받다가 서버가 멈췄어요 ({})",
+            badasugi_core::asr::openai::describe_http_error(re)
+        ))),
+        Some(re) => anyhow!("요약 답을 받다가 끊겼어요 ({})", badasugi_core::asr::openai::describe_http_error(re)),
+        None if e.kind() == std::io::ErrorKind::TimedOut => {
+            anyhow::Error::new(StreamStalled(format!("요약 답을 받다가 서버가 멈췄어요 ({e})")))
+        }
+        None => anyhow!("요약 답을 받다가 끊겼어요 ({e})"),
+    }
+}
+
+/// 스트리밍 답을 한 줄씩 (SSE 의 "data: …" 줄 · Ollama 의 JSON 줄). `f` 가 false 를 주면 그만 읽는다
+fn each_line(r: impl std::io::Read, mut f: impl FnMut(&str) -> Result<bool>) -> Result<()> {
+    use std::io::BufRead;
+    let mut rd = std::io::BufReader::new(r);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if rd.read_line(&mut line).map_err(read_error)? == 0 {
+            return Ok(());
+        }
+        if !f(line.trim_end_matches(['\r', '\n']))? {
+            return Ok(());
+        }
+    }
+}
+
+/// SSE 의 "data: …" 줄 → JSON (다른 줄 · 깨진 줄은 None)
+fn sse_json(line: &str) -> Option<Value> {
+    serde_json::from_str(line.strip_prefix("data:")?.trim()).ok()
+}
+
+/// 답을 보내는 도중 온 오류 ({"error": …}) — 상태 코드가 없으니 오류 종류로 가늠한다
+fn stream_error(v: &Value) -> Option<anyhow::Error> {
+    let e = &v["error"];
+    if e.is_null() {
+        return None;
+    }
+    let msg = e["message"].as_str().or_else(|| e.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string());
+    let status = e["code"]
+        .as_u64()
+        .and_then(|c| u16::try_from(c).ok())
+        .filter(|c| (400..600).contains(c))
+        .unwrap_or(match e["type"].as_str().unwrap_or("") {
+            "rate_limit_error" => 429,
+            "overloaded_error" => 529,
+            "invalid_request_error" => 400,
+            _ => 500,
+        });
+    Some(anyhow::Error::new(ApiError { status, retry_after: None, msg }))
+}
+
+/// Ollama 의 답 (한 줄에 JSON 하나, 마지막 줄 "done": true 에 토큰 수)
+fn read_ollama_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
+    let mut out = Reply::default();
+    each_line(r, |line| {
+        if line.trim().is_empty() {
+            return Ok(true);
+        }
+        let v: Value = serde_json::from_str(line).map_err(|e| anyhow!("Ollama 답을 읽지 못했어요: {e}"))?;
+        if let Some(e) = v["error"].as_str() {
+            bail!("Ollama 오류: {e}");
+        }
+        if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
+            out.model = m.to_string();
+        }
+        if let Some(t) = v["message"]["content"].as_str().filter(|t| !t.is_empty()) {
+            out.text.push_str(t);
+            on_text(t);
+        }
+        if v["done"].as_bool() == Some(true) {
+            out.in_tokens = v["prompt_eval_count"].as_u64().unwrap_or(0);
+            out.out_tokens = v["eval_count"].as_u64().unwrap_or(0);
+            return Ok(false);
+        }
+        Ok(true)
+    })?;
+    out.text = out.text.trim().to_string();
+    Ok(out)
+}
+
+const OLLAMA_SLOW: &str = "Ollama 가 15분 넘게 답하지 못했어요. 더 가벼운 모델을 고르거나 Groq·Gemini 같은 API 를 써 보세요.";
+
+fn ollama(cfg: &SummarySettings, system: &str, user: &str, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     let url = format!("{}/api/chat", cfg.ollama_url.trim().trim_end_matches('/'));
     let body = json!({
         "model": cfg.ollama_model,
-        "stream": false,
+        // 받는 대로 읽어 진행을 보여 준다
+        "stream": true,
         // 기본 컨텍스트(2~4K)로는 긴 회의가 잘리므로 넉넉히
         "options": { "num_ctx": 32768, "temperature": 0.2 },
         "messages": [
@@ -551,9 +785,10 @@ fn ollama(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
             { "role": "user", "content": user }
         ]
     });
+    // 시간 제한은 읽기 한 번마다 — 녹취록을 읽는 동안(첫 글자 전) · 쓰다 멈춘 동안 15분
     let resp = client(900)?.post(&url).json(&body).send().map_err(|e| {
         if e.is_timeout() {
-            anyhow!("Ollama 가 15분 안에 답하지 못했어요. 더 가벼운 모델을 고르거나 Groq·Gemini 같은 API 를 써 보세요.")
+            anyhow!(OLLAMA_SLOW)
         } else {
             anyhow!(
                 "Ollama 에 연결할 수 없어요. Ollama 를 설치·실행했는지 확인하거나, 설정에서 Groq·Gemini 같은 API 를 골라 주세요. ({})",
@@ -562,8 +797,8 @@ fn ollama(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
         }
     })?;
     let status = resp.status();
-    let text = resp.text().map_err(net)?;
     if !status.is_success() {
+        let text = resp.text().map_err(net)?;
         if status.as_u16() == 404 && text.contains("not found") {
             bail!(
                 "Ollama 에 '{}' 모델이 없어요. 명령 프롬프트에서 `ollama pull {}` 로 먼저 받아 주세요.",
@@ -573,16 +808,91 @@ fn ollama(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
         }
         return Err(error_message(status, None, &text));
     }
-    let v: Value = serde_json::from_str(&text)?;
+    let mut reply =
+        read_ollama_stream(resp, on_text).map_err(|e| if e.is::<StreamStalled>() { anyhow!(OLLAMA_SLOW) } else { e })?;
+    if reply.model.is_empty() {
+        reply.model = cfg.ollama_model.clone();
+    }
+    Ok(reply)
+}
+
+/// OpenAI 호환 서버에 보내는 방식 — 받지 않는 서버가 있어 차례로 물러선다
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Streaming {
+    /// 받는 대로 + 마지막에 토큰 수 (stream_options.include_usage)
+    WithUsage,
+    /// 받는 대로 (stream_options 를 모르는 서버)
+    Plain,
+    /// 한 번에 (스트리밍을 모르는 서버)
+    Off,
+}
+
+/// 오류 문구가 스트리밍 설정을 받지 않는다는 뜻인지 ("upstream" 같은 낱말은 빼고)
+fn mentions_stream(body: &str) -> bool {
+    body.to_lowercase()
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|w| w == "stream" || w.starts_with("stream_"))
+}
+
+/// OpenAI 호환 한 번에 받은 답
+fn openai_reply(v: &Value) -> Result<Reply> {
+    if v["choices"][0]["finish_reason"].as_str() == Some("content_filter") {
+        bail!("모델이 요약을 거절했습니다 (콘텐츠 필터)");
+    }
+    let usage = &v["usage"];
     Ok(Reply {
-        text: v["message"]["content"].as_str().unwrap_or_default().trim().to_string(),
-        model: cfg.ollama_model.clone(),
-        in_tokens: v["prompt_eval_count"].as_u64().unwrap_or(0),
-        out_tokens: v["eval_count"].as_u64().unwrap_or(0),
+        text: v["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string(),
+        model: v["model"].as_str().unwrap_or_default().to_string(),
+        in_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
+        out_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
     })
 }
 
-fn openai_compat(base: &str, key: Option<&str>, model: &str, system: &str, user: &str) -> Result<Reply> {
+/// OpenAI 호환 스트리밍 답 (SSE). 토큰 수는 마지막 조각의 usage (Groq 는 x_groq.usage 에도)
+fn read_openai_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
+    let mut out = Reply::default();
+    let mut filtered = false;
+    each_line(r, |line| {
+        if line.strip_prefix("data:").is_some_and(|d| d.trim() == "[DONE]") {
+            return Ok(false);
+        }
+        let Some(v) = sse_json(line) else { return Ok(true) };
+        if let Some(e) = stream_error(&v) {
+            return Err(e);
+        }
+        if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
+            out.model = m.to_string();
+        }
+        let c = &v["choices"][0];
+        if let Some(t) = c["delta"]["content"].as_str().filter(|t| !t.is_empty()) {
+            out.text.push_str(t);
+            on_text(t);
+        }
+        if c["finish_reason"].as_str() == Some("content_filter") {
+            filtered = true;
+        }
+        let usage = if v["usage"].is_object() { &v["usage"] } else { &v["x_groq"]["usage"] };
+        if usage.is_object() {
+            out.in_tokens = usage["prompt_tokens"].as_u64().unwrap_or(out.in_tokens);
+            out.out_tokens = usage["completion_tokens"].as_u64().unwrap_or(out.out_tokens);
+        }
+        Ok(true)
+    })?;
+    if filtered {
+        bail!("모델이 요약을 거절했습니다 (콘텐츠 필터)");
+    }
+    out.text = out.text.trim().to_string();
+    Ok(out)
+}
+
+fn openai_compat(
+    base: &str,
+    key: Option<&str>,
+    model: &str,
+    system: &str,
+    user: &str,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<Reply> {
     if base.trim().is_empty() {
         bail!("요약 API 주소를 입력해 주세요");
     }
@@ -590,36 +900,58 @@ fn openai_compat(base: &str, key: Option<&str>, model: &str, system: &str, user:
         bail!("요약 모델 이름을 입력해 주세요");
     }
     let url = format!("{}/chat/completions", base.trim().trim_end_matches('/'));
-    let body = json!({
-        "model": model.trim(),
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user }
-        ]
-    });
-    let mut rb = client(600)?.post(&url).json(&body);
-    if let Some(k) = key {
-        rb = rb.bearer_auth(k);
+    for mode in [Streaming::WithUsage, Streaming::Plain, Streaming::Off] {
+        let mut body = json!({
+            "model": model.trim(),
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user }
+            ]
+        });
+        if mode != Streaming::Off {
+            body["stream"] = json!(true);
+        }
+        if mode == Streaming::WithUsage {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+        // 시간 제한은 읽기 한 번마다 — 긴 답도 받는 동안은 끊기지 않는다
+        let mut rb = client(600)?.post(&url).json(&body);
+        if let Some(k) = key {
+            rb = rb.bearer_auth(k);
+        }
+        let resp = rb.send().map_err(net)?;
+        badasugi_core::usage::record_headers(&url, resp.headers());
+        let status = resp.status();
+        let wait = retry_after(resp.headers());
+        if !status.is_success() {
+            let text = resp.text().map_err(net)?;
+            if mode != Streaming::Off && matches!(status.as_u16(), 400 | 422) && mentions_stream(&text) {
+                log::info!("요약 서버가 스트리밍 설정({mode:?})을 받지 않아 물러서서 다시");
+                continue;
+            }
+            return Err(error_message(status, wait, &text));
+        }
+        // 스트리밍을 무시하고 한 번에 보내는 서버도 있다
+        let json_body = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("application/json"));
+        let mut reply = if mode == Streaming::Off || json_body {
+            let text = resp.text().map_err(net)?;
+            let reply = openai_reply(&serde_json::from_str(&text)?)?;
+            on_text(&reply.text);
+            reply
+        } else {
+            read_openai_stream(resp, on_text)?
+        };
+        // 실제로 답한 모델 (응답에 없으면 요청한 모델) — 사용량 금액 셈용
+        if reply.model.is_empty() {
+            reply.model = model.trim().to_string();
+        }
+        return Ok(reply);
     }
-    let resp = rb.send().map_err(net)?;
-    badasugi_core::usage::record_headers(&url, resp.headers());
-    let status = resp.status();
-    let wait = retry_after(resp.headers());
-    let text = resp.text().map_err(net)?;
-    if !status.is_success() {
-        return Err(error_message(status, wait, &text));
-    }
-    let v: Value = serde_json::from_str(&text)?;
-    if v["choices"][0]["finish_reason"].as_str() == Some("content_filter") {
-        bail!("모델이 요약을 거절했습니다 (콘텐츠 필터)");
-    }
-    let usage = &v["usage"];
-    Ok(Reply {
-        text: v["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string(),
-        model: v["model"].as_str().unwrap_or(model.trim()).to_string(),
-        in_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-        out_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
-    })
+    unreachable!()
 }
 
 /// 서버측 거절 폴백을 지원하는 모델
@@ -696,7 +1028,60 @@ fn beta_header(betas: &[&str], login: bool) -> Option<String> {
     (!all.is_empty()).then(|| all.join(","))
 }
 
-fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
+/// Claude 스트리밍 답 (SSE). 입력 토큰은 message_start, 출력 토큰은 message_delta 에.
+/// 서버측 거절 폴백이 중간에 일어나면 같은 스트림에서 이어 쓰므로 글은 그대로 이어 붙이면 된다
+fn read_anthropic_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
+    let mut out = Reply::default();
+    let mut stop = String::new();
+    let mut why = String::new();
+    each_line(r, |line| {
+        let Some(v) = sse_json(line) else { return Ok(true) };
+        match v["type"].as_str().unwrap_or("") {
+            "message_start" => {
+                let m = &v["message"];
+                // 쓰기 전에 거절해 다른 모델로 넘어갔으면(fallbacks) 여기부터 그 모델
+                out.model = m["model"].as_str().unwrap_or_default().to_string();
+                out.in_tokens = m["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                out.out_tokens = m["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            }
+            // 쓰다가 거절해 다른 모델이 이어 쓰면 그 경계에 fallback 블록이 온다
+            "content_block_start" if v["content_block"]["type"].as_str() == Some("fallback") => {
+                if let Some(m) = v["content_block"]["to"]["model"].as_str() {
+                    out.model = m.to_string();
+                }
+            }
+            "content_block_delta" if v["delta"]["type"].as_str() == Some("text_delta") => {
+                if let Some(t) = v["delta"]["text"].as_str().filter(|t| !t.is_empty()) {
+                    out.text.push_str(t);
+                    on_text(t);
+                }
+            }
+            "message_delta" => {
+                if let Some(s) = v["delta"]["stop_reason"].as_str() {
+                    stop = s.to_string();
+                }
+                let details = if v["delta"]["stop_details"].is_object() { &v["delta"]["stop_details"] } else { &v["stop_details"] };
+                if let Some(e) = details["explanation"].as_str() {
+                    why = e.to_string();
+                }
+                let u = &v["usage"];
+                out.in_tokens = u["input_tokens"].as_u64().unwrap_or(out.in_tokens);
+                out.out_tokens = u["output_tokens"].as_u64().unwrap_or(out.out_tokens);
+            }
+            "message_stop" => return Ok(false),
+            "error" => return Err(stream_error(&v).unwrap_or_else(|| anyhow!("요약 API 오류"))),
+            _ => {}
+        }
+        Ok(true)
+    })?;
+    if stop == "refusal" {
+        bail!("모델이 요약을 거절했습니다. {why}");
+    }
+    out.text = out.text.trim().to_string();
+    Ok(out)
+}
+
+fn anthropic(cfg: &SummarySettings, system: &str, user: &str, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     // 로그인 토큰은 짧게 유효하니 요청마다 받는다 (긴 회의는 요약에 수십 분 걸리기도 한다)
     let auth = ClaudeAuth::get()?;
     let model = if cfg.anthropic_model.trim().is_empty() {
@@ -707,6 +1092,8 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
     let mut body = json!({
         "model": model,
         "max_tokens": 16000,
+        // 받는 대로 읽어 진행을 보여 준다 (시간 제한도 읽기 한 번마다라 긴 답이 끊기지 않는다)
+        "stream": true,
         "system": system,
         "messages": [ { "role": "user", "content": user } ]
     });
@@ -726,33 +1113,15 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
     badasugi_core::usage::record_headers(ANTHROPIC_URL, resp.headers());
     let status = resp.status();
     let wait = retry_after(resp.headers());
-    let text = resp.text().map_err(net)?;
     if !status.is_success() {
+        let text = resp.text().map_err(net)?;
         return Err(auth.explain(error_message(status, wait, &text)));
     }
-    let v: Value = serde_json::from_str(&text)?;
-    if v["stop_reason"].as_str() == Some("refusal") {
-        let why = v["stop_details"]["explanation"].as_str().unwrap_or("");
-        bail!("모델이 요약을 거절했습니다. {why}");
+    let mut reply = read_anthropic_stream(resp, on_text).map_err(|e| auth.explain(e))?;
+    if reply.model.is_empty() {
+        reply.model = model.to_string();
     }
-    let out: Vec<&str> = v["content"]
-        .as_array()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b["type"].as_str() == Some("text"))
-                .filter_map(|b| b["text"].as_str())
-                .collect()
-        })
-        .unwrap_or_default();
-    let usage = &v["usage"];
-    Ok(Reply {
-        text: out.join("").trim().to_string(),
-        // 거절해 다른 모델로 다시 시도했으면(fallbacks) 그 모델
-        model: v["model"].as_str().unwrap_or(model).to_string(),
-        in_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
-        out_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-    })
+    Ok(reply)
 }
 
 /// 연결 확인 겸 사용할 수 있는 모델 목록 (설정 화면 자동 완성용)
@@ -924,7 +1293,7 @@ mod tests {
     #[test]
     fn short_meeting_is_one_request() {
         let mut sent = Vec::new();
-        let mut call = |sys: &str, user: &str| {
+        let mut call = |sys: &str, user: &str, _: &mut dyn FnMut(&str)| {
             sent.push((sys == SYSTEM, user.to_string()));
             Ok(Reply { text: "요약".into(), in_tokens: 10, out_tokens: 5, ..Default::default() })
         };
@@ -938,7 +1307,7 @@ mod tests {
     fn long_meeting_is_split_then_merged() {
         let t = transcript(200, 60); // 약 1.5만 글자
         let mut calls = Vec::new();
-        let mut call = |sys: &str, user: &str| {
+        let mut call = |sys: &str, user: &str, _: &mut dyn FnMut(&str)| {
             calls.push((sys == PART_SYSTEM, user.to_string()));
             Ok(Reply { text: format!("메모{}", calls.len()), in_tokens: 1, out_tokens: 1, ..Default::default() })
         };
@@ -959,7 +1328,7 @@ mod tests {
     #[test]
     fn too_large_part_is_halved_and_retried() {
         let t = transcript(60, 60);
-        let mut call = |sys: &str, user: &str| {
+        let mut call = |sys: &str, user: &str, _: &mut dyn FnMut(&str)| {
             // 처음 한 번 보낸 요청(전체)과 큰 구간은 거절
             if sys == SYSTEM && !user.contains("구간 메모") || user.chars().count() > 1_500 {
                 return Err(too_big());
@@ -977,7 +1346,7 @@ mod tests {
     fn merging_big_notes_stays_within_budget() {
         let t = transcript(100, 60); // 약 7,500자 → 두 구간
         let mut biggest = 0;
-        let mut call = |sys: &str, user: &str| {
+        let mut call = |sys: &str, user: &str, _: &mut dyn FnMut(&str)| {
             let len = user.chars().count();
             biggest = biggest.max(len);
             if len > 4_300 {
@@ -1004,7 +1373,7 @@ mod tests {
     #[test]
     fn rate_limit_waits_then_retries_but_not_for_daily_limits() {
         let mut n = 0;
-        let mut call = |_: &str, _: &str| {
+        let mut call = |_: &str, _: &str, _: &mut dyn FnMut(&str)| {
             n += 1;
             if n == 1 {
                 return Err(anyhow::Error::new(ApiError { status: 429, retry_after: Some(0), msg: "rate limit".into() }));
@@ -1014,7 +1383,7 @@ mod tests {
         let (req, on_reply) = counter();
         let out = run_summary(&mut call, &|_| {}, &on_reply, "", "[00:00] a: b\n", 100).unwrap();
         assert_eq!((out.as_str(), req.get()), ("ok", 1), "한도 초과 뒤 다시 보내 성공");
-        let mut call = |_: &str, _: &str| -> Result<Reply> {
+        let mut call = |_: &str, _: &str, _: &mut dyn FnMut(&str)| -> Result<Reply> {
             Err(anyhow::Error::new(ApiError { status: 429, retry_after: Some(3600), msg: "daily limit".into() }))
         };
         let e = run_summary(&mut call, &|_| {}, &|_| {}, "", "[00:00] a: b\n", 100).unwrap_err();
@@ -1025,7 +1394,7 @@ mod tests {
     #[test]
     fn usage_is_kept_when_a_later_request_fails() {
         let mut n = 0;
-        let mut call = |_: &str, _: &str| {
+        let mut call = |_: &str, _: &str, _: &mut dyn FnMut(&str)| {
             n += 1;
             if n > 2 {
                 return Err(anyhow::Error::new(ApiError { status: 500, retry_after: None, msg: "server error".into() }));
@@ -1035,5 +1404,240 @@ mod tests {
         let (req, on_reply) = counter();
         assert!(run_summary(&mut call, &|_| {}, &on_reply, "", &transcript(200, 60), 4_000).is_err());
         assert_eq!(req.get(), 2, "실패 전에 성공한 두 요청");
+    }
+
+    const ANSWER: &str = "### 제목\n출시 일정 회의\n\n### 한 줄 요약\n15일에 출시한다.\n\n### 주요 논의\n- 김 팀장: 일정 확인\n- 이 개발: QA 기간\n\n### 결정 사항\n- 15일 출시\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인\n\n### 남은 질문\n- 없음\n";
+
+    #[test]
+    fn writing_follows_the_sections() {
+        let mut w = Writing::new(FINAL_SECTIONS);
+        let (mut fracs, mut seen) = (Vec::new(), Vec::new());
+        // 몇 글자씩 나눠 받는다 (제목 줄이 조각 사이에서 끊겨도)
+        let chars: Vec<char> = ANSWER.chars().collect();
+        for piece in chars.chunks(3) {
+            if w.push(&piece.iter().collect::<String>()) {
+                seen.push(w.section());
+            }
+            fracs.push(w.frac());
+        }
+        assert_eq!(seen, ["제목", "한 줄 요약", "주요 논의", "결정 사항", "할 일", "남은 질문"]);
+        assert!(fracs.windows(2).all(|p| p[1] >= p[0]), "막대가 되돌아가지 않음");
+        let last = *fracs.last().unwrap();
+        assert!(last > 0.9 && last < 1.0, "마지막 섹션까지 썼으면 거의 끝: {last}");
+
+        // 다른 모양의 제목 줄 · 본문에 같은 이름이 한 줄로 나와도 되돌아가지 않음
+        let mut w = Writing::new(PART_SECTIONS);
+        assert!(w.push("## 논의\n- 가\n**결정 사항**:\n"));
+        assert_eq!(w.section(), "결정 사항");
+        assert!(!w.push("논의\n"));
+        assert_eq!(w.section(), "결정 사항");
+
+        // 섹션 제목 없이 쓰는 모델도 조금씩은 오른다 (끝을 모르니 90% 아래)
+        let mut w = Writing::new(FINAL_SECTIONS);
+        w.push(&"가".repeat(500));
+        assert!(w.frac() > 0.1 && w.frac() < 0.9 && w.section().is_empty());
+    }
+
+    #[test]
+    fn progress_follows_the_answer_being_written() {
+        let mut call = |_: &str, _: &str, t: &mut dyn FnMut(&str)| {
+            for piece in ["### 제목\n회의\n", "### 주요 논의\n", "- 가\n", "### 할 일\n- [ ] 나\n"] {
+                t(piece);
+            }
+            Ok(Reply { text: "끝".into(), ..Default::default() })
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        run_summary(&mut call, &|p| seen.borrow_mut().push(p), &|_| {}, "", "[00:00] a: b\n", 12_000).unwrap();
+        let seen = seen.borrow();
+        assert!(seen.iter().all(|p| p.writing && (p.done, p.total) == (0, 1)), "{seen:?}");
+        let mut sections: Vec<&str> = seen.iter().map(|p| p.section).collect();
+        sections.dedup();
+        assert_eq!(sections, ["제목", "주요 논의", "할 일"]);
+        assert!(seen.windows(2).all(|p| p[1].frac >= p[0].frac));
+    }
+
+    #[test]
+    fn openai_stream_text_and_usage() {
+        let sse = "data: {\"model\":\"gpt-5-mini-2026-08-07\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n\
+                   : keep-alive\n\n\
+                   data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"### 논의\\n\"}}]}\n\n\
+                   data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"- 가 \"},\"finish_reason\":\"stop\"}]}\n\n\
+                   data: {\"choices\":[],\"usage\":{\"prompt_tokens\":321,\"completion_tokens\":12}}\n\n\
+                   data: [DONE]\n\n";
+        let mut got = Vec::new();
+        let r = read_openai_stream(sse.as_bytes(), &mut |t| got.push(t.to_string())).unwrap();
+        assert_eq!((r.text.as_str(), r.in_tokens, r.out_tokens), ("### 논의\n- 가", 321, 12));
+        assert_eq!(r.model, "gpt-5-mini-2026-08-07");
+        assert_eq!(got, ["### 논의\n", "- 가 "]);
+
+        // Groq 는 x_groq.usage 에도
+        let groq = "data: {\"choices\":[{\"delta\":{\"content\":\"요약\"},\"finish_reason\":\"stop\"}],\"x_groq\":{\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}}\n\ndata: [DONE]\n";
+        let r = read_openai_stream(groq.as_bytes(), &mut |_| {}).unwrap();
+        assert_eq!((r.in_tokens, r.out_tokens), (9, 2));
+
+        // 도중 오류 · 콘텐츠 필터
+        let err = "data: {\"error\":{\"message\":\"rate limited\",\"code\":429}}\n\n";
+        let e = read_openai_stream(err.as_bytes(), &mut |_| {}).unwrap_err();
+        assert_eq!(e.downcast_ref::<ApiError>().map(|a| a.status), Some(429));
+        assert_eq!(wait_for(&e), Some(20), "한도 초과는 기다렸다 다시");
+        let filtered = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\ndata: [DONE]\n";
+        assert!(read_openai_stream(filtered.as_bytes(), &mut |_| {}).unwrap_err().to_string().contains("콘텐츠 필터"));
+    }
+
+    #[test]
+    fn anthropic_stream_text_usage_and_refusal() {
+        let sse = "event: message_start\n\
+                   data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1500,\"output_tokens\":1}}}\n\n\
+                   event: content_block_start\n\
+                   data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n\
+                   event: ping\n\
+                   data: {\"type\": \"ping\"}\n\n\
+                   event: content_block_delta\n\
+                   data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"abc\"}}\n\n\
+                   event: content_block_start\n\
+                   data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                   event: content_block_delta\n\
+                   data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"### 제목\\n\"}}\n\n\
+                   event: content_block_delta\n\
+                   data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"주간 회의\"}}\n\n\
+                   event: message_delta\n\
+                   data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":210}}\n\n\
+                   event: message_stop\n\
+                   data: {\"type\":\"message_stop\"}\n\n";
+        let mut got = String::new();
+        let r = read_anthropic_stream(sse.as_bytes(), &mut |t| got.push_str(t)).unwrap();
+        assert_eq!((r.text.as_str(), r.in_tokens, r.out_tokens), ("### 제목\n주간 회의", 1500, 210));
+        assert_eq!((got.as_str(), r.model.as_str()), ("### 제목\n주간 회의", "claude-opus-5-5"));
+
+        // 쓰다가 거절해 다른 모델이 이어 씀 — 글은 이어 붙이고, 사용량은 이어 쓴 모델로
+        let fell_back = "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n\
+                         data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"### 제목\\n\"}}\n\n\
+                         data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"fallback\",\"from\":{\"model\":\"claude-opus-5-5\"},\"to\":{\"model\":\"claude-opus-4-8\"}}}\n\n\
+                         data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"보안 점검 회의\"}}\n\n\
+                         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":30}}\n\n\
+                         data: {\"type\":\"message_stop\"}\n\n";
+        let r = read_anthropic_stream(fell_back.as_bytes(), &mut |_| {}).unwrap();
+        assert_eq!((r.text.as_str(), r.model.as_str(), r.in_tokens, r.out_tokens), ("### 제목\n보안 점검 회의", "claude-opus-4-8", 12, 30));
+
+        let refused = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n\
+                       data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"type\":\"refusal\",\"category\":null,\"explanation\":\"정책\"}},\"usage\":{\"output_tokens\":0}}\n\n\
+                       data: {\"type\":\"message_stop\"}\n\n";
+        let e = read_anthropic_stream(refused.as_bytes(), &mut |_| {}).unwrap_err().to_string();
+        assert!(e.contains("거절") && e.contains("정책"), "{e}");
+
+        let overloaded = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+        let e = read_anthropic_stream(overloaded.as_bytes(), &mut |_| {}).unwrap_err();
+        assert_eq!(e.downcast_ref::<ApiError>().map(|a| a.status), Some(529));
+    }
+
+    #[test]
+    fn stream_rejections_are_recognized() {
+        assert!(mentions_stream(r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#));
+        assert!(mentions_stream("'stream' is not supported"));
+        assert!(!mentions_stream("upstream connect error"));
+        assert!(!mentions_stream("Request too large for model"));
+    }
+
+    /// 요청을 하나씩 받아 정해 둔 답을 돌려주는 작은 HTTP 서버 → (주소, 받은 요청 본문)
+    fn mock_server(replies: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let (mut s, _) = l.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let head_end = loop {
+                    let n = s.read(&mut chunk).unwrap();
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break p + 4;
+                    }
+                    assert!(n > 0, "요청이 중간에 끊김");
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                while buf.len() < head_end + len {
+                    let n = s.read(&mut chunk).unwrap();
+                    assert!(n > 0, "본문이 중간에 끊김");
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let _ = tx.send(String::from_utf8_lossy(&buf[head_end..]).to_string());
+                s.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        (base, rx)
+    }
+
+    fn http(status: &str, content_type: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn openai_server_without_stream_options_falls_back() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"### 제목\\n\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"주간 회의\"}}]}\n\ndata: [DONE]\n\n";
+        let (base, rx) = mock_server(vec![
+            http("400 Bad Request", "application/json", r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#),
+            http("200 OK", "text/event-stream", sse),
+        ]);
+        let mut got = String::new();
+        let r = openai_compat(&base, None, "m", "s", "u", &mut |t| got.push_str(t)).unwrap();
+        assert_eq!((r.text.as_str(), got.as_str()), ("### 제목\n주간 회의", "### 제목\n주간 회의"));
+        assert_eq!(r.model, "m", "응답에 모델이 없으면 요청한 모델");
+        let first: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        let second: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!((&first["stream"], &first["stream_options"]["include_usage"]), (&json!(true), &json!(true)));
+        assert_eq!((&second["stream"], second["stream_options"].is_null()), (&json!(true), true));
+    }
+
+    #[test]
+    fn openai_server_that_ignores_streaming_still_works() {
+        let (base, _rx) = mock_server(vec![http(
+            "200 OK",
+            "application/json; charset=utf-8",
+            r#"{"choices":[{"message":{"content":" 요약 "},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
+        )]);
+        let mut got = String::new();
+        let r = openai_compat(&base, None, "m", "s", "u", &mut |t| got.push_str(t)).unwrap();
+        assert_eq!((r.text.as_str(), r.in_tokens, r.out_tokens, got.as_str()), ("요약", 7, 3, "요약"));
+    }
+
+    /// 실제 HTTP 로 받는 Ollama 답 → 섹션마다 진행 · 제목 · 사용량까지
+    #[test]
+    fn summarize_reports_sections_from_a_streaming_server() {
+        let mut nd: String = ANSWER
+            .split_inclusive('\n')
+            .map(|t| json!({ "message": { "content": t }, "done": false }).to_string() + "\n")
+            .collect();
+        nd += &(json!({ "message": { "content": "" }, "done": true, "prompt_eval_count": 50, "eval_count": 20 }).to_string() + "\n");
+        let (base, rx) = mock_server(vec![http("200 OK", "application/x-ndjson", &nd)]);
+        let cfg = SummarySettings { provider: "ollama".into(), ollama_url: base, ..Default::default() };
+        let doc: SessionDoc = serde_json::from_value(json!({
+            "version": 1, "id": "t", "title": "t", "startedAt": "2026-11-16 09:00", "durationMs": 1000, "engine": "x",
+            "utterances": [ { "id": 0, "startMs": 0, "endMs": 1000, "speaker": 0, "text": "안녕하세요" } ]
+        }))
+        .unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let used = std::cell::Cell::new((0, 0));
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let s = summarize(&cfg, &doc, &|p| seen.borrow_mut().push(p), &|_, r| used.set((r.in_tokens, r.out_tokens)), &flag).unwrap();
+        assert_eq!(s.title.as_deref(), Some("출시 일정 회의"));
+        assert!(s.text.starts_with("### 한 줄 요약"));
+        assert_eq!(used.get(), (50, 20));
+        let sent: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["stream"], json!(true));
+        let mut sections: Vec<&str> = seen.borrow().iter().map(|p| p.section).collect();
+        sections.dedup();
+        assert_eq!(sections, ["제목", "한 줄 요약", "주요 논의", "결정 사항", "할 일", "남은 질문"]);
     }
 }

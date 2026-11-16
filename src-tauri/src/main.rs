@@ -1186,12 +1186,15 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
         (cfg, doc)
     };
     let doc2 = doc.clone();
-    // 긴 회의는 구간으로 나눠 정리하므로 진행을 화면에 알린다
+    // 진행을 화면에 알린다 (답을 쓰는 섹션 · 긴 회의는 구간까지)
     let (app2, id2) = (app.clone(), id.clone());
     let progress = move |p: summary::Progress| {
         let _ = app2.emit(
             "bd://summary-progress",
-            serde_json::json!({ "id": id2, "done": p.done, "total": p.total, "waitSecs": p.wait_secs }),
+            serde_json::json!({
+                "id": id2, "done": p.done, "total": p.total, "waitSecs": p.wait_secs,
+                "frac": p.frac, "writing": p.writing, "section": p.section,
+            }),
         );
     };
     // 요청이 성공할 때마다 바로 사용량에 센다 — 긴 회의 중간에 실패해도 이미 쓴 만큼은 남게

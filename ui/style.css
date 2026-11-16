@@ -202,6 +202,17 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .md code { font-family: var(--mono); font-size: 12px; background: var(--sunken); padding: 1px 4px; border-radius: 4px; }
 .md .loading { color: var(--muted); display: flex; align-items: center; gap: 8px; padding: 6px 0; }
 .md .loading .link { margin-left: auto; flex: none; font-size: 12.5px; }
+/* 요약 진행: 문구 + 멈추기 / 막대 + 퍼센트 · 걸린 시간 */
+.sum-progress { padding: 4px 0 2px; }
+.sum-row { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
+.sum-step { flex: 1; min-width: 0; }
+.sum-row .link { flex: none; font-size: 12.5px; }
+.sum-track { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.sum-bar { position: relative; flex: 1; height: 6px; border-radius: 999px; background: var(--sunken); overflow: hidden; }
+.sum-bar i { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .45s ease; }
+.sum-bar.busy::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent 25%, color-mix(in srgb, var(--accent) 45%, transparent) 50%, transparent 75%); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
+.sum-meta { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .sum-bar.busy::after { animation: none; } .sum-bar i { transition: none; } }
 
 /* ── 도크 ── */
 .dock { position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 12px 14px 22px; border-top: 1px solid var(--line); background: var(--surface); flex: none; }
