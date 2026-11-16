@@ -1186,13 +1186,19 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
         (cfg, doc)
     };
     let doc2 = doc.clone();
-    // 진행을 화면에 알린다 (답을 쓰는 섹션 · 긴 회의는 구간까지)
-    let (app2, id2) = (app.clone(), id.clone());
+    let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
+    // 진행을 화면에 알린다 (답을 쓰는 섹션 · 긴 회의는 구간까지).
+    // 멈춘 요약은 보내 둔 요청의 답을 끝까지 받으므로 더 알리지 않고, 화면도 요약 번호로 가려 받는다
+    // (멈추고 바로 같은 회의를 다시 요약해도 앞 요약의 진행이 새 요약을 덮지 않게)
+    let (app2, id2, cancel2) = (app.clone(), id.clone(), cancel.clone());
     let progress = move |p: summary::Progress| {
+        if cancel2.load(Ordering::SeqCst) {
+            return;
+        }
         let _ = app2.emit(
             "bd://summary-progress",
             serde_json::json!({
-                "id": id2, "done": p.done, "total": p.total, "waitSecs": p.wait_secs,
+                "id": id2, "token": token, "done": p.done, "total": p.total, "waitSecs": p.wait_secs,
                 "frac": p.frac, "writing": p.writing, "section": p.section,
             }),
         );
@@ -1202,7 +1208,6 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     let on_usage = move |provider: &str, r: &summary::Reply| {
         app3.state::<usage_book::UsageBook>().summary(provider, &r.model, r.in_tokens, r.out_tokens);
     };
-    let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     // 요약은 따로 돌리고, 멈추면 보내 둔 요청(로컬 LLM 은 몇 분)을 기다리지 않고 화면을 먼저 돌려보낸다.
     // 따로 도는 쪽은 다음 요청부터 보내지 않고 끝난다.
     let (tx, rx) = std::sync::mpsc::channel();

@@ -2647,7 +2647,8 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://paused', (e) => onPaused(!!e.payload));
   await api.listen('bd://sleep', (e) => onSleep(e.payload));
   await api.listen('bd://summary-progress', (e) => {
-    if (!S.summarizing || e.payload?.id !== S.sumId) return;
+    // 멈춘 앞 요약이 끝까지 받는 답의 진행은 버린다 (같은 회의를 바로 다시 요약해도)
+    if (!S.summarizing || e.payload?.id !== S.sumId || e.payload?.token !== S.sumToken) return;
     S.sumProgress = e.payload;
     renderSummary();
   });
@@ -2750,7 +2751,7 @@ function createMock() {
   async function mockSummarize({ id, token }) {
     const slow = new URLSearchParams(location.search).has('sumslow') ? 4 : 1;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms * slow));
-    const send = (p) => handlers['bd://summary-progress'] && handlers['bd://summary-progress']({ payload: { id, done: 0, total: 1, waitSecs: 0, ...p } });
+    const send = (p) => handlers['bd://summary-progress'] && handlers['bd://summary-progress']({ payload: { id, token, done: 0, total: 1, waitSecs: 0, ...p } });
     const check = () => { if (mockSumCancel === token) throw '요약을 멈췄어요'; };
     await wait(1500); check();
     const steps = [['제목', 0.0], ['제목', 0.01], ['한 줄 요약', 0.02], ['주요 논의', 0.08], ['주요 논의', 0.3], ['주요 논의', 0.45], ['결정 사항', 0.53], ['결정 사항', 0.62], ['할 일', 0.68], ['할 일', 0.85], ['남은 질문', 0.9], ['남은 질문', 0.97]];
