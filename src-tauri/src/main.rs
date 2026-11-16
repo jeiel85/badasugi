@@ -11,6 +11,7 @@ mod snap;
 mod status;
 mod summary;
 mod update;
+mod pricing;
 mod usage_book;
 mod voices;
 
@@ -74,8 +75,8 @@ pub(crate) struct AppState {
     pub file_pct: AtomicUsize,
     /// 이번 녹음에서 자동 저장 실패를 이미 알렸나 (한 번만 알림)
     save_warned: AtomicBool,
-    /// 지금 녹음이 쓰는 음성 인식 API 공급자 (로컬이면 None) — 사용량 집계용
-    api_provider: Mutex<Option<&'static str>>,
+    /// 지금 녹음이 쓰는 음성 인식 API 공급자 · 모델 (로컬이면 None) — 사용량 집계용
+    api_provider: Mutex<Option<(&'static str, String)>>,
     /// 화면 스크립트가 끝까지 실행돼 준비됐는지 (자동 점검이 확인)
     pub ui_ready: AtomicBool,
     /// 녹음 중 지금 위치 (ms) — 다시 듣기 구간을 녹음 시간축에 맞추는 데 쓴다
@@ -525,7 +526,9 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         let s = st.settings.lock().clone();
         let engine = build_engine(&s, &st.paths)?;
         *st.api_provider.lock() = match &engine {
-            EngineConfig::Api { base_url, .. } => Some(badasugi_core::usage::provider_of(base_url)),
+            EngineConfig::Api { base_url, model, .. } => {
+                Some((badasugi_core::usage::provider_of(base_url), model.trim().to_string()))
+            }
             _ => None,
         };
         let mut doc = SessionDoc::new(engine.label());
@@ -733,11 +736,11 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
         }
         Event::ApiUsage { audio_ms, ok } => {
             // 실제로 보낸 요청만 센다 — 실패한 요청도 요청 수에 넣고, 연결 문제로 미뤄 두거나 건너뛴 발화는 세지 않는다
-            let provider = *st.api_provider.lock();
-            if let Some(p) = provider {
+            let provider = st.api_provider.lock().clone();
+            if let Some((p, model)) = provider {
                 let book = app.state::<usage_book::UsageBook>();
                 if *ok {
-                    book.stt(p, *audio_ms as f64 / 1000.0);
+                    book.stt(p, &model, *audio_ms as f64 / 1000.0);
                 } else {
                     book.stt_failed(p);
                 }
@@ -1186,7 +1189,7 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     // 요청이 성공할 때마다 바로 사용량에 센다 — 긴 회의 중간에 실패해도 이미 쓴 만큼은 남게
     let app3 = app.clone();
     let on_usage = move |provider: &str, r: &summary::Reply| {
-        app3.state::<usage_book::UsageBook>().summary(provider, r.in_tokens, r.out_tokens);
+        app3.state::<usage_book::UsageBook>().summary(provider, &r.model, r.in_tokens, r.out_tokens);
     };
     let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     // 요약은 따로 돌리고, 멈추면 보내 둔 요청(로컬 LLM 은 몇 분)을 기다리지 않고 화면을 먼저 돌려보낸다.
@@ -1415,7 +1418,26 @@ fn on_display_change(app: &AppHandle) {
 fn get_usage(app: AppHandle) -> usage_book::UsageReport {
     let book = app.state::<usage_book::UsageBook>();
     book.save();
-    book.report()
+    // 모델을 기록하기 전(v0.4.5 까지) 사용분은 지금 설정한 모델 단가로 셈한다
+    let s = app.state::<AppState>().settings.lock().clone();
+    let legacy = |provider: &str, u: usage_book::Use| -> Option<String> {
+        let m = match (u, provider) {
+            (usage_book::Use::Stt, "groq") => &s.groq_model,
+            (usage_book::Use::Stt, "openai") => &s.openai_model,
+            (usage_book::Use::Summary, "groq") => &s.summary.groq_model,
+            (usage_book::Use::Summary, "openai") => &s.summary.openai_model,
+            (usage_book::Use::Summary, "gemini") => &s.summary.gemini_model,
+            (usage_book::Use::Summary, "anthropic") => &s.summary.anthropic_model,
+            _ => return None,
+        };
+        match m.trim() {
+            // 요약 설정이 비어 있으면 Claude 는 기본 모델로 보낸다 (summary::anthropic)
+            "" if provider == "anthropic" => Some("claude-opus-5-5".into()),
+            "" => None,
+            m => Some(m.to_string()),
+        }
+    };
+    book.report(&legacy)
 }
 
 #[tauri::command]

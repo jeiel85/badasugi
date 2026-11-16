@@ -1672,6 +1672,7 @@ function renderSettings() {
   $$('[data-engine]').forEach((el) => (el.hidden = el.dataset.engine !== s.engine));
   $('#engine-desc').innerHTML = ENGINE_DESC[s.engine];
   $('#opt-beam').checked = s.beamSize >= 2;
+  $('#opt-usd-krw').value = usdKrw();
   $('#opt-openai-model').value = s.openaiModel;
   $('#opt-groq-model').value = s.groqModel;
   $('#opt-custom-url').value = s.customUrl;
@@ -1775,11 +1776,41 @@ const PROVIDER = {
 const LIMIT_LABEL = { requests: '요청', tokens: '토큰', 'input-tokens': '입력 토큰', 'output-tokens': '출력 토큰', 'audio-seconds': '오디오(초)' };
 const n0 = (v) => Number(v || 0).toLocaleString('ko-KR');
 function minutes(secs) { return secs >= 60 ? `${(secs / 60).toFixed(1)}분` : `${Math.round(secs)}초`; }
-function tallyLines(t) {
+// 금액 (USD → 원). 원화는 설정 › 사용량의 환율로
+const usdKrw = () => (S.settings?.usdKrw > 0 ? S.settings.usdKrw : 1360);
+function krwText(usd) {
+  const w = usd * usdKrw();
+  if (w <= 0) return '0원';
+  if (w < 1) return '1원 미만';
+  return `약 ${Math.round(w).toLocaleString('ko-KR')}원`;
+}
+const usdText = (usd) => (usd <= 0 ? '$0' : usd < 0.01 ? '$0.01 미만' : `$${usd.toFixed(2)}`);
+const costUsd = (c) => (c ? (c.sttUsd || 0) + (c.sumUsd || 0) : 0);
+// 한 줄씩: 금액 · 음성 인식 · 요약. 음성 인식과 요약을 다 썼으면 줄마다 금액도 붙인다
+function tallyLines(t, c) {
   const out = [];
-  if (t?.sttRequests) out.push(`음성 인식 ${minutes(t.sttSecs)} · ${n0(t.sttRequests)}회${t.sttFailures ? ` (실패 ${n0(t.sttFailures)})` : ''}`);
-  if (t?.sumRequests) out.push(`요약 ${n0(t.sumRequests)}회 · 토큰 입력 ${n0(t.sumInTokens)} · 출력 ${n0(t.sumOutTokens)}`);
+  const both = t?.sttRequests && t?.sumRequests;
+  const part = (usd) => (both && c ? ` <small class="nowrap">· ${esc(krwText(usd))}</small>` : '');
+  if (t?.sttRequests || t?.sumRequests) {
+    const usd = costUsd(c);
+    if (usd > 0) out.push(`<span class="usage-amt"><b>${esc(krwText(usd))}</b><small>${esc(usdText(usd))}</small></span>`);
+    else if (c?.unpriced?.length) out.push('<span class="usage-amt"><b>금액 모름</b></span>');
+  }
+  if (t?.sttRequests) out.push(esc(`음성 인식 ${minutes(t.sttSecs)} · ${n0(t.sttRequests)}회${t.sttFailures ? ` (실패 ${n0(t.sttFailures)})` : ''}`) + part(c?.sttUsd || 0));
+  if (t?.sumRequests) out.push(esc(`요약 ${n0(t.sumRequests)}회 · 토큰 입력 ${n0(t.sumInTokens)} · 출력 ${n0(t.sumOutTokens)}`) + part(c?.sumUsd || 0));
   return out.length ? out : ['없음'];
+}
+// 카드 아래 덧붙임 — 이번 달 기준 (오늘은 이번 달에 들어 있다)
+function costNotes(id, t, c) {
+  const out = [];
+  // Groq 는 짧은 요청도 10초로 매겨, 요금이 매겨진 길이가 실제보다 꽤 길 수 있다
+  const billed = c?.sttBilledSecs || 0;
+  if (id === 'groq' && billed > (t?.sttSecs || 0) * 1.05 + 1) {
+    out.push(`Groq 는 10초보다 짧은 음성 인식 요청도 10초로 매겨, 이번 달은 ${minutes(billed)}어치로 셈했어요.`);
+  }
+  if (c?.estimated) out.push('모델을 기록하기 전(v0.4.5까지) 사용분은 지금 설정한 모델 단가로 셈했어요.');
+  if (c?.unpriced?.length) out.push(`단가를 몰라 금액에서 뺐어요: ${c.unpriced.join(', ')}`);
+  return out;
 }
 // 재설정 시각(ms). Groq · OpenAI 는 받은 때부터 "1h9m7.2s" · "6ms" 같은 길이, Claude 는 "2026-11-16T08:30:00Z",
 // retry-after 는 초 또는 HTTP 날짜. 알아볼 수 없으면 null
@@ -1839,17 +1870,27 @@ async function renderUsage() {
     box.innerHTML = '<div class="usage-empty">아직 API 를 쓴 기록이 없어요. 로컬 엔진과 Ollama 는 사용량이 없어요.</div>';
     return;
   }
-  // 항목마다 한 줄씩 (음성 인식 · 요약 · 한도 종류)
+  // 항목마다 한 줄씩 (금액 · 음성 인식 · 요약 · 한도 종류)
   const lines = (arr) => arr.map((x) => `<div>${x}</div>`).join('');
-  box.innerHTML = ids.map((id) => {
+  const sum = (costs) => Object.values(costs || {}).reduce((a, c) => a + costUsd(c), 0);
+  const [monthUsd, todayUsd] = [sum(r.monthCost), sum(r.todayCost)];
+  const total = monthUsd > 0
+    ? `<div class="usage-total">
+        <div><span>이번 달 합계</span><b>${esc(krwText(monthUsd))}</b><small>${esc(usdText(monthUsd))}</small></div>
+        <div><span>오늘</span><b>${esc(krwText(todayUsd))}</b><small>${esc(usdText(todayUsd))}</small></div>
+      </div>`
+    : '';
+  box.innerHTML = total + ids.map((id) => {
     const p = PROVIDER[id] || { name: id, url: '', link: '' };
     const rate = (r.rates || []).find((x) => x.provider === id);
     const lim = limitsInfo(rate);
+    const notes = costNotes(id, r.month?.[id], r.monthCost?.[id]);
     return `<div class="usage-card">
       <div class="usage-head"><b>${esc(p.name)}</b>${p.url ? `<button class="link" data-url="${p.url}">${esc(p.link)}</button>` : ''}</div>
-      <div class="usage-row"><span>오늘</span><span>${lines(tallyLines(r.today?.[id]).map(esc))}</span></div>
-      <div class="usage-row"><span>이번 달</span><span>${lines(tallyLines(r.month?.[id]).map(esc))}</span></div>
+      <div class="usage-row"><span>오늘</span><span>${lines(tallyLines(r.today?.[id], r.todayCost?.[id]))}</span></div>
+      <div class="usage-row"><span>이번 달</span><span>${lines(tallyLines(r.month?.[id], r.monthCost?.[id]))}</span></div>
       ${lim ? `<div class="usage-row"><span>남은 한도<small>${lim.when} 기준</small></span><span>${lines(lim.lines)}</span></div>` : ''}
+      ${notes.length ? `<div class="usage-note">${notes.map(esc).join('<br>')}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -1935,6 +1976,12 @@ bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
 bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
 bind('opt-unload', (t) => (S.settings.unloadWhenIdle = t.checked));
 bind('opt-autoupdate', (t) => { S.settings.autoUpdate = t.checked; renderAbout(); });
+bind('opt-usd-krw', (t) => {
+  const v = Math.round(Number(String(t.value).replace(/,/g, '')));
+  if (v >= 100 && v <= 10000) S.settings.usdKrw = v;
+  t.value = usdKrw();
+  renderUsage();
+});
 bindSeg('seg-theme', (v) => { S.settings.theme = v; applyTheme(); });
 $('#opt-autostart').addEventListener('change', (e) => call('set_autostart', { enabled: e.target.checked }).then(() => (S.app.autostart = e.target.checked)));
 
@@ -2167,6 +2214,7 @@ function createMock() {
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', alwaysOnTop: false, theme: 'system',
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
+      usdKrw: 1360,
     },
     rec: 'idle',
     models: [
@@ -2192,8 +2240,24 @@ function createMock() {
         { version: '0.3.0', date: '2026-11-13', notes: '## 받아쓰기 v0.3.0\n\n### 새 기능\n- 🩺 **진단 로그** — 문제가 생겼을 때 원인을 찾을 수 있게 기록해요.\n- 🔑 **API 키 받는 방법 안내**\n\n### 개선\n- 🎤 마이크 소리가 거의 안 들어올 때 알려 줍니다' },
       ];
       if (cmd === 'get_usage') return {
-        today: { groq: { sttSecs: 754, sttRequests: 96, sttFailures: 1, sumRequests: 1, sumInTokens: 4210, sumOutTokens: 612 } },
-        month: { groq: { sttSecs: 9120, sttRequests: 1180, sttFailures: 3, sumRequests: 9, sumInTokens: 38120, sumOutTokens: 5410 }, gemini: { sttSecs: 0, sttRequests: 0, sttFailures: 0, sumRequests: 2, sumInTokens: 15200, sumOutTokens: 1900 } },
+        today: {
+          groq: { sttSecs: 3426, sttRequests: 848, sttFailures: 0, sumRequests: 15, sumInTokens: 33953, sumOutTokens: 29412 },
+          anthropic: { sttSecs: 0, sttRequests: 0, sttFailures: 0, sumRequests: 2, sumInTokens: 51788, sumOutTokens: 11674 },
+        },
+        month: {
+          groq: { sttSecs: 9120, sttRequests: 1180, sttFailures: 3, sumRequests: 24, sumInTokens: 72073, sumOutTokens: 34822 },
+          anthropic: { sttSecs: 0, sttRequests: 0, sttFailures: 0, sumRequests: 2, sumInTokens: 51788, sumOutTokens: 11674 },
+          gemini: { sttSecs: 0, sttRequests: 0, sttFailures: 0, sumRequests: 2, sumInTokens: 15200, sumOutTokens: 1900 },
+        },
+        todayCost: {
+          groq: { sttUsd: 0.0953, sumUsd: 0.0227, sttBilledSecs: 8580, estimated: false, unpriced: [] },
+          anthropic: { sttUsd: 0, sumUsd: 0.4406, sttBilledSecs: 0, estimated: false, unpriced: [] },
+        },
+        monthCost: {
+          groq: { sttUsd: 0.1532, sumUsd: 0.0317, sttBilledSecs: 13790, estimated: true, unpriced: [] },
+          anthropic: { sttUsd: 0, sumUsd: 0.4406, sttBilledSecs: 0, estimated: false, unpriced: [] },
+          gemini: { sttUsd: 0, sumUsd: 0, sttBilledSecs: 0, estimated: false, unpriced: ['gemini-flash-latest'] },
+        },
         rates: [{ provider: 'groq', at: Math.floor(Date.now() / 1000) - 180, items: [['x-ratelimit-limit-requests', '2000'], ['x-ratelimit-remaining-requests', '1904'], ['x-ratelimit-reset-requests', '1h9m7.2s'], ['x-ratelimit-limit-tokens', '6000'], ['x-ratelimit-remaining-tokens', '5560'], ['x-ratelimit-reset-tokens', '4.4s']] }],
       };
       if (cmd === 'session_audio') return demoWavUrl();
