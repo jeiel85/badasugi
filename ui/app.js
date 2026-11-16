@@ -88,6 +88,33 @@ function fmt(ms) {
   const p = (n) => String(n).padStart(2, '0');
   return h ? `${h}:${p(m)}:${p(x)}` : `${p(m)}:${p(x)}`;
 }
+// 'YYYY-MM-DD' → 오늘 · 어제 · 11월 12일 (목) · (다른 해) 2025년 11월 12일 (수)
+const WEEKDAY = ['일', '월', '화', '수', '목', '금', '토'];
+function dayLabel(ymd) {
+  const [y, m, d] = String(ymd || '').split('-').map(Number);
+  if (!y || !m || !d) return String(ymd || '');
+  const day = new Date(y, m - 1, d);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const ago = Math.round((today - day) / 86400000);
+  if (ago === 0) return '오늘';
+  if (ago === 1) return '어제';
+  const s = `${m}월 ${d}일 (${WEEKDAY[day.getDay()]})`;
+  return y === today.getFullYear() ? s : `${y}년 ${s}`;
+}
+// 기록의 시작 시각 'YYYY-MM-DD HH:MM' → '오늘 13:59'
+function whenLabel(startedAt) {
+  const s = String(startedAt || '');
+  return `${dayLabel(s.slice(0, 10))} ${s.slice(11, 16)}`.trim();
+}
+// 회의 길이 — 시각(13:59)과 헷갈리지 않게 말로: 45초 · 16분 · 1시간 7분
+function durLabel(ms) {
+  const s = Math.round((ms || 0) / 1000);
+  if (s < 60) return `${s}초`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}분`;
+  return m % 60 ? `${Math.floor(m / 60)}시간 ${m % 60}분` : `${m / 60}시간`;
+}
 function mb(bytes) {
   return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)}GB` : `${Math.round(bytes / 1e6)}MB`;
 }
@@ -231,7 +258,10 @@ function renderDoc() {
   items.sort((a, b) => a.startMs - b.startMs || a.id - b.id);
 
   const hasContent = items.length > 0;
-  $('#empty').hidden = hasContent || S.rec !== 'idle' || !S.live;
+  const showEmpty = !hasContent && S.rec === 'idle' && S.live;
+  // 첫 화면이 다시 보일 때마다 최근 회의를 새로 읽는다 (방금 마친 회의 · 바꾼 제목이 들어가게)
+  if (showEmpty && $('#empty').hidden) renderRecent();
+  $('#empty').hidden = !showEmpty;
   $('#meta').hidden = !d || (!hasContent && S.rec === 'idle');
   renderSetup();
 
@@ -295,7 +325,8 @@ function summaryStep(p) {
 function renderSummary() {
   const d = doc();
   const card = $('#summary-card');
-  if (S.summarizing && d) {
+  // 요약하는 동안 다른 기록으로 옮겨 가도, 그 기록에 '정리하는 중'을 띄우지 않는다
+  if (S.summarizing && d && d.id === S.sumId) {
     card.hidden = false;
     const stop = S.sumCancelling
       ? '<button class="link" id="btn-cancel-summary" disabled>멈추는 중…</button>'
@@ -313,8 +344,60 @@ function updateActions() {
   $('#btn-copy').disabled = !has;
   $('#btn-save').disabled = !has;
   $('#btn-summary').disabled = !has || S.summarizing;
-  $('#viewing').hidden = S.live;
-  if (!S.live && S.viewDoc) $('#viewing-label').textContent = `기록 보기 · ${S.viewDoc.title}`;
+  renderBanners(has);
+}
+
+// 위쪽 배너: 지난 회의를 보는 중 / 방금 회의를 마침 (저장됐다고 알리고 → 새 회의 · 회의 기록)
+function renderBanners(has) {
+  const v = !S.live ? S.viewDoc : null;
+  $('#viewing').hidden = !v;
+  if (v) {
+    // 제목은 바로 아래에 있으니 배너에는 언제 회의인지를 보여 준다
+    $('#viewing-label').textContent = `지난 회의 · ${whenLabel(v.startedAt)}`;
+    const back = $('#btn-back-live');
+    const live = S.rec !== 'idle';
+    back.textContent = live ? '실시간으로 돌아가기' : '닫기';
+    back.title = live ? '받아 적는 중인 회의로 돌아가요' : '이 기록을 닫아요';
+  }
+  const ended = S.live && S.rec === 'idle' && has;
+  $('#ended').hidden = !ended;
+  if (ended) $('#ended-label').textContent = `${S.liveDoc?.sourceFile ? '파일 받아쓰기를' : '회의를'} 마쳤어요 · 기록에 저장됨`;
+}
+
+// 첫 화면의 최근 회의 (최신 5개)
+let recentReq = 0;
+async function renderRecent() {
+  const my = ++recentReq;
+  let list = [];
+  try { list = (await api.invoke('list_sessions')) || []; } catch { /* 비움 */ }
+  if (my !== recentReq) return;
+  const items = list.slice(0, 5);
+  $('#recent').hidden = !items.length;
+  $('#btn-recent-all').textContent = list.length > items.length ? `전체 보기 (${list.length})` : '전체 보기';
+  $('#recent-list').innerHTML = items.map((m) => `<button class="recent-item" data-id="${esc(m.id)}" title="${esc(m.title)}">
+      <div><b>${esc(m.title)}</b><small>${esc(whenLabel(m.startedAt))} · ${durLabel(m.durationMs)}${m.speakers > 1 ? ` · 화자 ${m.speakers}명` : ''}</small></div>
+      <svg><use href="#i-chevron"/></svg>
+    </button>`).join('');
+}
+
+// 회의를 마친 화면을 비우고 다음 회의를 준비한다 — 방금 회의는 이미 기록에 저장돼 있다
+function newMeeting() {
+  if (S.rec !== 'idle') return;
+  persistDoc.flush(); // 방금 고친 내용이 있으면 먼저 저장
+  S.live = true;
+  S.viewDoc = null;
+  S.liveDoc = null;
+  S.pending.clear();
+  S.failed.clear();
+  follow = true;
+  if (!$('#findbar').hidden) { $('#findbar').hidden = true; S.findQ = ''; $('#find-input').value = ''; }
+  $('#speakers').innerHTML = '';
+  $('#summary-card').classList.remove('folded');
+  hidePopovers();
+  renderDock();
+  renderDoc();
+  body.scrollTop = 0;
+  toast('화면을 비웠어요.\n방금 회의는 회의 기록에 남아 있어요');
 }
 
 function renderSetup() {
@@ -658,6 +741,14 @@ $('#btn-pin').addEventListener('click', () => {
   toast(S.settings.alwaysOnTop ? '항상 위에 표시합니다' : '항상 위 표시를 껐습니다');
 });
 $('#btn-back-live').addEventListener('click', () => { S.live = true; S.viewDoc = null; follow = true; renderDock(); scheduleRender(); });
+$('#btn-view-list').addEventListener('click', () => openPanel('history'));
+$('#btn-ended-list').addEventListener('click', () => openPanel('history'));
+$('#btn-new').addEventListener('click', newMeeting);
+$('#btn-recent-all').addEventListener('click', () => openPanel('history'));
+$('#recent-list').addEventListener('click', (e) => {
+  const b = e.target.closest('.recent-item');
+  if (b) openSession(b.dataset.id);
+});
 $('#jump').addEventListener('click', followLatest);
 body.addEventListener('scroll', () => {
   const top = body.scrollTop;
@@ -1018,16 +1109,36 @@ async function renderHistory() {
   };
   let day = '';
   const liveId = S.rec !== 'idle' ? S.liveDoc?.id : null;
+  // 지금 화면에 띄워 둔 회의는 목록에서 표시해 둔다
+  const shownId = doc()?.id;
   box.innerHTML = list.map((m) => {
     const dd = m.startedAt.slice(0, 10);
-    const head = dd !== day ? `<div class="h-day">${esc(dd.replace(/-/g, '. '))}</div>` : '';
+    const head = dd !== day ? `<div class="h-day">${esc(dayLabel(dd))}</div>` : '';
     day = dd;
-    return `${head}<div class="h-item" role="button" data-id="${esc(m.id)}">
+    return `${head}<div class="h-item${m.id === shownId ? ' on' : ''}" role="button" data-id="${esc(m.id)}">
       <div class="h-title"><span>${mark(m.title)}${m.hits ? `<span class="h-badge">${m.hits}곳</span>` : ''}</span>${m.id === liveId ? '<span class="h-live">● 녹음 중</span>' : `<button class="icon-btn sm" data-del="${esc(m.id)}" title="삭제"><svg><use href="#i-trash"/></svg></button>`}</div>
-      <div class="h-sub">${esc(m.startedAt.slice(11))} · ${fmt(m.durationMs)} · 화자 ${m.speakers}명 · 발화 ${m.count}개</div>
+      <div class="h-sub">${esc(m.startedAt.slice(11))} · ${durLabel(m.durationMs)} · 화자 ${m.speakers}명 · 발화 ${m.count}개</div>
       ${m.snippet ? `<div class="h-snip">${mark(m.snippet)}</div>` : `<div class="h-prev">${esc(m.preview)}</div>`}
     </div>`;
   }).join('');
+  // 보고 있던 회의가 목록 아래쪽이면 보이는 곳까지 내린다 (목록 ↔ 회의를 오가며 확인할 때)
+  const on = !q && box.querySelector('.h-item.on');
+  if (on) {
+    const r = on.getBoundingClientRect(), b = box.getBoundingClientRect();
+    if (r.bottom > b.bottom || r.top < b.top) box.scrollTop += r.top - b.top - box.clientHeight / 3;
+  }
+}
+// 기록 하나를 연다 — 받아 적는 중인 회의는 최신 문장으로, 지난 회의는 처음부터 (q: 찾을 말)
+async function openSession(id, q = '') {
+  if (S.liveDoc && id === S.liveDoc.id) { S.live = true; S.viewDoc = null; }
+  else { S.viewDoc = await call('load_session', { id }); S.live = false; }
+  closePanels();
+  renderDock();
+  const toLatest = following() && !q;
+  if (toLatest) follow = true;
+  renderDoc();
+  if (!toLatest) body.scrollTop = 0;
+  if (q) openFind(q);
 }
 $('#history-list').addEventListener('click', async (e) => {
   const del = e.target.closest('[data-del]');
@@ -1042,23 +1153,12 @@ $('#history-list').addEventListener('click', async (e) => {
       renderDock();
       renderDoc();
       renderHistory();
+      if (!$('#empty').hidden) renderRecent();
     }
     return;
   }
   const item = e.target.closest('.h-item');
-  if (!item) return;
-  const id = item.dataset.id;
-  if (S.liveDoc && id === S.liveDoc.id) { S.live = true; S.viewDoc = null; }
-  else { S.viewDoc = await call('load_session', { id }); S.live = false; }
-  const q = $('#history-q').value.trim();
-  closePanels();
-  renderDock();
-  // 받아 적는 중인 회의는 최신 문장으로, 지난 회의는 처음부터 연다
-  const toLatest = following() && !q;
-  if (toLatest) follow = true;
-  renderDoc();
-  if (!toLatest) body.scrollTop = 0;
-  if (q) openFind(q);
+  if (item) openSession(item.dataset.id, $('#history-q').value.trim());
 });
 $('#btn-open-folder').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
 $('#history-q').addEventListener('input', debounce(renderHistory, 220));
@@ -1935,6 +2035,7 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   if (S.app.downloading) S.downloads[S.app.downloading] = { done: 0, total: 1 };
   renderDock();
   renderDoc();
+  if (!$('#empty').hidden) renderRecent();
 })();
 
 /* ───────────── 데모 · 브라우저 미리보기 ───────────── */
@@ -1992,6 +2093,21 @@ function demoWavUrl() {
   return demoWav;
 }
 
+// 브라우저 미리보기용 회의 기록 (오늘 · 어제 · 지난주)
+function mockSessions() {
+  const p = (n) => String(n).padStart(2, '0');
+  const day = (ago) => { const d = new Date(); d.setDate(d.getDate() - ago); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+  const prev = '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.';
+  return [
+    { id: 's5', title: '업무 인수 인계 회의', startedAt: `${day(0)} 13:59`, durationMs: 4038000, count: 412, speakers: 2, preview: prev },
+    { id: 's4', title: '주간 개발 회의', startedAt: `${day(0)} 10:00`, durationMs: 1820000, count: 160, speakers: 4, preview: prev },
+    { id: 'demo', title: '앱 출시 일정 회의', startedAt: `${day(1)} 14:30`, durationMs: 61000, count: 7, speakers: 3, preview: prev },
+    { id: 's2', title: '키오스크 응답 속도 점검', startedAt: `${day(4)} 16:10`, durationMs: 960000, count: 88, speakers: 3, preview: prev },
+    { id: 's1', title: '매장 피드백 정리', startedAt: `${day(8)} 11:20`, durationMs: 1500000, count: 120, speakers: 2, preview: prev },
+    { id: 's0', title: '분기 계획 회의', startedAt: `${day(12)} 15:00`, durationMs: 3300000, count: 300, speakers: 5, preview: prev },
+  ];
+}
+
 let mockVoices = [{ name: '김 팀장', meetings: 4, secs: 812 }, { name: '이 개발', meetings: 2, secs: 240 }, { name: '박 디자인', meetings: 1, secs: 95 }];
 function createMock() {
   const handlers = {};
@@ -2038,8 +2154,8 @@ function createMock() {
       if (cmd === 'forget_voice') { mockVoices = mockVoices.filter((v) => v.name !== args.name); return; }
       if (cmd === 'forget_all_voices') { mockVoices = []; return; }
       if (cmd === 'set_mini') { st.settings.miniMode = args.mini; handlers['bd://mini'] && handlers['bd://mini']({ payload: args.mini }); return; }
-      if (cmd === 'list_sessions') return [{ id: 'demo', title: '앱 출시 일정 회의', startedAt: '2026-11-12 14:30', durationMs: 61000, count: 7, speakers: 3, preview: '자, 그럼 시작할게요. 오늘은 다음 달 앱 출시 일정부터 확정하죠.' }];
-      if (cmd === 'load_session') return demoDoc();
+      if (cmd === 'list_sessions') return mockSessions();
+      if (cmd === 'load_session') { const m = mockSessions().find((x) => x.id === args.id); return { ...demoDoc(), ...(m && { id: m.id, title: m.title, startedAt: m.startedAt }) }; }
       if (cmd === 'session_text') return '데모';
       if (cmd === 'toggle_recording') { const h = handlers['bd://rec']; st.rec = st.rec === 'idle' ? 'recording' : 'idle'; h && h({ payload: st.rec }); return; }
       return null;

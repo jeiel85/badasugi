@@ -21,6 +21,8 @@
   --rec: #f0443a;
   --ok: #12a26b;
   --warn: #d48806;
+  --scroll-thumb: rgba(20, 20, 40, 0.26);
+  --scroll-thumb-hover: rgba(20, 20, 40, 0.45);
   --shadow: 0 1px 2px rgba(15, 15, 30, 0.06), 0 8px 24px rgba(15, 15, 30, 0.08);
   --shadow-lg: 0 12px 40px rgba(15, 15, 30, 0.18);
   --radius: 12px;
@@ -45,6 +47,8 @@
   --rec: #ff5a4f;
   --ok: #34d399;
   --warn: #fbbf24;
+  --scroll-thumb: rgba(255, 255, 255, 0.28);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.5);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
   color-scheme: dark;
@@ -69,6 +73,13 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius: 6px; background: var(--sunken); border: 1px solid var(--line-strong); color: var(--text-2); }
 [hidden] { display: none !important; }
 
+/* 스크롤바 — 어두운 테마에서도 잘 보이게 모든 스크롤 칸에 같은 막대를 쓴다.
+   긴 회의는 막대가 너무 짧아지지 않게 최소 길이를 두고, 올리면 굵어지며 진해진다 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { min-height: 40px; border-radius: 10px; border: 2px solid transparent; background: var(--scroll-thumb) padding-box; }
+::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { border-width: 1px; background-color: var(--scroll-thumb-hover); }
+
 .app { position: relative; display: flex; flex-direction: column; height: 100vh; border: 1px solid var(--line-strong); border-radius: 0; overflow: hidden; }
 
 /* ── 타이틀바 ── */
@@ -91,7 +102,16 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .viewing { display: flex; align-items: center; gap: 8px; margin: 0 12px 6px; padding: 7px 10px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 12.5px; font-weight: 600; }
 .viewing svg { width: 15px; height: 15px; }
 .viewing span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip-btn { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--surface); color: var(--accent); box-shadow: 0 0 0 1px var(--line); }
+.chip-btn { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--surface); color: var(--accent); box-shadow: 0 0 0 1px var(--line); flex: none; white-space: nowrap; }
+.chip-btn:hover { box-shadow: 0 0 0 1px var(--accent); }
+.chip-btn.primary { background: var(--accent); color: #fff; box-shadow: none; }
+.chip-btn.primary:hover { filter: brightness(1.08); }
+
+/* ── 회의를 마친 뒤 배너 ── */
+.ended { display: flex; align-items: center; gap: 6px; margin: 0 12px 6px; padding: 6px 6px 6px 10px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); color: var(--text-2); font-size: 12.5px; font-weight: 600; flex: none; animation: rise .25s ease-out; }
+.ended svg { width: 15px; height: 15px; color: var(--ok); stroke-width: 2.4; }
+.ended span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 2px; }
+.viewing .chip-btn + .chip-btn { margin-left: -2px; }
 
 /* ── 제목 · 화자 ── */
 .meta { padding: 2px 16px 10px; flex: none; border-bottom: 1px solid var(--line); }
@@ -106,8 +126,6 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 
 /* ── 본문 ── */
 .body { flex: 1; overflow-y: auto; padding: 12px 16px 20px; scroll-behavior: smooth; user-select: text; }
-.body::-webkit-scrollbar { width: 8px; }
-.body::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; border: 2px solid var(--bg); }
 
 .empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 40px 12px 10px; user-select: none; }
 .empty h2 { font-size: 17px; letter-spacing: -0.03em; margin: 22px 0 6px; }
@@ -126,6 +144,20 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .setup-card b { display: block; font-size: 13.5px; }
 .setup-card p { margin: 3px 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
 .setup-card .actions { display: flex; gap: 8px; align-items: center; }
+
+/* 첫 화면의 최근 회의 — 회의를 마친 뒤 지난 회의록으로 바로 들어가게 */
+.recent { width: 100%; max-width: 360px; margin-top: 26px; text-align: left; }
+.recent-head { display: flex; align-items: center; justify-content: space-between; margin: 0 4px 6px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.recent-head .link { font-size: 12px; }
+.recent-list { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.recent-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 9px 12px; transition: background .12s; }
+.recent-item + .recent-item { border-top: 1px solid var(--line); }
+.recent-item:hover { background: var(--sunken); }
+.recent-item > div { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.recent-item b { font-size: 13px; font-weight: 700; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-item small { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-item > svg { width: 15px; height: 15px; color: var(--muted); transform: rotate(-90deg); }
+.recent-item:hover > svg { color: var(--accent); }
 
 /* 발화 */
 .group { position: relative; padding: 10px 0 10px 14px; animation: rise .28s ease-out; }
@@ -224,6 +256,7 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 /* 기록 목록 */
 .h-item { display: block; width: 100%; text-align: left; padding: 11px 12px; border-radius: 10px; margin-top: 4px; transition: background .12s; }
 .h-item:hover { background: var(--surface); box-shadow: 0 0 0 1px var(--line); }
+.h-item.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .h-title { font-weight: 700; font-size: 13.5px; display: flex; justify-content: space-between; gap: 8px; }
 .h-title span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .h-sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; font-variant-numeric: tabular-nums; }
