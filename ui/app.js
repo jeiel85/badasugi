@@ -186,6 +186,19 @@ function nearBottom() {
   return body.scrollHeight - body.scrollTop - body.clientHeight < 80;
 }
 
+// 받아 적는 동안에는 늘 맨 아래(최신 문장)를 따라간다. 사용자가 위로 올려 읽는 동안만 멈추고 '새 발화 ↓' 를 띄운다.
+// 따라갈지는 그릴 때의 스크롤 위치로 짐작하지 않고 사용자의 스크롤로만 정한다 —
+// 부드러운 스크롤이 내려가는 도중에 새 문장이 오면 '맨 아래가 아님'으로 읽혀 따라가기를 놓쳤고,
+// '듣는 중' 표시·요약 카드처럼 그리기 밖에서 높이가 바뀌면 맨 아래에서 밀려나 있었다
+let follow = true;
+let lastTop = 0;
+const following = () => S.live && S.rec !== 'idle';
+function pinBottom() {
+  body.scrollTo({ top: body.scrollHeight, behavior: 'instant' });
+  $('#jump').hidden = true;
+}
+function followLatest() { follow = true; pinBottom(); }
+
 function scheduleRender() {
   if (renderQueued) return;
   renderQueued = true;
@@ -222,7 +235,7 @@ function renderDoc() {
   $('#meta').hidden = !d || (!hasContent && S.rec === 'idle');
   renderSetup();
 
-  const stick = nearBottom();
+  const stick = following() ? follow : nearBottom();
   const tr = $('#transcript');
   const groups = [];
   for (const it of items) {
@@ -252,7 +265,7 @@ function renderDoc() {
   syncAudio();
   markPlaying(false);
   if (S.findQ) { updateFind(false); return; }
-  if (stick) body.scrollTop = body.scrollHeight;
+  if (stick) pinBottom();
   else if (S.live && S.rec === 'recording') $('#jump').hidden = false;
 }
 
@@ -454,6 +467,7 @@ function onRec(state) {
     S.paused = false;
     S.sleepPaused = false;
     S.progress = null;
+    follow = true;
   }
   if (state === 'recording' && prev !== 'recording') {
     S.timerStart = Date.now();
@@ -643,9 +657,24 @@ $('#btn-pin').addEventListener('click', () => {
   renderDock();
   toast(S.settings.alwaysOnTop ? '항상 위에 표시합니다' : '항상 위 표시를 껐습니다');
 });
-$('#btn-back-live').addEventListener('click', () => { S.live = true; S.viewDoc = null; renderDock(); scheduleRender(); });
-$('#jump').addEventListener('click', () => { body.scrollTop = body.scrollHeight; $('#jump').hidden = true; });
-body.addEventListener('scroll', () => { if (nearBottom()) $('#jump').hidden = true; });
+$('#btn-back-live').addEventListener('click', () => { S.live = true; S.viewDoc = null; follow = true; renderDock(); scheduleRender(); });
+$('#jump').addEventListener('click', followLatest);
+body.addEventListener('scroll', () => {
+  const top = body.scrollTop;
+  // 끝까지 내려오면 다시 따라가고, 위로 올렸을 때만 멈춘다.
+  // (내용이 늘어 맨 아래에서 벗어난 것뿐이면 그대로 둔다 — 곧 다시 맨 아래로 붙인다)
+  if (body.scrollHeight - top - body.clientHeight < 8) follow = true;
+  else if (top < lastTop - 1) follow = false;
+  lastTop = top;
+  if (follow) $('#jump').hidden = true;
+});
+// 휠을 위로 굴리면 바로 멈춘다 — 부드러운 휠 스크롤이 몇 픽셀 움직이는 사이에 새 문장이 와서 도로 끌려 내려가지 않게
+body.addEventListener('wheel', (e) => {
+  if (e.deltaY < 0 && !e.ctrlKey && body.scrollHeight > body.clientHeight) follow = false;
+}, { passive: true });
+// '듣는 중' 표시·요약 카드·글자 크기·창 크기처럼 그리기 밖에서 높이가 바뀌어도 맨 아래에 붙어 있게
+const keepPinned = new ResizeObserver(() => { if (follow && following() && !S.findQ && !editing) pinBottom(); });
+for (const el of [body, $('#summary-card'), $('#transcript'), $('#listening')]) keepPinned.observe(el);
 
 // 제목
 $('#title-input').addEventListener('change', (e) => {
@@ -868,6 +897,8 @@ $('#btn-summary').addEventListener('click', async () => {
   $('#summary-card').classList.remove('folded');
   renderSummary();
   updateActions();
+  // 녹음 중에 요약해도 위에 뜬 요약 카드를 보고 있게 따라가기를 멈춘다
+  follow = false;
   body.scrollTop = 0;
   try {
     const r = await api.invoke('summarize', { id: d.id, token: S.sumToken });
@@ -1022,8 +1053,11 @@ $('#history-list').addEventListener('click', async (e) => {
   const q = $('#history-q').value.trim();
   closePanels();
   renderDock();
+  // 받아 적는 중인 회의는 최신 문장으로, 지난 회의는 처음부터 연다
+  const toLatest = following() && !q;
+  if (toLatest) follow = true;
   renderDoc();
-  body.scrollTop = 0;
+  if (!toLatest) body.scrollTop = 0;
   if (q) openFind(q);
 });
 $('#btn-open-folder').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
