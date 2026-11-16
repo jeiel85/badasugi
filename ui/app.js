@@ -284,7 +284,10 @@ function renderSummary() {
   const card = $('#summary-card');
   if (S.summarizing && d) {
     card.hidden = false;
-    $('#summary-body').innerHTML = `<div class="loading"><span class="dot"></span>${esc(summaryStep(S.sumProgress))}<button class="link" id="btn-cancel-summary" title="보내 둔 요청은 버리고 여기서 그만둬요">멈추기</button></div>`;
+    const stop = S.sumCancelling
+      ? '<button class="link" id="btn-cancel-summary" disabled>멈추는 중…</button>'
+      : '<button class="link" id="btn-cancel-summary" title="보내 둔 요청은 버리고 여기서 그만둬요">멈추기</button>';
+    $('#summary-body').innerHTML = `<div class="loading"><span class="dot"></span>${esc(summaryStep(S.sumProgress))}${stop}</div>`;
     return;
   }
   card.hidden = !(d && d.summary);
@@ -857,14 +860,17 @@ $('#btn-summary').addEventListener('click', async () => {
   // 방금 고친 문장이 요약에 들어가게, 기다리던 저장을 먼저 보낸다 (요약은 그 저장이 끝난 뒤 기록을 읽는다)
   persistDoc.flush();
   S.summarizing = true;
+  S.sumCancelling = false;
   S.sumProgress = null;
   S.sumId = d.id;
+  // 요약마다 번호 — 앞선 저장을 기다리는 동안 멈춰도 앱이 그 요약을 알아보고 시작하자마자 멈춘다
+  S.sumToken = Date.now();
   $('#summary-card').classList.remove('folded');
   renderSummary();
   updateActions();
   body.scrollTop = 0;
   try {
-    const r = await api.invoke('summarize', { id: d.id });
+    const r = await api.invoke('summarize', { id: d.id, token: S.sumToken });
     d.summary = r.text;
     if (r.title) { d.title = r.title; d.autoTitle = false; renderMeta(); }
   } catch (e) {
@@ -873,6 +879,7 @@ $('#btn-summary').addEventListener('click', async () => {
     toast(msg, msg === '요약을 멈췄어요' ? undefined : 'error');
   } finally {
     S.summarizing = false;
+    S.sumCancelling = false;
     S.sumProgress = null;
     renderSummary();
     updateActions();
@@ -880,10 +887,10 @@ $('#btn-summary').addEventListener('click', async () => {
 });
 $('#summary-card').addEventListener('click', (e) => {
   const b = e.target.closest('#btn-cancel-summary');
-  if (!b) return;
-  b.disabled = true;
-  b.textContent = '멈추는 중…';
-  api.invoke('cancel_summary').catch(() => {});
+  if (!b || !S.summarizing || S.sumCancelling) return;
+  S.sumCancelling = true;
+  renderSummary();
+  api.invoke('cancel_summary', { token: S.sumToken }).catch(() => {});
 });
 
 /* ───────────── 패널 ───────────── */

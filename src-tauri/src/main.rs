@@ -64,8 +64,9 @@ pub(crate) struct AppState {
     pub downloading: Mutex<Option<String>>,
     /// 진행 중인 요약 등 (업데이트 설치를 미룬다)
     pub busy_ops: AtomicUsize,
-    /// 지금 요약을 멈추라는 신호 (요약 중일 때만)
-    summary_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// 요약 번호 → 멈추라는 신호. 화면이 앞선 저장을 기다리느라 요약이 아직 시작되지 않았을 때 멈춰도
+    /// 그 번호에 신호를 먼저 꽂아 두어, 요약이 시작되자마자 요청 없이 멈춘다
+    summary_cancel: Mutex<BTreeMap<u64, Arc<AtomicBool>>>,
     /// 지금 세션이 파일 받아쓰기인지
     pub file_mode: AtomicBool,
     /// 파일 받아쓰기 진행률 + 1 (0 = 모름)
@@ -1149,7 +1150,7 @@ impl Drop for BusyGuard<'_> {
 }
 
 #[tauri::command]
-async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
+async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryDto> {
     let st = app.state::<AppState>();
     st.busy_ops.fetch_add(1, Ordering::SeqCst);
     let _busy = BusyGuard(&st.busy_ops);
@@ -1172,8 +1173,7 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
     let on_usage = move |provider: &str, r: &summary::Reply| {
         app3.state::<usage_book::UsageBook>().summary(provider, r.in_tokens, r.out_tokens);
     };
-    let cancel = Arc::new(AtomicBool::new(false));
-    *st.summary_cancel.lock() = Some(cancel.clone());
+    let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     // 요약은 따로 돌리고, 멈추면 보내 둔 요청(로컬 LLM 은 몇 분)을 기다리지 않고 화면을 먼저 돌려보낸다.
     // 따로 도는 쪽은 다음 요청부터 보내지 않고 끝난다.
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1196,7 +1196,7 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
         }
     })
     .await;
-    *st.summary_cancel.lock() = None;
+    st.summary_cancel.lock().remove(&token);
     app.state::<usage_book::UsageBook>().save();
     let sum = res.map_err(err)?.map_err(err)?;
     // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
@@ -1213,13 +1213,15 @@ async fn summarize(app: AppHandle, id: String) -> CmdResult<SummaryDto> {
     Ok(SummaryDto { text: sum.text, title })
 }
 
-/// 진행 중인 요약을 멈춘다 (요약 중이 아니면 아무 일도 없다)
+/// 그 번호의 요약을 멈춘다 — 아직 시작 전이면(화면이 앞선 저장을 기다리는 중) 시작하자마자 멈추게 신호를 먼저 꽂아 둔다
 #[tauri::command]
-fn cancel_summary(app: AppHandle) {
-    if let Some(c) = app.state::<AppState>().summary_cancel.lock().as_ref() {
-        log::info!("요약 멈춤");
-        c.store(true, Ordering::SeqCst);
-    }
+fn cancel_summary(app: AppHandle, token: u64) {
+    log::info!("요약 멈춤");
+    let st = app.state::<AppState>();
+    let mut map = st.summary_cancel.lock();
+    // 이미 끝난 요약을 멈춰 남은 신호는 치운다 — 돌고 있는 요약이 쥐고 있는 신호(복제본이 있는 것)는 남긴다
+    map.retain(|&t, flag| t == token || Arc::strong_count(flag) > 1);
+    map.entry(token).or_default().store(true, Ordering::SeqCst);
 }
 
 /// 요약 제공자 연결 확인 + 모델 목록
@@ -1715,7 +1717,7 @@ fn main() {
                 dl_cancel: Arc::new(AtomicBool::new(false)),
                 downloading: Mutex::new(None),
                 busy_ops: AtomicUsize::new(0),
-                summary_cancel: Mutex::new(None),
+                summary_cancel: Mutex::new(BTreeMap::new()),
                 file_mode: AtomicBool::new(false),
                 file_pct: AtomicUsize::new(0),
                 save_warned: AtomicBool::new(false),
