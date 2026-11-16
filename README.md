@@ -133,7 +133,7 @@ badasugi.exe 회의.m4a :: 녹음 파일 받아쓰기
 |---|---|---|
 | **Groq** | 무료 등급 · 매우 빠름 (기본 `openai/gpt-oss-120b`) | 음성 인식 Groq 키를 같이 씀 |
 | **Gemini** | 무료 등급 · 한국어 품질 좋음 (기본 `gemini-flash-latest`) | [AI Studio](https://aistudio.google.com/apikey) |
-| **Claude** | 긴 회의도 꼼꼼하게 (`claude-opus-5-5`) | Anthropic 콘솔 키, 또는 키 칸을 비우고 [Anthropic CLI](https://github.com/anthropics/anthropic-cli/releases/latest)(`ant auth login`) 로그인 |
+| **Claude** | 긴 회의도 꼼꼼하게 (`claude-opus-5-5`) | Anthropic 콘솔 키, 또는 키 없이(저장한 키는 **지우기**) [Anthropic CLI](https://github.com/anthropics/anthropic-cli/releases/latest)(`ant auth login`) 로그인 |
 | **OpenAI** | `gpt-5-mini` | 음성 인식 OpenAI 키를 같이 씀 |
 | **Ollama** | PC 안에서만 (인터넷 불필요). [Ollama](https://ollama.com) 설치 + `ollama pull exaone3.5:7.8b` 필요 | 없음 |
 | **사용자 지정** | LM Studio · vLLM · OpenRouter 등 OpenAI 호환 서버 | 선택 |

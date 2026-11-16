@@ -39,7 +39,7 @@ const KEY_STEPS = {
   anthropic: '<ol class="howto"><li><button class="link" data-url="https://console.anthropic.com/settings/keys">console.anthropic.com</button> 에 가입 · 로그인</li><li><b>Billing</b> 에서 크레딧 충전 (사용한 만큼 차감)</li><li><b>Create Key</b> → 키(<code>sk-ant-…</code>)를 복사해 붙여 넣기</li></ol>',
 };
 const KEY_NOTE = '<span class="keynote">키는 이 PC의 Windows 자격 증명 관리자에만 보관돼요.</span>';
-const ANT_LOGIN = '<span class="keynote"><b>키 대신 로그인</b>: <button class="link" data-url="https://github.com/anthropics/anthropic-cli/releases/latest">Anthropic CLI(ant) ↗</button>의 windows_amd64.zip 을 풀어 <code>ant.exe</code> 를 PATH 폴더(또는 <code>%LOCALAPPDATA%\\Programs\\ant</code>)에 두고, 명령 프롬프트에서 <code>ant auth login</code> → 키 칸을 비워 두면 그 로그인으로 요약해요. 과금은 키와 같은 Console 크레딧이에요.</span>';
+const ANT_LOGIN = '<span class="keynote"><b>키 대신 로그인</b>: <button class="link" data-url="https://github.com/anthropics/anthropic-cli/releases/latest">Anthropic CLI(ant) ↗</button>의 windows_amd64.zip 을 풀어 <code>ant.exe</code> 를 PATH 폴더(또는 <code>%LOCALAPPDATA%\\Programs\\ant</code>)에 두고, 명령 프롬프트에서 <code>ant auth login</code> → 저장된 키가 없으면 그 로그인으로 요약해요 (저장한 키는 <b>지우기</b> 로 지워요). 과금은 키와 같은 Console 크레딧이에요.</span>';
 const LLM_DESC = {
   ollama: 'PC에 따로 설치한 <b>Ollama</b>로 요약해요 (앱에 들어 있지 않아요). 인터넷 없이 동작하지만 Ollama 설치와 모델(약 5GB)이 필요하고, PC 사양에 따라 몇 분 걸릴 수 있어요. <button class="link" data-url="https://ollama.com/download">Ollama 받기 ↗</button> → 설치 후 명령 프롬프트에서 <code>ollama pull exaone3.5:7.8b</code>',
   groq: '<b>무료 등급</b>으로 바로 쓸 수 있고 매우 빨라요. 음성 인식용 Groq 키를 같이 써요.' + KEY_STEPS.groq + KEY_NOTE,
@@ -1679,8 +1679,14 @@ function renderSettings() {
   for (const [k, id] of KEY_INPUTS.map(([id, , k]) => [k, id])) {
     const el = $(`#${id}`);
     el.value = '';
-    el.placeholder = S.app.keys[k] ? '●●●●●●●● (저장됨 · 바꾸려면 입력)' : el.dataset.ph || el.placeholder;
-    el.dataset.ph = el.dataset.ph || el.placeholder;
+    // 원래 안내 문구는 처음 한 번만 기억한다 (키가 저장된 채로 열면 "저장됨" 을 기억해 버려 지운 뒤에도 남았다)
+    if (!('ph' in el.dataset)) el.dataset.ph = el.placeholder;
+    el.placeholder = S.app.keys[k] ? '●●●●●●●● (저장됨 · 바꾸려면 입력)' : el.dataset.ph;
+    // 저장된 키 지우기 — 칸을 비워 두는 것만으로는 지워지지 않는다 (Claude 는 키를 지워야 ant 로그인으로 넘어간다)
+    const label = el.closest('.field').querySelector(':scope > span');
+    const clr = label.querySelector('[data-clear-key]');
+    if (S.app.keys[k] && !clr) label.insertAdjacentHTML('beforeend', `<button class="link" data-clear-key="${id}" title="저장된 키 지우기">지우기</button>`);
+    if (!S.app.keys[k] && clr) clr.remove();
   }
   renderModels();
 
@@ -1943,6 +1949,21 @@ for (const [id, name] of KEY_INPUTS) {
     toast('API 키를 안전하게 저장했어요');
   });
 }
+
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-clear-key]');
+  if (!b) return;
+  e.preventDefault();
+  const [, name] = KEY_INPUTS.find(([id]) => id === b.dataset.clearKey) || [];
+  if (!name) return;
+  const shared = ['openai', 'groq'].includes(name) ? '\n음성 인식과 요약에 같이 쓰는 키라 둘 다에서 지워져요.' : '';
+  const ok = await api.ask(`저장된 API 키를 지울까요?${shared}`, { title: '받아쓰기', kind: 'warning' });
+  if (!ok) return;
+  await call('set_api_key', { name, value: '' });
+  await refreshApp();
+  renderSettings();
+  toast(name === 'anthropic' ? '키를 지웠어요. 이제 ant 로그인이 있으면 그걸로 요약해요' : '저장된 키를 지웠어요');
+});
 
 $('#btn-test-llm').addEventListener('click', async (e) => {
   const b = e.currentTarget;
