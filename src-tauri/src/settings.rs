@@ -54,6 +54,8 @@ pub struct Settings {
     pub full_bounds: Option<[i32; 4]>,
 
     pub summary: SummarySettings,
+    /// 사용량 금액을 원화로 보여 줄 때 쓰는 환율 (1달러 = ? 원)
+    pub usd_krw: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +90,9 @@ impl Default for SummarySettings {
     }
 }
 
+/// 기본 환율 — 2026년 11월 초 원/달러 (설정 › 사용량에서 바꿀 수 있다)
+pub const DEFAULT_USD_KRW: f64 = 1360.0;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -117,6 +122,7 @@ impl Default for Settings {
             mini_docked: true,
             full_bounds: None,
             summary: SummarySettings::default(),
+            usd_krw: DEFAULT_USD_KRW,
         }
     }
 }

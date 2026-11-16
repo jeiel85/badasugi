@@ -77,6 +77,8 @@ pub struct Progress {
 #[derive(Debug, Default)]
 pub struct Reply {
     pub text: String,
+    /// 실제로 답한 모델 (응답에 없으면 요청한 모델) — 사용량 금액 셈용
+    pub model: String,
     pub in_tokens: u64,
     pub out_tokens: u64,
 }
@@ -574,6 +576,7 @@ fn ollama(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
     let v: Value = serde_json::from_str(&text)?;
     Ok(Reply {
         text: v["message"]["content"].as_str().unwrap_or_default().trim().to_string(),
+        model: cfg.ollama_model.clone(),
         in_tokens: v["prompt_eval_count"].as_u64().unwrap_or(0),
         out_tokens: v["eval_count"].as_u64().unwrap_or(0),
     })
@@ -613,6 +616,7 @@ fn openai_compat(base: &str, key: Option<&str>, model: &str, system: &str, user:
     let usage = &v["usage"];
     Ok(Reply {
         text: v["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string(),
+        model: v["model"].as_str().unwrap_or(model.trim()).to_string(),
         in_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
         out_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
     })
@@ -695,6 +699,8 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
     let usage = &v["usage"];
     Ok(Reply {
         text: out.join("").trim().to_string(),
+        // 거절해 다른 모델로 다시 시도했으면(fallbacks) 그 모델
+        model: v["model"].as_str().unwrap_or(model).to_string(),
         in_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
         out_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
     })
@@ -849,7 +855,7 @@ mod tests {
         let mut sent = Vec::new();
         let mut call = |sys: &str, user: &str| {
             sent.push((sys == SYSTEM, user.to_string()));
-            Ok(Reply { text: "요약".into(), in_tokens: 10, out_tokens: 5 })
+            Ok(Reply { text: "요약".into(), in_tokens: 10, out_tokens: 5, ..Default::default() })
         };
         let (req, on_reply) = counter();
         let out = run_summary(&mut call, &|_| {}, &on_reply, "회의 제목: t\n\n", &transcript(10, 20), 12_000).unwrap();
@@ -863,7 +869,7 @@ mod tests {
         let mut calls = Vec::new();
         let mut call = |sys: &str, user: &str| {
             calls.push((sys == PART_SYSTEM, user.to_string()));
-            Ok(Reply { text: format!("메모{}", calls.len()), in_tokens: 1, out_tokens: 1 })
+            Ok(Reply { text: format!("메모{}", calls.len()), in_tokens: 1, out_tokens: 1, ..Default::default() })
         };
         let seen = std::cell::RefCell::new(Vec::new());
         let (req, on_reply) = counter();
@@ -953,7 +959,7 @@ mod tests {
             if n > 2 {
                 return Err(anyhow::Error::new(ApiError { status: 500, retry_after: None, msg: "server error".into() }));
             }
-            Ok(Reply { text: "메모".into(), in_tokens: 100, out_tokens: 20 })
+            Ok(Reply { text: "메모".into(), in_tokens: 100, out_tokens: 20, ..Default::default() })
         };
         let (req, on_reply) = counter();
         assert!(run_summary(&mut call, &|_| {}, &on_reply, "", &transcript(200, 60), 4_000).is_err());
