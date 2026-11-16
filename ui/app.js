@@ -79,7 +79,7 @@ const S = {
   findQ: '',
   findIdx: 0,
   mini: false,
-  // 노트: 지금 탭 · 고치는 중인 요약 { doc } · 쓰는 중인 코멘트 { doc, id } · 녹음 위치(ms)
+  // 노트: 지금 탭 · 고치는 중인 요약 { doc } · 쓰는 중인 코멘트 { doc, id, ms, line, raw } · 녹음 위치(ms)
   ntab: 'memo',
   sumEdit: null,
   cmt: null,
@@ -274,6 +274,7 @@ function renderDoc() {
 
   const stick = following() ? follow : nearBottom();
   const tr = $('#transcript');
+  const cms = memoComments(d);
   const groups = [];
   for (const it of items) {
     const g = groups[groups.length - 1];
@@ -288,7 +289,7 @@ function renderDoc() {
     <div class="group" style="--c:${spkColor(g.speaker)}">
       <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}" data-ids="${g.items.filter((x) => x.kind === 'u').map((x) => x.id).join(',')}" title="이름 바꾸기 · 화자 바꾸기">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
       ${g.items.map((it) => it.kind === 'u'
-        ? `<div class="u" data-id="${it.id}">${hl(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>${commentHtml(d, it.id)}`
+        ? `<div class="u" data-id="${it.id}">${hl(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>${commentHtml(cms.byU.get(it.id))}`
         : it.kind === 'p'
           ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
           : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
@@ -994,8 +995,7 @@ function startEdit(el) {
     if (save && !v) {
       d.utterances = d.utterances.filter((x) => x.id !== u.id);
       d.deleted = [...(d.deleted || []), u.id];
-      if (d.comments) delete d.comments[u.id];
-      persistDoc(d);
+      persistDoc(d); // 이 문장에 붙어 있던 코멘트(메모의 시각 줄)는 가장 가까운 문장으로 옮겨 붙는다
       toast('발화를 지웠어요');
     } else if (save && v !== u.text) { u.text = v; persistDoc(d); }
     scheduleRender();
@@ -1035,20 +1035,110 @@ function dropEdits() {
   if (S.sumEdit) endSummaryEdit(false);
   memoSave.cancel();
 }
-// 앱이 다시 읽어 준 기록으로 바꿀 때 메모 · 코멘트는 화면 것을 지킨다
-// (앱은 둘을 고치지 않으므로 화면 것이 가장 새것 — 다시 읽는 사이에 친 글자가 사라지지 않게)
+// 앱이 다시 읽어 준 기록으로 바꿀 때 메모(코멘트 포함)는 화면 것을 지킨다
+// (앱은 메모를 고치지 않으므로 화면 것이 가장 새것 — 다시 읽는 사이에 친 글자가 사라지지 않게)
 function adoptFresh(old, fresh) {
   if (!old || !fresh || old.id !== fresh.id) return fresh;
   fresh.notes = old.notes;
-  fresh.comments = old.comments;
   if (S.sumEdit?.doc === old) S.sumEdit.doc = fresh;
   if (S.cmt?.doc === old) S.cmt.doc = fresh;
   return fresh;
 }
 
-function commentHtml(d, id) {
-  const c = d?.comments?.[id];
-  return c ? `<div class="cmt" data-cmt="${id}" title="코멘트 고치기"><svg><use href="#i-comment"/></svg><span>${esc(c)}</span></div>` : '';
+/* 메모와 코멘트: 원본은 메모 하나. `[12:34]` 로 시작하는 메모 줄이 그 시각 문장의 코멘트다
+   (시각 줄부터 다음 시각 줄 · 빈 줄 바로 앞까지가 한 코멘트, `- [12:34]` 처럼 목록 표시가 앞에 있어도 된다).
+   녹취록 문장에서 단 코멘트는 메모에 `[문장 시각] 글` 줄로 들어간다. (앱 쪽 session.rs 의 note_comments 와 같은 규칙) */
+const STAMP_RE = /^(\s*(?:[-*]\s+)?\[(?:(\d{1,3}):)?(\d{1,3}):(\d{2})\] ?)(.*)$/;
+function parseStamp(line) {
+  const m = STAMP_RE.exec(line.replace(/\r$/, ''));
+  if (!m) return null;
+  const h = m[2] != null ? +m[2] : 0, mi = +m[3], s = +m[4];
+  if (s >= 60 || (m[2] != null && mi >= 60)) return null;
+  return { ms: (h * 3600 + mi * 60 + s) * 1000, prefix: m[1], rest: m[5] };
+}
+// 메모 속 코멘트들: { ms, from, to (줄 번호, to 는 그 줄 앞까지), text, prefix } — 글이 없는 시각 줄은 빼고
+function parseMemo(notes) {
+  const lines = (notes || '').split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length;) {
+    const st = parseStamp(lines[i]);
+    if (!st) { i++; continue; }
+    const from = i;
+    const text = [st.rest.trimEnd()];
+    for (i++; i < lines.length && lines[i].trim() && !parseStamp(lines[i]); i++) text.push(lines[i].trimEnd());
+    const t = text.join('\n').trim();
+    if (t) out.push({ ms: st.ms, from, to: i, text: t, prefix: st.prefix });
+  }
+  return out;
+}
+// 코멘트 칸에 쓴 글 → 메모 줄들 (빈 줄은 코멘트를 끝내므로 뺀다)
+function commentLines(v) {
+  const ls = String(v).split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  if (ls.length) ls[0] = ls[0].trimStart();
+  return ls;
+}
+// 새 코멘트를 시각 순서에 맞는 자리에: 같거나 이른 코멘트 중 메모에서 마지막 것 뒤 → 없으면 더 늦은 첫 코멘트 앞 → 없으면 맨 끝
+function insertMemoComment(notes, ms, v) {
+  const body = commentLines(v);
+  if (!body.length) return notes;
+  body[0] = `[${fmt(ms)}] ${body[0]}`;
+  const blocks = parseMemo(notes);
+  const lines = notes ? notes.split('\n') : [];
+  const before = blocks.filter((b) => b.ms <= ms).pop();
+  let at = before ? before.to : blocks.find((b) => b.ms > ms)?.from;
+  if (at == null) at = lines.length && lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
+  lines.splice(at, 0, ...body);
+  return lines.join('\n');
+}
+// 메모의 코멘트 하나를 고친다 (시각 · 목록 표시는 그대로) — 빈 글이면 지운다
+function rewriteMemoComment(notes, b, v) {
+  const lines = notes.split('\n');
+  const body = commentLines(v);
+  if (body.length) {
+    body[0] = b.prefix + body[0];
+    lines.splice(b.from, b.to - b.from, ...body);
+    return lines.join('\n');
+  }
+  lines.splice(b.from, b.to - b.from);
+  // 지운 자리 앞뒤로 빈 줄이 겹치면 하나만
+  const blank = (s) => s != null && !s.trim();
+  const prevBlank = b.from === 0 || blank(lines[b.from - 1]);
+  if (prevBlank && blank(lines[b.from])) lines.splice(b.from, 1);
+  else if (prevBlank && b.from > 0 && b.from === lines.length) lines.splice(b.from - 1, 1);
+  return lines.join('\n');
+}
+// 녹취록에서 코멘트가 붙는 문장: 그 시각에 말하던 문장, 말 사이 빈 곳이면 앞뒤 중 가까운 문장
+// (시각은 초 단위라 [20:35] 는 20:35.000~20:35.999 — 문장에서 단 코멘트는 문장 시작 초를 적으므로 다시 그 문장에 붙는다)
+function anchorOf(sorted, ms) {
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (sorted[mid].startMs < ms + 1000) lo = mid + 1; else hi = mid; }
+  const p = sorted[lo - 1], n = sorted[lo];
+  if (!p) return n || null;
+  if (!n || p.endMs >= ms) return p;
+  return ms - p.endMs <= n.startMs - ms ? p : n;
+}
+// 메모의 코멘트들과 붙는 문장: { list: [{ ...코멘트, u }], byU: 문장 id → [코멘트] }
+function memoComments(d) {
+  const list = parseMemo(d?.notes);
+  const byU = new Map();
+  if (!list.length) return { list, byU };
+  let sorted = d.utterances;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].startMs < sorted[i - 1].startMs) { sorted = [...sorted].sort((a, b) => a.startMs - b.startMs || a.id - b.id); break; }
+  }
+  for (const c of list) {
+    c.u = anchorOf(sorted, c.ms);
+    if (!c.u) continue;
+    if (!byU.has(c.u.id)) byU.set(c.u.id, []);
+    byU.get(c.u.id).push(c);
+  }
+  for (const cs of byU.values()) cs.sort((a, b) => a.ms - b.ms || a.from - b.from);
+  return { list, byU };
+}
+
+function commentHtml(cs) {
+  if (!cs?.length) return '';
+  return `<div class="cmt">${cs.map((c) => `<div class="ce" data-line="${c.from}" title="코멘트 고치기 — 메모의 [${fmt(c.ms)}] 줄"><svg><use href="#i-comment"/></svg><span><time>${fmt(c.ms)}</time>${esc(c.text)}</span></div>`).join('')}</div>`;
 }
 
 // 노트를 펼칠지: 넓은 창은 처음부터 펼쳐 두고, 좁은 창은 눌러서 연다 (각각 마지막으로 고른 대로)
@@ -1120,25 +1210,22 @@ function placeSummary(inNotes) {
   slot.prepend(card);
   if (inNotes) card.classList.remove('folded');
 }
+// 코멘트 탭 (좁은 창): 메모의 시각 줄을 시각 순으로, 붙은 문장과 함께
 function renderCommentList(d) {
-  const cm = d.comments || {};
-  const keys = Object.keys(cm);
-  let items = [];
-  if (keys.length) {
-    const byId = new Map(d.utterances.map((u) => [u.id, u]));
-    items = keys.map((k) => ({ u: byId.get(+k), text: cm[k] })).filter((x) => x.u && x.text)
-      .sort((a, b) => a.u.startMs - b.u.startMs || a.u.id - b.u.id);
-  }
+  const items = memoComments(d).list.slice().sort((a, b) => a.ms - b.ms || a.from - b.from);
   $('#cmt-count').textContent = items.length || '';
   if (curTab() !== 'comments') return;
   const html = items.length
-    ? items.map(({ u, text }) => {
+    ? items.map(({ u, ms, text }) => {
+      if (!u) {
+        return `<div class="cmt-item"><div class="cmt-meta"><span>${fmt(ms)}</span><span>· 아직 붙을 문장이 없어요</span></div><div class="cmt-text">${esc(text)}</div></div>`;
+      }
       const s = resolveSpk(d, u.speaker);
       return `<button class="cmt-item" data-goto="${u.id}" style="--c:${spkColor(s)}" title="녹취록에서 이 문장 보기">
-        <div class="cmt-meta"><b>${esc(speakerName(d, s))}</b><span>${fmt(u.startMs)}</span></div>
+        <div class="cmt-meta"><b>${esc(speakerName(d, s))}</b><span>${fmt(ms)}</span></div>
         <div class="cmt-src">${esc(u.text)}</div><div class="cmt-text">${esc(text)}</div></button>`;
     }).join('')
-    : '<div class="n-empty"><svg><use href="#i-comment"/></svg><b>아직 코멘트가 없어요</b><p>녹취록 문장에 마우스를 올리고 \'코멘트\'를 누르면<br>그 문장에 확인할 점 · 생각을 남길 수 있어요.</p></div>';
+    : '<div class="n-empty"><svg><use href="#i-comment"/></svg><b>아직 코멘트가 없어요</b><p>녹취록 문장에 마우스를 올리고 \'코멘트\'를 누르거나<br>메모에 <code>[12:34]</code> 처럼 시각으로 시작하는 줄을 쓰면<br>그 시각 문장에 코멘트로 붙어요.</p></div>';
   if (html !== cmtShown) { $('#cmt-list').innerHTML = html; cmtShown = html; }
 }
 function showNotesTab(t) {
@@ -1230,12 +1317,30 @@ const memoSave = debounce((d) => {
     .then(() => { if (my === memoReq && memoFor === d.id) setMemoState('저장됨'); })
     .catch((e) => { if (memoFor === d.id) setMemoState('저장하지 못했어요', true); toast(String(e), 'error'); });
 }, 700);
+// 코멘트 칸에서 메모를 바꿨을 때 메모 칸도 바로 맞춘다 — 코멘트 칸 바깥(메모 칸)을 눌러 저장하면 메모 칸이
+// 먼저 포커스를 받아 renderNotes 가 건너뛰므로, 다음 타이핑이 예전 글로 코멘트 수정을 되돌리지 않게.
+// 커서 · 선택은 바뀐 곳 뒤라면 늘거나 준 만큼 옮긴다
+function syncMemoBox(d) {
+  if (memoFor !== d.id || memo.value === (d.notes || '')) return;
+  const old = memo.value, nv = d.notes || '';
+  let p = 0;
+  const n = Math.min(old.length, nv.length);
+  while (p < n && old[p] === nv[p]) p++;
+  const fix = (i) => (i <= p ? i : Math.max(p, i + nv.length - old.length));
+  const s = fix(memo.selectionStart ?? 0), e = fix(memo.selectionEnd ?? 0), top = memo.scrollTop;
+  memo.value = nv;
+  memo.setSelectionRange(s, e);
+  memo.scrollTop = top;
+}
+// 메모의 시각 줄이 녹취록 옆 코멘트로 보이게 — 치는 동안 매번이 아니라 잠깐 멈추면 다시 그린다
+const memoRender = debounce(() => scheduleRender(), 250);
 memo.addEventListener('input', () => {
   const d = doc();
   if (!d || memoFor !== d.id) return;
   d.notes = memo.value;
   setMemoState('저장 중…');
   memoSave(d);
+  memoRender();
 });
 memo.addEventListener('blur', () => memoSave.flush());
 // 지금 녹음 위치 · 듣고 있는 곳 (ms) — 둘 다 아니면 null
@@ -1257,6 +1362,30 @@ function insertTime() {
 }
 $('#btn-memo-time').addEventListener('mousedown', (e) => e.preventDefault()); // 메모 칸의 커서 자리를 지킨다
 $('#btn-memo-time').addEventListener('click', insertTime);
+
+// 메모의 커서가 코멘트(시각 줄) 안에 있으면 '12:34 문장 보기' — 누르거나 그 줄을 Ctrl+클릭하면 녹취록의 그 문장으로
+function memoCaretComment() {
+  const d = doc();
+  if (!d || memoFor !== d.id) return null;
+  const line = memo.value.slice(0, memo.selectionStart ?? 0).split('\n').length - 1;
+  return memoComments(d).list.find((c) => c.from <= line && line < c.to && c.u) || null;
+}
+let memoGotoId = null;
+function syncMemoGoto() {
+  const c = document.activeElement === memo ? memoCaretComment() : null;
+  const b = $('#btn-memo-goto');
+  memoGotoId = c ? c.u.id : null;
+  b.hidden = !c;
+  if (c) b.querySelector('span').textContent = `${fmt(c.ms)} 문장 보기`;
+}
+for (const ev of ['keyup', 'click', 'input', 'focus', 'blur']) memo.addEventListener(ev, syncMemoGoto);
+memo.addEventListener('click', (e) => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  const c = memoCaretComment();
+  if (c) gotoUtterance(c.u.id);
+});
+$('#btn-memo-goto').addEventListener('mousedown', (e) => e.preventDefault());
+$('#btn-memo-goto').addEventListener('click', () => { if (memoGotoId != null) gotoUtterance(memoGotoId); });
 
 // 요약 고치기
 function startSummaryEdit() {
@@ -1319,22 +1448,25 @@ $('#summary-card').addEventListener('keydown', (k) => {
   if (k.key === 'Escape') { k.stopPropagation(); cancelSummaryEdit(); }
 });
 
-// 문장 코멘트: 팝오버에서 쓰고, 바깥을 누르거나 Enter 로 저장
-function openComment(id, anchor) {
+// 문장 코멘트: 팝오버에서 쓰고, 바깥을 누르거나 Enter 로 저장 — 저장하면 메모의 [시각] 줄이 바뀐다.
+// line: 고칠 코멘트(메모의 줄 번호) · 없으면 그 문장의 첫 코멘트, 코멘트가 없으면 새로
+function openComment(id, anchor, line = null) {
   const d = doc();
   const u = d?.utterances.find((x) => x.id === id);
   if (!u || !anchor) return;
   if (S.cmt) closeComment(true);
+  const mine = memoComments(d).byU.get(id) || [];
+  const c = line != null ? mine.find((x) => x.from === line) || mine[0] : mine[0];
   const s = resolveSpk(d, u.speaker);
   const q = $('#cmt-quote');
   q.style.setProperty('--c', spkColor(s));
-  q.innerHTML = `<b>${esc(speakerName(d, s))}</b><span>${fmt(u.startMs)}</span><p>${esc(u.text)}</p>`;
-  const cur = d.comments?.[id] || '';
+  q.innerHTML = `<b>${esc(speakerName(d, s))}</b><span>${fmt(c ? c.ms : u.startMs)}</span><p>${esc(u.text)}</p>`;
+  const cur = c?.text || '';
   const ta = $('#cmt-input');
   ta.value = cur;
-  $('#cmt-del').hidden = !cur;
+  $('#cmt-del').hidden = !c;
   showPopover($('#pop-cmt'), anchor, 'left', true);
-  S.cmt = { doc: d, id };
+  S.cmt = { doc: d, id, ms: c ? c.ms : u.startMs, line: c ? c.from : null, raw: c ? (d.notes || '').split('\n').slice(c.from, c.to).join('\n') : null };
   // 녹음 중이어도 쓰는 동안 화면이 새 문장 쪽으로 끌려 내려가지 않게
   follow = false;
   hideTools();
@@ -1347,15 +1479,28 @@ function closeComment(save) {
   S.cmt = null;
   $('#pop-cmt').hidden = true;
   if (!save) return;
-  const v = $('#cmt-input').value.trim();
-  const old = c.doc.comments?.[c.id] || '';
-  if (v === old) return;
-  c.doc.comments = { ...(c.doc.comments || {}) };
-  if (v) c.doc.comments[c.id] = v;
-  else delete c.doc.comments[c.id];
-  persistDoc(c.doc);
+  const v = commentLines($('#cmt-input').value).join('\n');
+  const d = c.doc;
+  const notes = d.notes || '';
+  let next;
+  if (c.line == null) {
+    if (!v) return;
+    next = insertMemoComment(notes, c.ms, v);
+  } else {
+    // 여는 사이에 메모가 바뀌었을 수 있다 → 같은 글의 코멘트를 다시 찾는다
+    const lines = notes.split('\n');
+    const same = (b) => lines.slice(b.from, b.to).join('\n') === c.raw;
+    const blocks = parseMemo(notes);
+    const b = blocks.find((x) => x.from === c.line && same(x)) || blocks.find(same);
+    if (!b) { toast('그 사이 메모가 바뀌어서 코멘트를 저장하지 못했어요. 메모에서 고쳐 주세요', 'warn'); return; }
+    if (v === b.text) return;
+    next = rewriteMemoComment(notes, b, v);
+  }
+  d.notes = next;
+  syncMemoBox(d);
+  persistDoc(d);
   scheduleRender();
-  toast(v ? (old ? '코멘트를 고쳤어요' : '코멘트를 달았어요') : '코멘트를 지웠어요');
+  toast(v ? (c.line != null ? '코멘트를 고쳤어요' : '코멘트를 달았어요 — 메모에도 시각 줄로 적었어요') : '코멘트를 지웠어요');
 }
 $('#cmt-input').addEventListener('keydown', (k) => {
   // 한글 조합 중의 Enter 는 글자를 마무리하는 것 — 저장하지 않는다
@@ -1366,8 +1511,14 @@ $('#cmt-input').addEventListener('keydown', (k) => {
 $('#cmt-save').addEventListener('click', () => closeComment(true));
 $('#cmt-del').addEventListener('click', () => { $('#cmt-input').value = ''; closeComment(true); });
 $('#transcript').addEventListener('click', (e) => {
-  const c = e.target.closest('.cmt[data-cmt]');
-  if (c) { openComment(+c.dataset.cmt, c); return; }
+  // 코멘트 카드: 누른 코멘트를 고친다 (카드 여백이면 첫 코멘트) — 카드는 그 문장 바로 뒤에 붙어 있다
+  const box = e.target.closest('.cmt');
+  if (box) {
+    const uel = box.previousElementSibling;
+    const ce = e.target.closest('.ce[data-line]') || box.querySelector('.ce[data-line]');
+    if (uel?.matches('.u[data-id]') && ce) openComment(+uel.dataset.id, ce, +ce.dataset.line);
+    return;
+  }
   // 넓은 본문: 문장 오른쪽 여백의 '+ 코멘트' — 그 자리 아래에 코멘트 칸을 연다
   const el = e.target.closest('.u[data-id]');
   if (editing || !ghostHit(el, e)) return;
@@ -2739,8 +2890,8 @@ function demoDoc() {
     utterances: lines.map(([s, e, spk, text], i) => ({ id: i, startMs: s, endMs: e, speaker: spk, text, latencyMs: 1400 + ((i * 523) % 1700) })),
     summary: '### 한 줄 요약\n다음 달 15일 앱 출시를 확정하고 목요일에 최종 점검한다.\n\n### 결정 사항\n- 출시일 **15일** 확정, 목요일 최종 점검\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일',
     audioFile: null,
-    notes: '[00:07] 결제 모듈 — 테스트 서버 검증 결과 금요일에 공유받기\n[00:35] 키오스크 인덱스: 2초 → 0.4초\n\n- 매장 피드백 양식 미리 보내 두기',
-    comments: { 4: '0.4초는 피크 시간대 기준인지 확인', 6: '금요일 공유 — 담당 박 디자인' },
+    // 시각 줄 = 그 시각 문장의 코멘트 (00:34 · 00:35 는 같은 문장에 둘)
+    notes: '[00:07] 결제 모듈 — 테스트 서버 검증 결과 금요일에 공유받기\n[00:34] 0.4초는 피크 시간대 기준인지 확인\n[00:35] 키오스크 인덱스: 2초 → 0.4초\n[00:52] 금요일 공유 — 담당 박 디자인\n\n- 매장 피드백 양식 미리 보내 두기',
     // 회의 후 다시 정리 전 (화면 미리보기에서 '화자 정리 되돌리기' 버튼을 보이게)
     beforeRefine: { speakers: { 0: '김 팀장', 1: '이 개발', 2: '박 디자인', 3: '최 기획' }, assign: lines.map((l, i) => [i, i === 3 ? 3 : l[2]]) },
   };

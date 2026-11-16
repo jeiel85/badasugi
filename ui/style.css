@@ -665,10 +665,15 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .cmt-src { font-size: 12px; line-height: 1.5; color: var(--text-2); margin-top: 3px; padding-left: 8px; border-left: 2px solid var(--c, var(--line-strong)); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .cmt-text { font-size: 13px; line-height: 1.55; color: var(--text); margin-top: 6px; white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; }
 
-/* 녹취록 안의 코멘트 */
-.cmt { display: flex; gap: 6px; align-items: flex-start; margin: 3px 0 6px; padding: 5px 10px; border-radius: 8px; background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--text); font-size: calc(var(--fs, 15px) - 2px); line-height: 1.55; cursor: pointer; white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; }
-.cmt svg { width: 13px; height: 13px; margin-top: .3em; color: var(--warn); }
+/* 녹취록 안의 코멘트 = 메모의 [시각] 줄. 한 문장에 여럿이면 한 카드에 시각 순으로 */
+.cmt { display: flex; flex-direction: column; gap: 3px; margin: 3px 0 6px; padding: 5px 10px; border-radius: 8px; background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--text); font-size: calc(var(--fs, 15px) - 2px); line-height: 1.55; cursor: pointer; }
+.ce { display: flex; gap: 6px; align-items: flex-start; white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; }
+.ce + .ce { padding-top: 3px; border-top: 1px dashed color-mix(in srgb, var(--warn) 32%, transparent); }
+.ce svg { flex: none; width: 13px; height: 13px; margin-top: .3em; color: var(--warn); }
+.ce time { margin-right: 6px; font-size: .86em; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cmt:has(.ce + .ce) .ce:hover > span { text-decoration: underline dotted color-mix(in srgb, var(--warn) 60%, transparent); text-underline-offset: 3px; }
 .cmt:hover { background: color-mix(in srgb, var(--warn) 20%, transparent); }
+.n-empty code { font-family: inherit; font-weight: 600; color: var(--text-2); }
 
 /* 문장 고치기 */
 .u[contenteditable="true"] { background: var(--surface) !important; box-shadow: 0 0 0 2px var(--accent) !important; cursor: text; }
