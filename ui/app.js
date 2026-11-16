@@ -416,8 +416,8 @@ function renderBanners(has) {
   const v = !S.live ? S.viewDoc : null;
   $('#viewing').hidden = !v;
   if (v) {
-    // 제목은 바로 아래에 있으니 배너에는 언제 회의인지를 보여 준다
-    $('#viewing-label').textContent = `지난 회의 · ${whenLabel(v.startedAt)}`;
+    // 제목은 바로 아래에 있으니 배너에는 언제 · 얼마나 한 회의인지를 보여 준다 (다시 볼 때는 도크의 시계를 숨긴다)
+    $('#viewing-label').textContent = `지난 회의 · ${whenLabel(v.startedAt)}${v.durationMs ? ` · ${durLabel(v.durationMs)}` : ''}`;
     const back = $('#btn-back-live');
     const live = S.rec !== 'idle';
     back.textContent = live ? '실시간으로 돌아가기' : '닫기';
@@ -426,7 +426,14 @@ function renderBanners(has) {
   // 받아 적힌 문장이 없어도 메모를 남긴 회의는 기록에 저장된다
   const ended = S.live && S.rec === 'idle' && (has || !!String(S.liveDoc?.notes || '').trim());
   $('#ended').hidden = !ended;
-  if (ended) $('#ended-label').textContent = `${S.liveDoc?.sourceFile ? '파일 받아쓰기를' : '회의를'} 마쳤어요 · 기록에 저장됨`;
+  if (ended) {
+    const dur = S.liveDoc?.durationMs ? ` · ${durLabel(S.liveDoc.durationMs)}` : '';
+    $('#ended-label').textContent = `${S.liveDoc?.sourceFile ? '파일 받아쓰기를' : '회의를'} 마쳤어요${dur} · 기록에 저장됨`;
+  }
+  // 회의를 다시 보는 중(지난 회의 · 마친 회의)에는 녹음 도크를 한 줄로 줄인다
+  const review = S.rec === 'idle' && (!!v || ended);
+  $('#app').classList.toggle('review', review);
+  $('#btn-rec').title = review ? '새 회의 녹음 시작' : '녹음 시작/중지';
 }
 
 // 첫 화면의 최근 회의 (최신 5개)
@@ -1001,7 +1008,9 @@ function startEdit(el) {
 }
 $('#transcript').addEventListener('dblclick', (e) => {
   if (e.target.closest('.cmt')) return;
-  startEdit(e.target.closest('.u[data-id]'));
+  const el = e.target.closest('.u[data-id]');
+  if (ghostHit(el, e)) return;
+  startEdit(el);
 });
 
 const persistDoc = debounce((d) => {
@@ -1046,14 +1055,20 @@ function commentHtml(d, id) {
 const wideMq = matchMedia('(min-width: 760px)');
 const NTABS = ['memo', 'summary', 'comments'];
 const notesPref = { wide: null, narrow: null };
-let notesW = 380;
+let notesW = 0; // 0: 창 크기에 맞춰 (CSS) · 끌어서 정하면 그 너비
 try {
   notesPref.wide = localStorage.getItem('notes.wide');
   notesPref.narrow = localStorage.getItem('notes.narrow');
   const t = localStorage.getItem('notes.tab');
   if (NTABS.includes(t)) S.ntab = t;
-  notesW = +localStorage.getItem('notes.w') || 380;
+  notesW = +localStorage.getItem('notes.w') || 0;
 } catch { /* 저장소를 못 쓰면 기본값 */ }
+// 본문 칸이 넉넉하면(side-cmt) 코멘트를 녹취록 옆 여백에 두고, 노트 칸의 코멘트 탭은 숨긴다.
+// 그때 코멘트 탭을 골라 두었으면 메모를 보여 준다 (고른 것은 기억해 두었다가 좁아지면 다시)
+const SIDE_CMT_MIN = 940;
+let sideCmt = false;
+const curTab = () => (sideCmt && S.ntab === 'comments' ? 'memo' : S.ntab);
+const shownTabs = () => NTABS.filter((t) => !(sideCmt && t === 'comments'));
 const layoutKey = () => (wideMq.matches ? 'wide' : 'narrow');
 function notesWanted() {
   const v = notesPref[layoutKey()];
@@ -1079,13 +1094,14 @@ function renderNotes() {
   nb.disabled = !d;
   placeSummary(show);
   if (!show) return;
+  const tab = curTab();
   $$('#notes-tabs [data-ntab]').forEach((b) => {
-    const on = b.dataset.ntab === S.ntab;
+    const on = b.dataset.ntab === tab;
     b.classList.toggle('on', on);
     b.setAttribute('aria-selected', String(on));
     b.tabIndex = on ? 0 : -1;
   });
-  $$('#notes [data-npage]').forEach((p) => (p.hidden = p.dataset.npage !== S.ntab));
+  $$('#notes [data-npage]').forEach((p) => (p.hidden = p.dataset.npage !== tab));
   // 메모 칸: 다른 기록으로 바뀌었거나 쓰고 있지 않을 때만 채운다 (치는 중인 글자를 덮지 않게)
   const m = $('#memo');
   if (memoFor !== d.id || document.activeElement !== m) {
@@ -1114,7 +1130,7 @@ function renderCommentList(d) {
       .sort((a, b) => a.u.startMs - b.u.startMs || a.u.id - b.u.id);
   }
   $('#cmt-count').textContent = items.length || '';
-  if (S.ntab !== 'comments') return;
+  if (curTab() !== 'comments') return;
   const html = items.length
     ? items.map(({ u, text }) => {
       const s = resolveSpk(d, u.speaker);
@@ -1152,15 +1168,25 @@ $('#notes-tabs').addEventListener('keydown', (e) => {
   const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
   if (!step) return;
   e.preventDefault();
-  const next = NTABS[(NTABS.indexOf(S.ntab) + step + NTABS.length) % NTABS.length];
+  const tabs = shownTabs();
+  const next = tabs[(tabs.indexOf(curTab()) + step + tabs.length) % tabs.length];
   showNotesTab(next);
   $(`#notes-tabs [data-ntab="${next}"]`).focus();
 });
 
 // 노트 너비 (넓은 창): 사이 막대를 끌어서
 const work = $('#work');
-const applyNotesW = () => work.style.setProperty('--notes-w', `${notesW}px`);
+const applyNotesW = () => (notesW ? work.style.setProperty('--notes-w', `${notesW}px`) : work.style.removeProperty('--notes-w'));
 applyNotesW();
+new ResizeObserver(([e]) => {
+  const on = e.contentRect.width >= SIDE_CMT_MIN;
+  if (on === sideCmt) return;
+  sideCmt = on;
+  work.classList.toggle('side-cmt', on);
+  if (!editing) hideTools();
+  cmtShown = '';
+  renderNotes();
+}).observe($('#main-col'));
 $('#notes-grip').addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
   e.preventDefault();
@@ -1185,7 +1211,7 @@ $('#notes-grip').addEventListener('pointerdown', (e) => {
   grip.addEventListener('pointercancel', up, { once: true });
 });
 $('#notes-grip').addEventListener('dblclick', () => {
-  notesW = 380;
+  notesW = 0;
   applyNotesW();
   try { localStorage.removeItem('notes.w'); } catch { /* 이번만 */ }
 });
@@ -1341,7 +1367,29 @@ $('#cmt-save').addEventListener('click', () => closeComment(true));
 $('#cmt-del').addEventListener('click', () => { $('#cmt-input').value = ''; closeComment(true); });
 $('#transcript').addEventListener('click', (e) => {
   const c = e.target.closest('.cmt[data-cmt]');
-  if (c) openComment(+c.dataset.cmt, c);
+  if (c) { openComment(+c.dataset.cmt, c); return; }
+  // 넓은 본문: 문장 오른쪽 여백의 '+ 코멘트' — 그 자리 아래에 코멘트 칸을 연다
+  const el = e.target.closest('.u[data-id]');
+  if (editing || !ghostHit(el, e)) return;
+  clearTimeout(playClick);
+  const r = el.getBoundingClientRect();
+  const x = r.right + 24;
+  openComment(+el.dataset.id, { getBoundingClientRect: () => ({ left: x, right: x + 90, top: r.top, bottom: r.top + 26, width: 90, height: 26 }) });
+});
+// 넓은 본문에서 문장의 '+ 코멘트'(문장 상자 오른쪽 밖에 그린 ::after)를 가리키는지
+function ghostHit(el, e, slack = 0) {
+  return sideCmt && !!el && e.clientX > el.getBoundingClientRect().right + slack;
+}
+// '+ 코멘트' 위에 올리면 눌리는 버튼처럼 보이게
+let ghostEl = null;
+body.addEventListener('mousemove', (e) => {
+  if (!sideCmt && !ghostEl) return;
+  const el = e.target.closest?.('#transcript .u[data-id]');
+  const hot = el && ghostHit(el, e, 20) ? el : null;
+  if (hot === ghostEl) return;
+  ghostEl?.classList.remove('ghost-hot');
+  ghostEl = hot;
+  hot?.classList.add('ghost-hot');
 });
 $('#cmt-list').addEventListener('click', (e) => {
   const b = e.target.closest('[data-goto]');
@@ -1624,7 +1672,7 @@ document.addEventListener('keydown', (e) => {
   // Ctrl+; : 메모에 지금 시각
   if (e.ctrlKey && !e.altKey && e.code === 'Semicolon' && !S.mini && doc()) {
     e.preventDefault();
-    if (!notesShown() || S.ntab !== 'memo') toggleNotes(true, true);
+    if (!notesShown() || curTab() !== 'memo') toggleNotes(true, true);
     insertTime();
     return;
   }
@@ -2019,7 +2067,7 @@ $('#pl-rate').addEventListener('click', () => {
 // 문장 한 번 누르기 → 그 부분 듣기 (더블클릭 편집·글자 선택과 겹치지 않게 잠깐 기다린다)
 $('#transcript').addEventListener('click', (e) => {
   const el = e.target.closest('.u[data-id]');
-  if (!el || !P.src || editing || e.target.closest('.g-name')) return;
+  if (!el || !P.src || editing || e.target.closest('.g-name') || ghostHit(el, e)) return;
   if (!window.getSelection().isCollapsed) return;
   clearTimeout(playClick);
   const id = +el.dataset.id;
