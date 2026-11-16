@@ -892,7 +892,7 @@ fn sync_session_voices(app: &AppHandle, id: &str) {
     }
 }
 
-/// 설정 › 화자 구분: 기억한 목소리 목록
+/// 설정 › 화자 › 목소리 기억: 기억한 목소리 목록
 #[tauri::command]
 fn list_voices(app: AppHandle) -> Vec<voices::VoiceInfo> {
     app.state::<VoiceBook>().list()
@@ -1395,7 +1395,7 @@ fn on_display_change(app: &AppHandle) {
 }
 
 /// 화면 스크립트가 시작을 끝냈다는 신호 (스크립트 오류로 화면이 비면 오지 않는다)
-/// 설정 › API 사용량: 이 앱으로 쓴 양(오늘 · 이번 달) + 공급자가 알려 준 남은 한도
+/// 설정 › 사용량: 이 앱으로 쓴 양(오늘 · 이번 달) + 공급자가 알려 준 남은 한도
 #[tauri::command]
 fn get_usage(app: AppHandle) -> usage_book::UsageReport {
     let book = app.state::<usage_book::UsageBook>();
@@ -1763,7 +1763,7 @@ fn main() {
             if let Err(e) = register_hotkey(&handle, &settings.hotkey) {
                 log::warn!("{e}");
                 *app.state::<AppState>().hotkey_error.lock() =
-                    Some(format!("{e}\n다른 프로그램이 쓰고 있을 수 있어요. 설정에서 다른 조합으로 바꿔 주세요."));
+                    Some(format!("{e}\n다른 프로그램이 쓰고 있을 수 있어요. 설정 › 일반에서 다른 조합으로 바꿔 주세요."));
             }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_always_on_top(settings.always_on_top);

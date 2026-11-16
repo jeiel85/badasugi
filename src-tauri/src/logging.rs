@@ -1,6 +1,6 @@
 //! 진단 로그 — 문제가 생겼을 때 원인을 찾기 위한 기록
 //!
-//! - 위치: `%LOCALAPPDATA%\com.badasugi.desktop\logs\badasugi-YYYY-MM-DD.log` (설정 › 로그 폴더)
+//! - 위치: `%LOCALAPPDATA%\com.badasugi.desktop\logs\badasugi-YYYY-MM-DD.log` (설정 › 일반 › 폴더 열기 › 로그)
 //! - 7일치만 보관하고, 하루 10MB 를 넘으면 그날은 더 쓰지 않는다
 //! - 녹취록 내용 · API 키는 남기지 않는다 (앱의 로그 문구를 그렇게 쓴다)
 //! - 앱이 갑자기 죽는 경우(패닉)도 어느 스레드 · 어느 코드였는지와 함께 남긴다

@@ -163,157 +163,218 @@
         <h3>설정</h3>
         <button class="icon-btn" data-close title="닫기"><svg><use href="#i-x"/></svg></button>
       </div>
+      <nav class="set-tabs" id="set-tabs" role="tablist" aria-label="설정 분류">
+        <button role="tab" data-tab="record">녹음</button>
+        <button role="tab" data-tab="speaker">화자</button>
+        <button role="tab" data-tab="summary">요약</button>
+        <button role="tab" data-tab="usage">사용량</button>
+        <button role="tab" data-tab="general">일반</button>
+      </nav>
       <div class="panel-body settings" id="settings">
-        <section>
-          <h4>음성 인식</h4>
-          <div class="seg" id="seg-engine">
-            <button data-v="local">로컬</button>
-            <button data-v="openai">OpenAI</button>
-            <button data-v="groq">Groq</button>
-            <button data-v="custom">사용자 지정</button>
-          </div>
-          <p class="desc" id="engine-desc"></p>
 
-          <div data-engine="local">
-            <div class="models" id="model-list"></div>
-            <label class="row"><span>정확도 우선 <small>빔 서치 · 느려짐</small></span><input type="checkbox" class="switch" id="opt-beam" /></label>
-          </div>
-          <div data-engine="openai">
-            <label class="field"><span>API 키 <button class="link" data-url="https://platform.openai.com/api-keys">키 만들기 ↗</button></span><input type="password" id="key-openai" placeholder="sk-…" autocomplete="off" /></label>
-            <label class="field"><span>모델</span>
-              <select id="opt-openai-model">
-                <option value="gpt-4o-transcribe">gpt-4o-transcribe (정확)</option>
-                <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (저렴)</option>
-                <option value="whisper-1">whisper-1</option>
-              </select>
-            </label>
-          </div>
-          <div data-engine="groq">
-            <label class="field"><span>API 키 <button class="link" data-url="https://console.groq.com/keys">무료로 받기 ↗</button></span><input type="password" id="key-groq" placeholder="gsk_…" autocomplete="off" /></label>
-            <label class="field"><span>모델</span>
-              <select id="opt-groq-model">
-                <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (가장 빠름)</option>
-                <option value="whisper-large-v3">whisper-large-v3 (더 정확)</option>
-              </select>
-            </label>
-          </div>
-          <div data-engine="custom">
-            <label class="field"><span>주소</span><input id="opt-custom-url" placeholder="http://localhost:8000/v1" /></label>
-            <label class="field"><span>모델</span><input id="opt-custom-model" placeholder="whisper-1" /></label>
-            <label class="field"><span>API 키 <small>(선택)</small></span><input type="password" id="key-custom" autocomplete="off" /></label>
-          </div>
-          <button class="btn ghost" id="btn-test">연결 테스트</button>
-        </section>
+        <!-- 녹음: 음성 인식 엔진 · 입력 -->
+        <div class="set-page" data-page="record" role="tabpanel">
+          <section>
+            <h4>음성 인식 엔진</h4>
+            <div class="seg" id="seg-engine">
+              <button data-v="local">로컬</button>
+              <button data-v="openai">OpenAI</button>
+              <button data-v="groq">Groq</button>
+              <button data-v="custom">사용자 지정</button>
+            </div>
+            <p class="desc" id="engine-desc"></p>
 
-        <section>
-          <h4>화자 구분</h4>
-          <label class="row"><span>화자 구분하기</span><input type="checkbox" class="switch" id="opt-diar" /></label>
-          <div class="model-mini" id="speaker-model"></div>
-          <label class="field"><span>구분 민감도 <small id="thr-label"></small></span>
-            <input type="range" id="opt-thr" min="0.25" max="0.70" step="0.01" />
-            <div class="range-ends"><small>화자를 적게</small><small>화자를 많이</small></div>
-          </label>
-          <label class="field"><span>최대 화자 수</span>
-            <select id="opt-maxspk">
-              <option value="0">자동</option>
-              <option value="2">2명</option><option value="3">3명</option><option value="4">4명</option>
-              <option value="5">5명</option><option value="6">6명</option><option value="8">8명</option><option value="10">10명</option>
-            </select>
-          </label>
-          <p class="desc">녹음이 끝나면 회의 전체를 다시 듣고 화자를 한 번 더 정리해요 (같은 사람이 둘로 나뉜 것 합치기 · 잘못 붙은 문장 옮기기).</p>
-          <label class="row"><span>목소리 기억하기 <small>다음 회의에서 이름 자동으로</small></span><input type="checkbox" class="switch" id="opt-voices" /></label>
-          <p class="desc">화자 이름을 바꿔 두면, 다음 회의에서 같은 목소리에 그 이름을 붙여요. 목소리 특징값(숫자)만 이 PC에 두고, 녹음은 따로 저장하지 않아요. 잊게 하면 지난 회의에 남은 그 사람의 목소리 특징값도 함께 지워요.</p>
-          <div class="voice-list" id="voice-list"></div>
-        </section>
+            <div data-engine="local">
+              <div class="models" id="model-list"></div>
+              <div class="set-group">
+                <label class="row"><span>정확도 우선<small>빔 서치로 조금 더 정확하지만 느려져요</small></span><input type="checkbox" class="switch" id="opt-beam" /></label>
+              </div>
+            </div>
+            <div class="set-group" data-engine="openai">
+              <label class="field"><span>API 키 <button class="link" data-url="https://platform.openai.com/api-keys">키 만들기 ↗</button></span><input type="password" id="key-openai" placeholder="sk-…" autocomplete="off" /></label>
+              <label class="field"><span>모델</span>
+                <select id="opt-openai-model">
+                  <option value="gpt-4o-transcribe">gpt-4o-transcribe (정확)</option>
+                  <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (저렴)</option>
+                  <option value="whisper-1">whisper-1</option>
+                </select>
+              </label>
+            </div>
+            <div class="set-group" data-engine="groq">
+              <label class="field"><span>API 키 <button class="link" data-url="https://console.groq.com/keys">무료로 받기 ↗</button></span><input type="password" id="key-groq" placeholder="gsk_…" autocomplete="off" /></label>
+              <label class="field"><span>모델</span>
+                <select id="opt-groq-model">
+                  <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (가장 빠름)</option>
+                  <option value="whisper-large-v3">whisper-large-v3 (더 정확)</option>
+                </select>
+              </label>
+            </div>
+            <div class="set-group" data-engine="custom">
+              <label class="field"><span>주소</span><input id="opt-custom-url" placeholder="http://localhost:8000/v1" /></label>
+              <label class="field"><span>모델</span><input id="opt-custom-model" placeholder="whisper-1" /></label>
+              <label class="field"><span>API 키 <small>(선택)</small></span><input type="password" id="key-custom" autocomplete="off" /></label>
+            </div>
+            <button class="btn ghost" id="btn-test">연결 테스트</button>
+          </section>
 
-        <section>
-          <h4>입력</h4>
-          <label class="field"><span>마이크</span><select id="opt-mic"></select></label>
-          <label class="field"><span>언어</span>
-            <select id="opt-lang">
-              <option value="ko">한국어</option>
-              <option value="auto">자동 감지</option>
-              <option value="en">English</option>
-              <option value="ja">日本語</option>
-              <option value="zh">中文</option>
-            </select>
-          </label>
-          <label class="field"><span>용어집 <small>쉼표로 구분 · 고유명사 인식률 향상</small></span>
-            <textarea id="opt-glossary" rows="2" placeholder="예) OKPOS, 키오스크, 스캔프리, 정산"></textarea>
-          </label>
-        </section>
+          <section>
+            <h4>입력</h4>
+            <div class="set-group">
+              <label class="field"><span>마이크</span><select id="opt-mic"></select></label>
+              <label class="row"><span>언어<small>회의에서 주로 쓰는 말</small></span>
+                <select id="opt-lang" class="compact">
+                  <option value="ko">한국어</option>
+                  <option value="auto">자동 감지</option>
+                  <option value="en">English</option>
+                  <option value="ja">日本語</option>
+                  <option value="zh">中文</option>
+                </select>
+              </label>
+              <label class="field"><span>용어집 <small>쉼표로 구분 · 회사 · 제품 이름을 더 잘 알아들어요</small></span>
+                <textarea id="opt-glossary" rows="2" placeholder="예) OKPOS, 키오스크, 스캔프리, 정산"></textarea>
+              </label>
+            </div>
+            <p class="desc">마이크 · PC 소리 중 무엇을 받아 적을지는 녹음 버튼 옆 <b>마이크 ▾</b> 에서 골라요.</p>
+          </section>
+        </div>
 
-        <section>
-          <h4>AI 요약</h4>
-          <div class="seg seg-wrap" id="seg-llm">
-            <button data-v="ollama">Ollama</button>
-            <button data-v="groq">Groq</button>
-            <button data-v="gemini">Gemini</button>
-            <button data-v="openai">OpenAI</button>
-            <button data-v="anthropic">Claude</button>
-            <button data-v="custom">사용자 지정</button>
-          </div>
-          <p class="desc" id="llm-desc"></p>
-          <div data-llm="ollama">
-            <label class="field"><span>Ollama 주소</span><input id="opt-ollama-url" spellcheck="false" /></label>
-            <label class="field"><span>모델 <small>한국어 특화: exaone3.5</small></span><input id="opt-ollama-model" list="llm-models" spellcheck="false" /></label>
-          </div>
-          <div data-llm="groq">
-            <label class="field"><span>Groq API 키 <small>음성 인식과 같은 키</small></span><input type="password" id="key-groq-llm" placeholder="gsk_…" autocomplete="off" /></label>
-            <label class="field"><span>모델</span><input id="opt-llm-groq-model" list="llm-models" spellcheck="false" /></label>
-          </div>
-          <div data-llm="gemini">
-            <label class="field"><span>Gemini API 키</span><input type="password" id="key-gemini" placeholder="AIza…" autocomplete="off" /></label>
-            <label class="field"><span>모델 <small>gemini-flash-latest = 항상 최신 Flash</small></span><input id="opt-llm-gemini-model" list="llm-models" spellcheck="false" /></label>
-          </div>
-          <div data-llm="openai">
-            <label class="field"><span>OpenAI API 키 <small>음성 인식과 같은 키</small></span><input type="password" id="key-openai-llm" placeholder="sk-…" autocomplete="off" /></label>
-            <label class="field"><span>모델</span><input id="opt-llm-openai-model" list="llm-models" spellcheck="false" /></label>
-          </div>
-          <div data-llm="anthropic">
-            <label class="field"><span>Anthropic API 키</span><input type="password" id="key-anthropic" placeholder="sk-ant-…" autocomplete="off" /></label>
-            <label class="field"><span>모델</span><input id="opt-anthropic-model" list="llm-models" spellcheck="false" /></label>
-          </div>
-          <div data-llm="custom">
-            <label class="field"><span>주소 <small>OpenAI 호환</small></span><input id="opt-llm-custom-url" placeholder="http://localhost:1234/v1" spellcheck="false" /></label>
-            <label class="field"><span>모델</span><input id="opt-llm-custom-model" list="llm-models" spellcheck="false" /></label>
-            <label class="field"><span>API 키 <small>(선택)</small></span><input type="password" id="key-llm-custom" autocomplete="off" /></label>
-          </div>
-          <datalist id="llm-models"></datalist>
-          <button class="btn ghost" id="btn-test-llm">연결 확인 · 모델 목록 불러오기</button>
-        </section>
+        <!-- 화자: 화자 구분 · 목소리 기억 -->
+        <div class="set-page" data-page="speaker" role="tabpanel" hidden>
+          <section>
+            <h4>화자 구분</h4>
+            <div class="set-group">
+              <label class="row"><span>화자 구분하기<small>녹음이 끝나면 회의 전체를 다시 듣고 한 번 더 정리해요</small></span><input type="checkbox" class="switch" id="opt-diar" /></label>
+              <div class="row model-mini" id="speaker-model"></div>
+            </div>
+            <div class="set-group" id="diar-tune">
+              <label class="field"><span>구분 민감도 <small id="thr-label"></small></span>
+                <input type="range" id="opt-thr" min="0.25" max="0.70" step="0.01" />
+                <div class="range-ends"><small>화자를 적게</small><small>화자를 많이</small></div>
+              </label>
+              <label class="row"><span>최대 화자 수<small>참석 인원을 알면 이게 가장 정확해요</small></span>
+                <select id="opt-maxspk" class="compact">
+                  <option value="0">자동</option>
+                  <option value="2">2명</option><option value="3">3명</option><option value="4">4명</option>
+                  <option value="5">5명</option><option value="6">6명</option><option value="8">8명</option><option value="10">10명</option>
+                </select>
+              </label>
+            </div>
+            <p class="desc">한 사람이 여럿으로 나뉘면 민감도를 왼쪽으로, 여러 사람이 하나로 합쳐지면 오른쪽으로 옮겨 보세요.</p>
+          </section>
 
-        <section>
-          <h4>API 사용량 <button class="link usage-refresh" id="btn-usage-refresh" title="다시 불러오기">새로 고침</button></h4>
-          <div class="usage" id="usage-box"></div>
-          <p class="desc">남은 <b>잔액 · 크레딧</b>은 공급자가 일반 API 키로는 알려 주지 않아 각 사이트에서 확인해야 해요. 여기서는 이 앱으로 쓴 양과, 공급자가 응답마다 알려 주는 <b>남은 한도</b>를 보여 드려요.</p>
-        </section>
+          <section>
+            <h4>목소리 기억</h4>
+            <div class="set-group">
+              <label class="row"><span>목소리 기억하기<small>이름 붙인 사람을 다음 회의에서 알아보고 이름을 붙여요</small></span><input type="checkbox" class="switch" id="opt-voices" /></label>
+              <div class="voice-list" id="voice-list"></div>
+            </div>
+            <p class="desc">목소리 특징값(숫자)만 이 PC에 두고, 녹음은 따로 저장하지 않아요. 잊게 하면 지난 회의에 남은 그 사람의 특징값도 함께 지워요.</p>
+          </section>
+        </div>
 
-        <section>
-          <h4>일반</h4>
-          <label class="field"><span>녹음 단축키 <small>칸을 누르고 조합키 입력</small></span><input id="opt-hotkey" readonly /></label>
-          <label class="row"><span>항상 위에 표시</span><input type="checkbox" class="switch" id="opt-top" /></label>
-          <label class="row"><span>Windows 시작 시 트레이에서 실행</span><input type="checkbox" class="switch" id="opt-autostart" /></label>
-          <label class="row"><span>녹음 파일도 저장 <small>1시간 약 11MB</small></span><input type="checkbox" class="switch" id="opt-audio" /></label>
-          <label class="row"><span>대기 중 모델 메모리 비우기 <small>가볍게</small></span><input type="checkbox" class="switch" id="opt-unload" /></label>
-          <label class="row"><span>자동 업데이트 <small>쓰지 않을 때 조용히 적용</small></span><input type="checkbox" class="switch" id="opt-autoupdate" /></label>
-          <label class="field"><span>테마</span>
-            <select id="opt-theme"><option value="system">시스템 설정</option><option value="light">밝게</option><option value="dark">어둡게</option></select>
-          </label>
-        </section>
+        <!-- 요약: AI 요약 제공자 -->
+        <div class="set-page" data-page="summary" role="tabpanel" hidden>
+          <section>
+            <h4>AI 요약</h4>
+            <div class="seg seg-wrap" id="seg-llm">
+              <button data-v="ollama">Ollama</button>
+              <button data-v="groq">Groq</button>
+              <button data-v="gemini">Gemini</button>
+              <button data-v="openai">OpenAI</button>
+              <button data-v="anthropic">Claude</button>
+              <button data-v="custom">사용자 지정</button>
+            </div>
+            <p class="desc" id="llm-desc"></p>
+            <div class="set-group" data-llm="ollama">
+              <label class="field"><span>Ollama 주소</span><input id="opt-ollama-url" spellcheck="false" /></label>
+              <label class="field"><span>모델 <small>한국어 특화: exaone3.5</small></span><input id="opt-ollama-model" list="llm-models" spellcheck="false" /></label>
+            </div>
+            <div class="set-group" data-llm="groq">
+              <label class="field"><span>Groq API 키 <small>음성 인식과 같은 키</small></span><input type="password" id="key-groq-llm" placeholder="gsk_…" autocomplete="off" /></label>
+              <label class="field"><span>모델</span><input id="opt-llm-groq-model" list="llm-models" spellcheck="false" /></label>
+            </div>
+            <div class="set-group" data-llm="gemini">
+              <label class="field"><span>Gemini API 키</span><input type="password" id="key-gemini" placeholder="AIza…" autocomplete="off" /></label>
+              <label class="field"><span>모델 <small>gemini-flash-latest = 항상 최신 Flash</small></span><input id="opt-llm-gemini-model" list="llm-models" spellcheck="false" /></label>
+            </div>
+            <div class="set-group" data-llm="openai">
+              <label class="field"><span>OpenAI API 키 <small>음성 인식과 같은 키</small></span><input type="password" id="key-openai-llm" placeholder="sk-…" autocomplete="off" /></label>
+              <label class="field"><span>모델</span><input id="opt-llm-openai-model" list="llm-models" spellcheck="false" /></label>
+            </div>
+            <div class="set-group" data-llm="anthropic">
+              <label class="field"><span>Anthropic API 키</span><input type="password" id="key-anthropic" placeholder="sk-ant-…" autocomplete="off" /></label>
+              <label class="field"><span>모델</span><input id="opt-anthropic-model" list="llm-models" spellcheck="false" /></label>
+            </div>
+            <div class="set-group" data-llm="custom">
+              <label class="field"><span>주소 <small>OpenAI 호환</small></span><input id="opt-llm-custom-url" placeholder="http://localhost:1234/v1" spellcheck="false" /></label>
+              <label class="field"><span>모델</span><input id="opt-llm-custom-model" list="llm-models" spellcheck="false" /></label>
+              <label class="field"><span>API 키 <small>(선택)</small></span><input type="password" id="key-llm-custom" autocomplete="off" /></label>
+            </div>
+            <datalist id="llm-models"></datalist>
+            <button class="btn ghost" id="btn-test-llm">연결 확인 · 모델 목록 불러오기</button>
+          </section>
+        </div>
 
-        <section class="about">
-          <div class="about-row">
-            <span>받아쓰기 <b id="app-version"></b></span>
-            <span><button class="link" id="btn-check-update">업데이트 확인</button> · <button class="link" id="btn-github">GitHub</button></span>
-          </div>
-          <div class="about-row">
-            <button class="link" id="btn-folder-sessions">기록 폴더</button>
-            <button class="link" id="btn-folder-models">모델 폴더</button>
-            <button class="link" id="btn-folder-logs" title="문제가 생겼을 때 원인을 찾는 기록 (7일 보관, 녹취록 내용·API 키는 남기지 않음)">로그 폴더</button>
-            <button class="link danger" id="btn-quit">완전히 종료</button>
-          </div>
-        </section>
+        <!-- 사용량: API 사용량 -->
+        <div class="set-page" data-page="usage" role="tabpanel" hidden>
+          <section>
+            <div class="sec-head"><h4>API 사용량</h4><button class="btn ghost sm" id="btn-usage-refresh" title="다시 불러오기">새로 고침</button></div>
+            <div class="usage" id="usage-box"></div>
+            <p class="desc">이 앱으로 쓴 양과, 공급자가 응답마다 알려 주는 <b>남은 한도</b>예요. 잔액 · 크레딧은 일반 API 키로는 알 수 없어 각 공급자 사이트에서 확인해 주세요.</p>
+          </section>
+        </div>
+
+        <!-- 일반: 단축키 · 창 · 시작 · 업데이트 · 테마 · 정보 -->
+        <div class="set-page" data-page="general" role="tabpanel" hidden>
+          <section>
+            <h4>녹음 · 창</h4>
+            <div class="set-group">
+              <div class="row"><span>녹음 단축키<small id="hotkey-desc">어디서든 녹음을 시작하고 멈춰요</small></span><button type="button" class="keycap" id="opt-hotkey" title="눌러서 바꾸기"></button></div>
+              <label class="row"><span>항상 위에 표시<small>회의 화면 옆에 띄워 둘 때</small></span><input type="checkbox" class="switch" id="opt-top" /></label>
+              <label class="row"><span>녹음 파일도 저장<small>문장을 눌러 다시 듣기 · 1시간 약 11MB</small></span><input type="checkbox" class="switch" id="opt-audio" /></label>
+            </div>
+          </section>
+
+          <section>
+            <h4>시작 · 업데이트</h4>
+            <div class="set-group">
+              <label class="row"><span>Windows 시작 시 실행<small>트레이에 조용히 켜 두고 단축키로 바로 녹음해요</small></span><input type="checkbox" class="switch" id="opt-autostart" /></label>
+              <label class="row"><span>자동 업데이트<small>새 버전을 받아 두었다가 쓰지 않을 때 적용해요</small></span><input type="checkbox" class="switch" id="opt-autoupdate" /></label>
+              <label class="row"><span>쉴 때 모델 메모리 비우기<small>녹음을 마치면 로컬 모델을 내려 메모리를 아껴요 · 다음 녹음 시작이 몇 초 늦어져요</small></span><input type="checkbox" class="switch" id="opt-unload" /></label>
+            </div>
+          </section>
+
+          <section>
+            <h4>화면</h4>
+            <div class="set-group">
+              <div class="row"><span>테마</span>
+                <div class="seg seg-sm" id="seg-theme">
+                  <button data-v="system">시스템</button>
+                  <button data-v="light">밝게</button>
+                  <button data-v="dark">어둡게</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="about">
+            <div class="about-card">
+              <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="16" fill="url(#lg)"/><g fill="#fff"><rect x="11" y="26" width="7" height="12" rx="3.5"/><rect x="21" y="18" width="7" height="28" rx="3.5"/><rect x="31" y="12" width="7" height="40" rx="3.5"/><rect x="41" y="22" width="13" height="7" rx="3.5"/><rect x="41" y="35" width="10" height="7" rx="3.5"/></g></svg>
+              <div class="about-text"><b>받아쓰기 <span id="app-version"></span></b><small id="about-update"></small></div>
+              <button class="btn ghost sm" id="btn-check-update">업데이트 확인</button>
+            </div>
+            <div class="about-links">
+              <span>폴더 열기</span>
+              <button class="chip-btn" id="btn-folder-sessions" title="회의 기록 · 녹음 파일">기록</button>
+              <button class="chip-btn" id="btn-folder-models" title="음성 인식 · 화자 모델">모델</button>
+              <button class="chip-btn" id="btn-folder-logs" title="문제가 생겼을 때 원인을 찾는 기록 (7일 보관, 녹취록 내용 · API 키는 남기지 않음)">로그</button>
+            </div>
+            <div class="about-foot">
+              <button class="link" id="btn-github">GitHub ↗</button>
+              <button class="link danger" id="btn-quit" title="트레이에서도 내리고 앱을 끝내요">완전히 종료</button>
+            </div>
+          </section>
+        </div>
       </div>
     </aside>
 

@@ -1,6 +1,6 @@
 //! API 사용 한도 — 공급자가 매 응답 헤더로 알려 주는 "남은 요청 · 처리량"을 마지막 값으로 기억한다.
 //!
-//! 일반 API 키로는 잔액 · 크레딧을 조회할 수 없어서, 대신 이 값을 설정 › API 사용량에 보여 준다.
+//! 일반 API 키로는 잔액 · 크레딧을 조회할 수 없어서, 대신 이 값을 설정 › 사용량에 보여 준다.
 //! - Groq · OpenAI · OpenAI 호환: `x-ratelimit-{limit|remaining|reset}-{requests|tokens|…}`
 //! - Anthropic: `anthropic-ratelimit-{requests|tokens|input-tokens|output-tokens}-{limit|remaining|reset}`
 //! - 한도에 걸렸을 때: `retry-after`

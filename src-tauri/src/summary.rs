@@ -437,7 +437,7 @@ fn error_message(status: reqwest::StatusCode, retry_after: Option<u64>, body: &s
 /// 제공자 → (OpenAI 호환 주소, 키, 모델). Ollama·Claude 는 None
 fn openai_like(cfg: &SummarySettings) -> Result<Option<(String, Option<String>, String)>> {
     let need = |name: &str, label: &str| {
-        get_key(name).ok_or_else(|| anyhow!("{label} API 키를 설정 › AI 요약에서 입력해 주세요"))
+        get_key(name).ok_or_else(|| anyhow!("{label} API 키를 설정 › 요약에서 입력해 주세요"))
     };
     Ok(match cfg.provider.as_str() {
         "groq" => Some((GROQ_URL.into(), Some(need("groq", "Groq")?), cfg.groq_model.clone())),
@@ -640,7 +640,7 @@ fn supports_effort(model: &str) -> bool {
 }
 
 fn anthropic_key() -> Result<String> {
-    get_key("anthropic").ok_or_else(|| anyhow!("Anthropic API 키를 설정 › AI 요약에서 입력해 주세요"))
+    get_key("anthropic").ok_or_else(|| anyhow!("Anthropic API 키를 설정 › 요약에서 입력해 주세요"))
 }
 
 fn anthropic(cfg: &SummarySettings, system: &str, user: &str) -> Result<Reply> {
