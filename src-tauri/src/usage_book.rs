@@ -22,7 +22,7 @@ pub struct Tally {
     pub sum_requests: u64,
     pub sum_in_tokens: u64,
     pub sum_out_tokens: u64,
-    /// 모델별 사용량 (금액 셈용). 모델을 기록하기 전(v0.4.5 까지) 사용분은 위 합계에만 있다
+    /// 모델별 사용량 (금액 셈용). 모델을 기록하기 전(v0.4.6 까지) 사용분은 위 합계에만 있다
     pub models: BTreeMap<String, ModelTally>,
 }
 
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn usage_before_models_were_recorded_is_estimated_with_current_model() {
-        // v0.4.5 까지의 기록: 합계만 있고 모델별 기록이 없다
+        // v0.4.6 까지의 기록: 합계만 있고 모델별 기록이 없다
         let old: Tally = serde_json::from_str(
             r#"{"sttSecs":40,"sttRequests":5,"sttFailures":1,"sumRequests":1,"sumInTokens":1000000,"sumOutTokens":0}"#,
         )
