@@ -4,8 +4,21 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const T = window.__TAURI__;
+// 기록을 읽고 쓰는 명령은 앱이 작업 스레드에서 처리한다 — 보낸 순서대로 끝나도록 하나씩 보낸다
+// (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
+const ORDERED_CMDS = new Set(['save_session', 'load_session', 'delete_session', 'export_session', 'session_text', 'session_audio']);
+// 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약은 몇 분 걸릴 수 있다)
+const AFTER_CMDS = new Set(['summarize']);
+let orderedChain = Promise.resolve();
+function orderedInvoke(cmd, args) {
+  if (AFTER_CMDS.has(cmd)) return orderedChain.then(() => T.core.invoke(cmd, args));
+  if (!ORDERED_CMDS.has(cmd)) return T.core.invoke(cmd, args);
+  const p = orderedChain.then(() => T.core.invoke(cmd, args));
+  orderedChain = p.catch(() => {});
+  return p;
+}
 const api = T ? {
-  invoke: T.core.invoke,
+  invoke: orderedInvoke,
   listen: T.event.listen,
   win: T.window.getCurrentWindow(),
   save: (o) => T.dialog.save(o),
@@ -120,9 +133,19 @@ async function call(cmd, args) {
     throw e;
   }
 }
+// 마지막 호출만 ms 뒤에 실행. .flush() 는 기다리는 호출을 바로 실행한다
 function debounce(fn, ms) {
-  let t;
-  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  let t, pending = null;
+  const run = () => {
+    clearTimeout(t);
+    if (!pending) return;
+    const a = pending;
+    pending = null;
+    fn(...a);
+  };
+  const f = (...a) => { pending = a; clearTimeout(t); t = setTimeout(run, ms); };
+  f.flush = run;
+  return f;
 }
 
 function md(src) {
@@ -261,7 +284,10 @@ function renderSummary() {
   const card = $('#summary-card');
   if (S.summarizing && d) {
     card.hidden = false;
-    $('#summary-body').innerHTML = `<div class="loading"><span class="dot"></span>${esc(summaryStep(S.sumProgress))}</div>`;
+    const stop = S.sumCancelling
+      ? '<button class="link" id="btn-cancel-summary" disabled>멈추는 중…</button>'
+      : '<button class="link" id="btn-cancel-summary" title="보내 둔 요청은 버리고 여기서 그만둬요">멈추기</button>';
+    $('#summary-body').innerHTML = `<div class="loading"><span class="dot"></span>${esc(summaryStep(S.sumProgress))}${stop}</div>`;
     return;
   }
   card.hidden = !(d && d.summary);
@@ -479,6 +505,8 @@ function onEvent(e) {
       break;
     case 'transcript':
       S.pending.delete(e.id);
+      // 연결 문제로 미뤄 뒀다가 녹음이 끝난 뒤 다시 받아 적은 문장
+      S.failed.delete(e.id);
       if (d) {
         const u = { id: e.id, startMs: e.startMs, endMs: e.endMs, speaker: resolveSpk(d, e.speaker), text: e.text, latencyMs: e.latencyMs };
         const i = d.utterances.findIndex((x) => x.id === e.id);
@@ -494,13 +522,15 @@ function onEvent(e) {
       break;
     case 'discarded':
       S.pending.delete(e.id);
+      S.failed.delete(e.id);
       renderLive();
       break;
     case 'failed': {
-      const p = S.pending.get(e.id);
+      // 미뤄 둔 발화를 녹음 뒤 다시 받아 적다 또 실패하면 같은 id 로 한 번 더 온다
+      const p = S.pending.get(e.id) || S.failed.get(e.id);
       S.pending.delete(e.id);
-      if (p) S.failed.set(e.id, { ...p, message: e.message });
-      if (S.failed.size === 1) toast(`인식 실패: ${e.message}`, 'error');
+      if (p) S.failed.set(e.id, { startMs: p.startMs, endMs: p.endMs, speaker: p.speaker, message: e.message });
+      if (S.failed.size === 1) toast(`인식 실패: ${e.message}`, e.retry ? 'warn' : 'error');
       renderLive();
       break;
     }
@@ -827,25 +857,40 @@ $('#btn-summary').addEventListener('click', async () => {
   const d = doc();
   if (!d || S.summarizing) return;
   if (S.rec !== 'idle' && S.live) toast('지금까지의 내용으로 요약할게요');
+  // 방금 고친 문장이 요약에 들어가게, 기다리던 저장을 먼저 보낸다 (요약은 그 저장이 끝난 뒤 기록을 읽는다)
+  persistDoc.flush();
   S.summarizing = true;
+  S.sumCancelling = false;
   S.sumProgress = null;
   S.sumId = d.id;
+  // 요약마다 번호 — 앞선 저장을 기다리는 동안 멈춰도 앱이 그 요약을 알아보고 시작하자마자 멈춘다
+  S.sumToken = Date.now();
   $('#summary-card').classList.remove('folded');
   renderSummary();
   updateActions();
   body.scrollTop = 0;
   try {
-    const r = await api.invoke('summarize', { id: d.id });
+    const r = await api.invoke('summarize', { id: d.id, token: S.sumToken });
     d.summary = r.text;
     if (r.title) { d.title = r.title; d.autoTitle = false; renderMeta(); }
   } catch (e) {
-    toast(String(e), 'error');
+    // 사람이 멈춘 것은 오류가 아니다
+    const msg = String(e);
+    toast(msg, msg === '요약을 멈췄어요' ? undefined : 'error');
   } finally {
     S.summarizing = false;
+    S.sumCancelling = false;
     S.sumProgress = null;
     renderSummary();
     updateActions();
   }
+});
+$('#summary-card').addEventListener('click', (e) => {
+  const b = e.target.closest('#btn-cancel-summary');
+  if (!b || !S.summarizing || S.sumCancelling) return;
+  S.sumCancelling = true;
+  renderSummary();
+  api.invoke('cancel_summary', { token: S.sumToken }).catch(() => {});
 });
 
 /* ───────────── 패널 ───────────── */
@@ -1530,7 +1575,29 @@ function tallyText(t) {
   if (t.sumRequests) parts.push(`요약 ${n0(t.sumRequests)}회 (토큰 ${n0(t.sumInTokens)} / ${n0(t.sumOutTokens)})`);
   return parts.join(' · ') || '없음';
 }
-// 응답 헤더 → "요청 1,999 / 2,000 남음 · 토큰 … (3분 전, 재설정 7.2s)"
+// 재설정 시각(ms). Groq · OpenAI 는 받은 때부터 "1h9m7.2s" · "6ms" 같은 길이, Claude 는 "2026-11-16T08:30:00Z",
+// retry-after 는 초 또는 HTTP 날짜. 알아볼 수 없으면 null
+function resetAt(v, at) {
+  const s = String(v).trim();
+  if (/^\d+(\.\d+)?$/.test(s)) return (at + Number(s)) * 1000;
+  let secs = 0, n = 0;
+  for (const m of s.matchAll(/(\d+(?:\.\d+)?)(ms|h|m|s)/g)) {
+    secs += Number(m[1]) * { ms: 0.001, h: 3600, m: 60, s: 1 }[m[2]];
+    n++;
+  }
+  if (n) return (at + secs) * 1000;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : t;
+}
+function untilText(ms) {
+  const s = (ms - Date.now()) / 1000;
+  if (s < 60) return `${Math.max(1, Math.ceil(s))}초`;
+  if (s < 3600) return `${Math.ceil(s / 60)}분`;
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return m ? `${h}시간 ${m}분` : `${h}시간`;
+}
+// 응답 헤더 → "요청 1,999 / 2,000 남음 (3분 뒤 다시 채워짐) · 토큰 … (3분 전 기준)"
+// 받은 지 오래돼 재설정 시각이 지났으면, 남은 양은 이미 다시 채워졌다고 알려 준다
 function limitsText(rate) {
   if (!rate) return '';
   const g = {};
@@ -1541,9 +1608,15 @@ function limitsText(rate) {
     if (m) (g[m[2]] = g[m[2]] || {})[m[1]] = v;
     else if (k === 'retry-after') retry = v;
   }
+  const resetNote = (v) => {
+    const t = resetAt(v, rate.at);
+    if (t == null) return ` (재설정 ${esc(v)})`;
+    return t <= Date.now() ? ' (지금은 다시 채워졌어요)' : ` (${untilText(t)} 뒤 다시 채워짐)`;
+  };
   const parts = Object.entries(g).filter(([, x]) => x.remaining != null).map(([name, x]) =>
-    `${LIMIT_LABEL[name] || name} ${n0(x.remaining)}${x.limit ? ` / ${n0(x.limit)}` : ''} 남음${x.reset ? ` (재설정 ${x.reset})` : ''}`);
-  if (retry) parts.push(`한도 초과 — ${retry}초 뒤 다시`);
+    `${esc(LIMIT_LABEL[name] || name)} ${n0(x.remaining)}${x.limit ? ` / ${n0(x.limit)}` : ''} 남음${x.reset ? resetNote(x.reset) : ''}`);
+  const retryAt = retry ? resetAt(retry, rate.at) : null;
+  if (retryAt != null && retryAt > Date.now()) parts.push(`한도 초과 — ${untilText(retryAt)} 뒤 다시`);
   if (!parts.length) return '';
   const ago = Math.max(0, Math.round(Date.now() / 1000 - rate.at));
   const when = ago < 60 ? '방금' : ago < 3600 ? `${Math.round(ago / 60)}분 전` : `${Math.round(ago / 3600)}시간 전`;
@@ -1715,11 +1788,19 @@ hk.addEventListener('keydown', (e) => {
   else if (['Space', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Pause'].includes(e.code)) key = e.code;
   if (!key) return;
   if (!mods.length && !/^F\d/.test(key)) { hk.value = 'Ctrl·Alt·Shift 와 함께 눌러 주세요'; return; }
+  const prev = S.settings.hotkey;
   S.settings.hotkey = [...mods, key].join('+');
-  saveSettings();
   stopHotkeyCapture();
   hk.blur();
-  toast(`단축키: ${S.settings.hotkey}`);
+  // 바로 저장해 결과를 본다 — 다른 프로그램이 쓰는 조합이면 앱이 원래 단축키로 되돌린다
+  api.invoke('save_settings', { settings: S.settings })
+    .then(() => toast(`단축키: ${S.settings.hotkey}`))
+    .catch((err) => {
+      S.settings.hotkey = prev;
+      stopHotkeyCapture();
+      renderDock();
+      toast(String(err), 'error');
+    });
 });
 
 $('#btn-github').addEventListener('click', () => call('open_url', { url: 'https://github.com/jeiel85/badasugi' }));

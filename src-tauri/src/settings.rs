@@ -121,12 +121,30 @@ impl Default for Settings {
     }
 }
 
+/// JSON 파일을 읽는다. 있는데 해석하지 못하면(손으로 고침 · 이전 버전으로 되돌림 · 쓰다 끊김) 기본값으로 시작하되,
+/// 원래 파일은 `<이름>.json.bad` 로 남겨 둔다 — 곧 이어질 저장이 원래 내용을 덮어써 없애지 않게
+pub fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    let Ok(bytes) = std::fs::read(path) else {
+        return T::default();
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            let bad = path.with_extension("json.bad");
+            let kept = std::fs::write(&bad, &bytes).is_ok();
+            log::warn!(
+                "{} 을(를) 읽지 못해 기본값으로 시작합니다 ({e}){}",
+                path.display(),
+                if kept { format!(" — 원래 파일은 {} 에 남겨 둠", bad.display()) } else { String::new() }
+            );
+            T::default()
+        }
+    }
+}
+
 impl Settings {
     pub fn load(path: &Path) -> Settings {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        load_json_or_default(path)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -175,4 +193,26 @@ pub fn set_key(name: &str, value: &str) -> Result<()> {
         entry.set_password(value.trim())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_settings_are_kept_aside_before_defaults() {
+        let dir = std::env::temp_dir().join(format!("bd-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, b"{ \"hotkey\": \"Ctrl+Alt+R\", oops").unwrap();
+        let s = Settings::load(&path);
+        assert_eq!(s.hotkey, Settings::default().hotkey);
+        let bad = std::fs::read(dir.join("settings.json.bad")).unwrap();
+        assert_eq!(bad, b"{ \"hotkey\": \"Ctrl+Alt+R\", oops");
+        // 없는 파일은 조용히 기본값
+        let none: Settings = load_json_or_default(&dir.join("none.json"));
+        assert_eq!(none.hotkey, Settings::default().hotkey);
+        assert!(!dir.join("none.json.bad").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

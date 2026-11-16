@@ -557,11 +557,14 @@ impl SessionStore {
             }
             cur.summary = doc.summary.clone();
             // 화면이 지웠다고 알린 발화만 지우고, 그 사이 새로 들어온 발화는 지킨다
+            // (긴 회의에서 편집할 때마다 문장 수의 제곱만큼 찾지 않게 id 로 한 번에)
+            let deleted: std::collections::HashSet<u64> = doc.deleted.iter().copied().collect();
+            let edited: HashMap<u64, &Utterance> = doc.utterances.iter().map(|u| (u.id, u)).collect();
             cur.utterances.retain_mut(|x| {
-                if doc.deleted.contains(&x.id) {
+                if deleted.contains(&x.id) {
                     return false;
                 }
-                if let Some(u) = doc.utterances.iter().find(|u| u.id == x.id) {
+                if let Some(u) = edited.get(&x.id) {
                     x.text = u.text.clone();
                     if !stale {
                         x.speaker = u.speaker;
@@ -661,12 +664,21 @@ impl SessionStore {
         out
     }
 
+    /// 딸린 파일부터 지우고 기록(`.json`)은 맨 나중에 — 녹음 파일이 다른 프로그램에 잡혀 있어(OneDrive · 백신 · 재생 중)
+    /// 못 지우면 기록이 목록에 그대로 남아 나중에 다시 지울 수 있다 (녹음 파일만 고아로 남지 않게)
     pub fn delete(&mut self, id: &str) -> Result<()> {
         let id = safe_id(id)?;
-        for ext in ["json", "md", "opus", "wav", "voices"] {
+        for ext in ["opus", "wav", "voices", "md", "json"] {
             let p = self.dir.join(format!("{id}.{ext}"));
-            if p.exists() {
-                std::fs::remove_file(p)?;
+            match std::fs::remove_file(&p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow!(
+                        "{} 파일을 지우지 못했어요 — 다른 프로그램(OneDrive · 백신 · 재생 중인 플레이어)이 쓰고 있을 수 있어요. 잠시 뒤 다시 해 보세요. ({e})",
+                        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                    ))
+                }
             }
         }
         Ok(())

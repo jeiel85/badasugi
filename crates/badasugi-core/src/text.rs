@@ -1,28 +1,80 @@
 //! 인식 결과 후처리: 공백 정리, Whisper 의 한국어 환각 문구 제거, 반복 루프 축약.
 
-/// 무음·잡음에서 Whisper 가 자주 지어내는 문구 (유튜브 자막 학습 흔적)
+/// 무음·잡음에서 Whisper 가 자주 지어내는 문구 (유튜브 자막 학습 흔적). 회의에서는 거의 나오지 않는 말이라
+/// 들어 있기만 하면 그 문장을 뺀다.
 const HALLUCINATIONS: &[&str] = &[
     "시청해주셔서 감사합니다",
     "시청해 주셔서 감사합니다",
     "시청 해주셔서 감사합니다",
     "구독과 좋아요",
-    "구독 좋아요",
     "좋아요와 구독",
-    "알림 설정",
-    "MBC 뉴스",
-    "KBS 뉴스",
-    "SBS 뉴스",
-    "YTN 뉴스",
-    "뉴스 김",
-    "자막 제공",
-    "자막 제작",
-    "한글자막",
-    "한글 자막",
     "다음 영상에서 만나요",
     "Thank you for watching",
     "Thanks for watching",
     "ご視聴ありがとうございました",
 ];
+
+/// 자막 크레딧 머리말 — 회의에서도 쓰는 말이라("알림 설정 화면은…", "한글 자막 넣을까요?") 문장이 이 말로 시작하고
+/// 뒤가 크레딧처럼 생겼을 때만 뺀다: "MBC 뉴스 김성현입니다", "한글자막 by 한효정", "자막 제작 및 제공: …",
+/// "구독 좋아요 알림 설정 부탁드립니다"
+const CREDIT_HEADS: &[&str] = &[
+    "구독 좋아요",
+    "알림 설정",
+    "MBC 뉴스",
+    "KBS 뉴스",
+    "SBS 뉴스",
+    "YTN 뉴스",
+    "JTBC 뉴스",
+    "자막 제공",
+    "자막 제작",
+    "한글 자막",
+    "한국어 자막",
+];
+
+fn compact(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// 크레딧 머리말 뒤에 붙는 꼬리인지: 없음 · "by …" · "및 …" · ": …" · "제공 …" · "부탁드립니다" · "김성현입니다" · 이름만
+fn is_credit_tail(rest: &str) -> bool {
+    let rest = rest.trim_end_matches(['.', '!', '~']);
+    if rest.is_empty() || ["by", "By", "BY", ":", "및", "·", "-", "|", "/"].iter().any(|p| rest.starts_with(p)) {
+        return true;
+    }
+    // "한글자막 제공 및 …" — 하지만 "한글 자막 제작은 외주로…" 는 문장
+    if let Some(r) = rest.strip_prefix("제공").or_else(|| rest.strip_prefix("제작")) {
+        return is_credit_tail(r);
+    }
+    if let Some(next) = credit_head(rest) {
+        return is_credit_tail(&rest[next..]);
+    }
+    let n = rest.chars().count();
+    let polite = ["부탁드립니다", "부탁드려요", "눌러주세요"];
+    if n <= 10 && polite.iter().any(|p| rest.ends_with(p)) && !rest.contains('?') {
+        return true;
+    }
+    // "김성현입니다" (이름 + 입니다)
+    if n <= 7 && rest.ends_with("입니다") {
+        return true;
+    }
+    // 이름만 ("한효정") — 끝이 말끝(요 · 다 · 까 …)이면 문장이다
+    let hangul = |c: char| ('\u{AC00}'..='\u{D7A3}').contains(&c);
+    n <= 4 && rest.chars().all(hangul) && !rest.ends_with(['요', '다', '까', '죠', '네', '고', '서', '며', '면', '게', '지', '야'])
+}
+
+/// `s`(띄어쓰기 없음) 가 크레딧 머리말로 시작하면 그 머리말 뒤 위치(바이트)
+fn credit_head(s: &str) -> Option<usize> {
+    CREDIT_HEADS.iter().map(|h| compact(h)).find(|h| s.starts_with(h.as_str())).map(|h| h.len())
+}
+
+/// 환각으로 보고 뺄 문장인지
+fn is_hallucination(sentence: &str) -> bool {
+    let c = compact(sentence);
+    if HALLUCINATIONS.iter().any(|h| c.contains(&compact(h))) {
+        return true;
+    }
+    credit_head(&c).is_some_and(|at| is_credit_tail(&c[at..]))
+}
 
 pub fn clean(raw: &str) -> String {
     let mut s = raw.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -32,17 +84,8 @@ pub fn clean(raw: &str) -> String {
     s = dedupe_sentences(&s);
     let s = s.trim().trim_start_matches(['-', '·']).trim().to_string();
 
-    // 환각 문구가 들어간 문장은 통째로 뺀다 (학습 데이터의 자막 크레딧 흔적)
-    let kept: Vec<String> = sentences(&s)
-        .into_iter()
-        .filter(|sent| {
-            let compact: String = sent.chars().filter(|c| !c.is_whitespace()).collect();
-            !HALLUCINATIONS.iter().any(|h| {
-                let hc: String = h.chars().filter(|c| !c.is_whitespace()).collect();
-                compact.contains(&hc)
-            })
-        })
-        .collect();
+    // 환각 문구 문장은 통째로 뺀다 (학습 데이터의 자막 크레딧 흔적)
+    let kept: Vec<String> = sentences(&s).into_iter().filter(|sent| !is_hallucination(sent)).collect();
     let s = kept.join(" ");
     if s.chars().all(|c| !c.is_alphanumeric()) {
         return String::new();
@@ -262,6 +305,38 @@ mod tests {
         assert_eq!(clean("네, 감사합니다."), "네, 감사합니다.");
         assert_eq!(clean("한글자막 제공 및 자막 제공 및 광고를 포함하고 있습니다."), "");
         assert_eq!(clean("좋습니다. 시청해 주셔서 감사합니다."), "좋습니다.");
+    }
+
+    #[test]
+    fn removes_credit_like_sentences() {
+        for t in [
+            "MBC 뉴스 김성현입니다.",
+            "한글자막 by 한효정",
+            "자막 제작 및 제공: 한국어 자막팀",
+            "구독 좋아요 알림 설정 부탁드립니다.",
+            "알림 설정까지 부탁드립니다",
+            "KBS 뉴스",
+        ] {
+            assert_eq!(clean(t), "", "{t}");
+        }
+        assert_eq!(clean("네, 알겠습니다. YTN 뉴스 이민지입니다."), "네, 알겠습니다.");
+    }
+
+    #[test]
+    fn keeps_meeting_sentences_that_mention_credit_words() {
+        for t in [
+            "푸시 알림 설정 화면은 다음 주에 배포합니다.",
+            "알림 설정 바꿨어요.",
+            "한글 자막 넣을까요?",
+            "다음 영상에 한글 자막 넣을까요?",
+            "구독 좋아요 수치가 올랐어요.",
+            "MBC 뉴스에 우리 매장이 나왔어요.",
+            "자막 제작은 외주로 맡기죠.",
+            "한글 자막 제작은 외주로 맡기죠.",
+            "알림 설정 해주세요.",
+        ] {
+            assert_eq!(clean(t), t, "{t}");
+        }
     }
 
     #[test]

@@ -168,6 +168,7 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .md li.task::before { content: ""; flex: none; width: 13px; height: 13px; margin-top: 4px; border-radius: 4px; border: 1.5px solid var(--muted); }
 .md code { font-family: var(--mono); font-size: 12px; background: var(--sunken); padding: 1px 4px; border-radius: 4px; }
 .md .loading { color: var(--muted); display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.md .loading .link { margin-left: auto; flex: none; font-size: 12.5px; }
 
 /* ── 도크 ── */
 .dock { position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 12px 14px 22px; border-top: 1px solid var(--line); background: var(--surface); flex: none; }

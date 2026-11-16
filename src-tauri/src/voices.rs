@@ -89,10 +89,7 @@ pub fn is_real_name(name: &str) -> bool {
 
 impl VoiceBook {
     pub fn load(path: PathBuf) -> Self {
-        let book = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let book = crate::settings::load_json_or_default(&path);
         Self {
             path,
             book: Mutex::new(book),
