@@ -337,6 +337,8 @@ function renderSummary() {
   const d = doc();
   const card = $('#summary-card');
   const empty = $('#summary-empty');
+  // 같은 기록을 앱이 다시 읽어 준 사본으로 바뀌었으면 고치던 요약을 새 사본에 이어 붙인다 (입력 칸을 덮지 않게)
+  if (S.sumEdit && d && S.sumEdit.doc !== d && S.sumEdit.doc.id === d.id) S.sumEdit.doc = d;
   // 고치는 중이면 입력 칸을 그대로 둔다
   if (S.sumEdit && d && S.sumEdit.doc === d) { card.hidden = false; empty.hidden = true; return; }
   $('#btn-edit-summary').hidden = false;
@@ -895,11 +897,12 @@ async function undoRefine() {
   if (!d?.beforeRefine) return;
   const ok = await api.ask('회의가 끝난 뒤 다시 정리한 화자를 되돌릴까요?\n녹음 중에 정해진 화자 배정과 이름으로 돌아가요. 고친 글자는 그대로예요.', { title: '받아쓰기', kind: 'info' });
   if (!ok) return;
-  persistDoc.flush();
+  // 쓰던 요약 · 코멘트 · 메모를 먼저 저장한다 — 되돌린 기록으로 화면을 바꿔도 사라지지 않게
+  commitEdits();
   try {
     const fresh = await api.invoke('undo_refinement', { id: d.id });
-    if (S.live && S.liveDoc?.id === d.id) S.liveDoc = fresh;
-    else if (S.viewDoc?.id === d.id) S.viewDoc = fresh;
+    if (S.live && S.liveDoc?.id === d.id) S.liveDoc = adoptFresh(S.liveDoc, fresh);
+    else if (S.viewDoc?.id === d.id) S.viewDoc = adoptFresh(S.viewDoc, fresh);
     invalidateTranscript();
     $('#speakers').innerHTML = '';
     scheduleRender();
@@ -1193,7 +1196,11 @@ function startSummaryEdit() {
   const d = doc();
   if (!d) return;
   if (S.summarizing && S.sumId === d.id) { toast('요약을 만드는 중이에요. 끝난 뒤에 고칠 수 있어요'); return; }
-  if (S.sumEdit) { $('#sum-edit')?.focus(); return; }
+  if (S.sumEdit) {
+    const ta = $('#sum-edit');
+    if (ta) { ta.focus(); return; }
+    S.sumEdit = null; // 입력 칸이 사라진 편집 상태는 버리고 새로 연다 (버튼이 먹통이 되지 않게)
+  }
   S.sumEdit = { doc: d, orig: d.summary || '' };
   const card = $('#summary-card');
   card.hidden = false;
