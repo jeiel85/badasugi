@@ -1317,6 +1317,21 @@ const memoSave = debounce((d) => {
     .then(() => { if (my === memoReq && memoFor === d.id) setMemoState('저장됨'); })
     .catch((e) => { if (memoFor === d.id) setMemoState('저장하지 못했어요', true); toast(String(e), 'error'); });
 }, 700);
+// 코멘트 칸에서 메모를 바꿨을 때 메모 칸도 바로 맞춘다 — 코멘트 칸 바깥(메모 칸)을 눌러 저장하면 메모 칸이
+// 먼저 포커스를 받아 renderNotes 가 건너뛰므로, 다음 타이핑이 예전 글로 코멘트 수정을 되돌리지 않게.
+// 커서 · 선택은 바뀐 곳 뒤라면 늘거나 준 만큼 옮긴다
+function syncMemoBox(d) {
+  if (memoFor !== d.id || memo.value === (d.notes || '')) return;
+  const old = memo.value, nv = d.notes || '';
+  let p = 0;
+  const n = Math.min(old.length, nv.length);
+  while (p < n && old[p] === nv[p]) p++;
+  const fix = (i) => (i <= p ? i : Math.max(p, i + nv.length - old.length));
+  const s = fix(memo.selectionStart ?? 0), e = fix(memo.selectionEnd ?? 0), top = memo.scrollTop;
+  memo.value = nv;
+  memo.setSelectionRange(s, e);
+  memo.scrollTop = top;
+}
 // 메모의 시각 줄이 녹취록 옆 코멘트로 보이게 — 치는 동안 매번이 아니라 잠깐 멈추면 다시 그린다
 const memoRender = debounce(() => scheduleRender(), 250);
 memo.addEventListener('input', () => {
@@ -1482,6 +1497,7 @@ function closeComment(save) {
     next = rewriteMemoComment(notes, b, v);
   }
   d.notes = next;
+  syncMemoBox(d);
   persistDoc(d);
   scheduleRender();
   toast(v ? (c.line != null ? '코멘트를 고쳤어요' : '코멘트를 달았어요 — 메모에도 시각 줄로 적었어요') : '코멘트를 지웠어요');
