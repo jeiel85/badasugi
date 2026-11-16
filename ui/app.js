@@ -383,7 +383,8 @@ function renderBanners(has) {
     back.textContent = live ? '실시간으로 돌아가기' : '닫기';
     back.title = live ? '받아 적는 중인 회의로 돌아가요' : '이 기록을 닫아요';
   }
-  const ended = S.live && S.rec === 'idle' && has;
+  // 받아 적힌 문장이 없어도 메모를 남긴 회의는 기록에 저장된다
+  const ended = S.live && S.rec === 'idle' && (has || !!String(S.liveDoc?.notes || '').trim());
   $('#ended').hidden = !ended;
   if (ended) $('#ended-label').textContent = `${S.liveDoc?.sourceFile ? '파일 받아쓰기를' : '회의를'} 마쳤어요 · 기록에 저장됨`;
 }

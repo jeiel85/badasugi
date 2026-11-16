@@ -375,6 +375,14 @@ impl SessionDoc {
         }
     }
 
+    /// 기록으로 남길 내용이 있나: 받아 적은 문장 · 직접 쓴 메모 · 요약
+    /// (문장이 하나도 받아 적히지 않았어도 회의 중 쓴 메모는 버리지 않는다)
+    pub fn has_content(&self) -> bool {
+        !self.utterances.is_empty()
+            || !self.notes.trim().is_empty()
+            || self.summary.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }
+
     pub fn upsert(&mut self, u: Utterance) {
         self.duration_ms = self.duration_ms.max(u.end_ms);
         match self.utterances.iter_mut().find(|x| x.id == u.id) {
@@ -558,7 +566,7 @@ impl SessionStore {
         if !self.dirty || self.last_save.elapsed() <= autosave_every(n) {
             return Ok(());
         }
-        let Some(doc) = self.current.as_ref().filter(|d| !d.utterances.is_empty()) else {
+        let Some(doc) = self.current.as_ref().filter(|d| d.has_content()) else {
             return Ok(());
         };
         let md = self.last_md.elapsed() >= MD_EVERY;
@@ -578,7 +586,7 @@ impl SessionStore {
         let Some(doc) = self.current.as_ref() else {
             return Ok(());
         };
-        if doc.utterances.is_empty() {
+        if !doc.has_content() {
             return Ok(());
         }
         write_doc(&self.dir, doc)?;
@@ -727,7 +735,7 @@ impl SessionStore {
         let Some(doc) = self.current.as_ref() else {
             return Ok(());
         };
-        if doc.utterances.is_empty() {
+        if !doc.has_content() {
             let p = self.json_path(&doc.id);
             if p.exists() {
                 write_doc(&self.dir, doc)?;
@@ -1167,6 +1175,28 @@ mod tests {
         // 메모 · 코멘트로도 찾는다
         assert_eq!(store.search("두 줄").len(), 1);
         assert_eq!(store.search("결제 일정").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_keep_a_meeting_that_has_no_recognized_speech() {
+        let dir = std::env::temp_dir().join(format!("bd-notes-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-16_110000".into();
+        let mut screen = d.clone();
+        store.begin(d);
+        // 받아 적힌 문장이 하나도 없는 녹음은 남기지 않지만
+        store.flush().unwrap();
+        assert!(store.load("2026-11-16_110000").is_ok()); // 녹음 중에는 메모리에서 읽힘
+        assert!(!dir.join("2026-11-16_110000.json").exists());
+        // 메모를 쓰면 문장이 없어도 저장된다
+        screen.notes = "인식이 안 돼서 손으로 적음".into();
+        store.save_doc(screen).unwrap();
+        assert!(dir.join("2026-11-16_110000.json").exists());
+        store.current = None;
+        assert_eq!(store.load("2026-11-16_110000").unwrap().notes, "인식이 안 돼서 손으로 적음");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

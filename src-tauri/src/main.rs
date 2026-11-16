@@ -796,9 +796,17 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 if let Some(doc) = store.current.take() {
                     if doc.utterances.is_empty() {
                         let audio = store.audio_path(&doc.id);
+                        // 받아 적힌 문장이 없어도 회의 중 직접 쓴 메모 · 요약은 버리지 않는다 (녹음 파일도 함께 둔다)
+                        if doc.has_content() {
+                            if session::write_doc(&store.dir, &doc).is_ok() {
+                                let _ = app.emit(
+                                    "bd://toast",
+                                    "받아 적힌 문장은 없지만 메모는 회의 기록에 남겨 두었어요".to_string(),
+                                );
+                            }
                         // 받아 적힌 문장이 없어도(인터넷 끊김·API 키 오류 등) 5초 넘는 녹음은 지우지 않고 기록으로 남긴다
                         // → 나중에 회의 기록에서 다시 듣거나, 녹음 파일로 다시 받아 적을 수 있다
-                        if doc.audio_file.is_some() && doc.duration_ms >= 5_000 && audio.is_file() {
+                        } else if doc.audio_file.is_some() && doc.duration_ms >= 5_000 && audio.is_file() {
                             if session::write_doc(&store.dir, &doc).is_ok() {
                                 let _ = app.emit(
                                     "bd://toast",
