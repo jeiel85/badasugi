@@ -79,6 +79,11 @@ const S = {
   findQ: '',
   findIdx: 0,
   mini: false,
+  // 노트: 지금 탭 · 고치는 중인 요약 { doc } · 쓰는 중인 코멘트 { doc, id } · 녹음 위치(ms)
+  ntab: 'memo',
+  sumEdit: null,
+  cmt: null,
+  livePosMs: 0,
 };
 const doc = () => (S.live ? S.liveDoc : S.viewDoc);
 
@@ -173,6 +178,7 @@ function debounce(fn, ms) {
   };
   const f = (...a) => { pending = a; clearTimeout(t); t = setTimeout(run, ms); };
   f.flush = run;
+  f.cancel = () => { clearTimeout(t); pending = null; };
   return f;
 }
 
@@ -282,7 +288,7 @@ function renderDoc() {
     <div class="group" style="--c:${spkColor(g.speaker)}">
       <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}" data-ids="${g.items.filter((x) => x.kind === 'u').map((x) => x.id).join(',')}" title="이름 바꾸기 · 화자 바꾸기">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
       ${g.items.map((it) => it.kind === 'u'
-        ? `<div class="u" data-id="${it.id}">${hl(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>`
+        ? `<div class="u" data-id="${it.id}">${hl(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>${commentHtml(d, it.id)}`
         : it.kind === 'p'
           ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
           : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
@@ -290,6 +296,7 @@ function renderDoc() {
 
   $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking && !S.paused && !S.fileMode);
   renderMeta();
+  renderNotes();
   renderSummary();
   updateActions();
   renderMiniCap();
@@ -330,9 +337,18 @@ function summaryStep(p) {
 function renderSummary() {
   const d = doc();
   const card = $('#summary-card');
+  const empty = $('#summary-empty');
+  // 같은 기록을 앱이 다시 읽어 준 사본으로 바뀌었으면 고치던 요약을 새 사본에 이어 붙인다 (입력 칸을 덮지 않게)
+  if (S.sumEdit && d && S.sumEdit.doc !== d && S.sumEdit.doc.id === d.id) S.sumEdit.doc = d;
+  // 고치는 중이면 입력 칸을 그대로 둔다
+  if (S.sumEdit && d && S.sumEdit.doc === d) { card.hidden = false; empty.hidden = true; return; }
+  $('#btn-edit-summary').hidden = false;
   // 요약하는 동안 다른 기록으로 옮겨 가도, 그 기록에 '정리하는 중'을 띄우지 않는다
   if (S.summarizing && d && d.id === S.sumId) {
     card.hidden = false;
+    empty.hidden = true;
+    $('#btn-edit-summary').hidden = true;
+    $('#sum-mark').hidden = true;
     const stop = S.sumCancelling
       ? '<button class="link" id="btn-cancel-summary" disabled>멈추는 중…</button>'
       : '<button class="link" id="btn-cancel-summary" title="보내 둔 요청은 버리고 여기서 그만둬요">멈추기</button>';
@@ -340,6 +356,10 @@ function renderSummary() {
     return;
   }
   card.hidden = !(d && d.summary);
+  // 노트의 요약 탭: 요약이 없으면 AI 로 요약 · 직접 쓰기
+  empty.hidden = !card.hidden;
+  $('#btn-summary-ai').disabled = !(d && d.utterances.length);
+  $('#sum-mark').hidden = !(d && d.summary && d.summaryEdited);
   if (d && d.summary) $('#summary-body').innerHTML = md(d.summary);
 }
 
@@ -364,7 +384,8 @@ function renderBanners(has) {
     back.textContent = live ? '실시간으로 돌아가기' : '닫기';
     back.title = live ? '받아 적는 중인 회의로 돌아가요' : '이 기록을 닫아요';
   }
-  const ended = S.live && S.rec === 'idle' && has;
+  // 받아 적힌 문장이 없어도 메모를 남긴 회의는 기록에 저장된다
+  const ended = S.live && S.rec === 'idle' && (has || !!String(S.liveDoc?.notes || '').trim());
   $('#ended').hidden = !ended;
   if (ended) $('#ended-label').textContent = `${S.liveDoc?.sourceFile ? '파일 받아쓰기를' : '회의를'} 마쳤어요 · 기록에 저장됨`;
 }
@@ -388,7 +409,7 @@ async function renderRecent() {
 // 회의를 마친 화면을 비우고 다음 회의를 준비한다 — 방금 회의는 이미 기록에 저장돼 있다
 function newMeeting() {
   if (S.rec !== 'idle') return;
-  persistDoc.flush(); // 방금 고친 내용이 있으면 먼저 저장
+  commitEdits(); // 방금 고친 내용(문장 · 요약 · 메모 · 코멘트)이 있으면 먼저 저장
   S.live = true;
   S.viewDoc = null;
   S.liveDoc = null;
@@ -547,6 +568,7 @@ function onRec(state) {
   const prev = S.rec;
   S.rec = state;
   if (state === 'starting' && prev === 'idle') {
+    commitEdits();
     S.live = true;
     S.pending.clear();
     S.failed.clear();
@@ -555,6 +577,7 @@ function onRec(state) {
     S.paused = false;
     S.sleepPaused = false;
     S.progress = null;
+    S.livePosMs = 0;
     follow = true;
   }
   if (state === 'recording' && prev !== 'recording') {
@@ -588,6 +611,7 @@ function onEvent(e) {
   const d = S.liveDoc;
   switch (e.type) {
     case 'level':
+      S.livePosMs = e.positionMs || 0;
       // 창이 트레이에 숨어 있으면 소리 막대는 그리지 않는다 (초당 14번)
       if (!document.hidden) setLevel(e.rms);
       if (S.speaking !== e.speaking) {
@@ -656,9 +680,10 @@ function onEvent(e) {
       S.refineMsg = parts.length ? `회의 전체를 다시 듣고 ${parts.join(' · ')}\n마음에 들지 않으면 화자 옆 '화자 정리 되돌리기'를 눌러 주세요` : '';
       const id = S.liveDoc?.id;
       if (id) {
+        flushSaves(); // 기다리던 저장(메모 등)을 먼저 보내 정리된 기록에 들어가게
         api.invoke('load_session', { id }).then((fresh) => {
           if (S.liveDoc?.id !== id) return;
-          S.liveDoc = fresh;
+          S.liveDoc = adoptFresh(S.liveDoc, fresh);
           $('#speakers').innerHTML = '';
           renderLive();
         }).catch(() => {});
@@ -683,12 +708,13 @@ function onEvent(e) {
       S.pending.clear();
       // 화면이 들고 있던 기록(도착 순서대로 쌓임)을 저장된 기록으로 바꾼다 — 이후 편집이 순서가 뒤섞인 사본을 저장하지 않게
       const id = S.liveDoc?.id;
+      flushSaves();
       api.invoke('get_state').then(async (st) => {
         S.app = st;
         if (id) {
           try {
             const fresh = await api.invoke('load_session', { id });
-            if (S.liveDoc?.id === id) S.liveDoc = fresh;
+            if (S.liveDoc?.id === id) S.liveDoc = adoptFresh(S.liveDoc, fresh);
           } catch { /* 내용이 없어 지운 기록 */ }
         }
         renderDock();
@@ -745,7 +771,7 @@ $('#btn-pin').addEventListener('click', () => {
   renderDock();
   toast(S.settings.alwaysOnTop ? '항상 위에 표시합니다' : '항상 위 표시를 껐습니다');
 });
-$('#btn-back-live').addEventListener('click', () => { S.live = true; S.viewDoc = null; follow = true; renderDock(); scheduleRender(); });
+$('#btn-back-live').addEventListener('click', () => { commitEdits(); S.live = true; S.viewDoc = null; follow = true; renderDock(); scheduleRender(); });
 $('#btn-view-list').addEventListener('click', () => openPanel('history'));
 $('#btn-ended-list').addEventListener('click', () => openPanel('history'));
 $('#btn-new').addEventListener('click', newMeeting);
@@ -873,11 +899,12 @@ async function undoRefine() {
   if (!d?.beforeRefine) return;
   const ok = await api.ask('회의가 끝난 뒤 다시 정리한 화자를 되돌릴까요?\n녹음 중에 정해진 화자 배정과 이름으로 돌아가요. 고친 글자는 그대로예요.', { title: '받아쓰기', kind: 'info' });
   if (!ok) return;
-  persistDoc.flush();
+  // 쓰던 요약 · 코멘트 · 메모를 먼저 저장한다 — 되돌린 기록으로 화면을 바꿔도 사라지지 않게
+  commitEdits();
   try {
     const fresh = await api.invoke('undo_refinement', { id: d.id });
-    if (S.live && S.liveDoc?.id === d.id) S.liveDoc = fresh;
-    else if (S.viewDoc?.id === d.id) S.viewDoc = fresh;
+    if (S.live && S.liveDoc?.id === d.id) S.liveDoc = adoptFresh(S.liveDoc, fresh);
+    else if (S.viewDoc?.id === d.id) S.viewDoc = adoptFresh(S.viewDoc, fresh);
     invalidateTranscript();
     $('#speakers').innerHTML = '';
     scheduleRender();
@@ -891,11 +918,10 @@ $('#transcript').addEventListener('click', (e) => {
   if (n) speakerMenu(n, n.dataset.spk, n.dataset.ids || '');
 });
 
-// 발화 고치기 (더블클릭)
-$('#transcript').addEventListener('dblclick', (e) => {
+// 발화 고치기 (더블클릭 · 문장 위 '고치기')
+function startEdit(el) {
   clearTimeout(playClick);
   if (!audio.paused && P.until != null) audio.pause();
-  const el = e.target.closest('.u[data-id]');
   const d = doc();
   if (!el || !d || el.isContentEditable) return;
   const u = d.utterances.find((x) => x.id === +el.dataset.id);
@@ -904,15 +930,25 @@ $('#transcript').addEventListener('dblclick', (e) => {
   el.textContent = u.text;
   el.contentEditable = 'true';
   el.focus();
+  // 커서를 문장 끝으로 (도구 버튼으로 시작하면 커서가 맨 앞에 놓인다)
+  const sel = window.getSelection();
+  sel.selectAllChildren(el);
+  sel.collapseToEnd();
+  showTools(el, true);
+  let done = false;
   const finish = (save) => {
+    if (done) return;
+    done = true;
     el.contentEditable = 'false';
     editing = false;
+    hideTools();
     invalidateTranscript();
     // innerText 는 화면 배치에 기대므로(가려진 문단은 빈 값) 글자 그대로인 textContent 로 읽는다 — 빈 값이면 발화가 지워지므로 중요
     const v = (el.textContent || '').replace(/\s+/g, ' ').trim();
     if (save && !v) {
       d.utterances = d.utterances.filter((x) => x.id !== u.id);
       d.deleted = [...(d.deleted || []), u.id];
+      if (d.comments) delete d.comments[u.id];
       persistDoc(d);
       toast('발화를 지웠어요');
     } else if (save && v !== u.text) { u.text = v; persistDoc(d); }
@@ -920,14 +956,436 @@ $('#transcript').addEventListener('dblclick', (e) => {
   };
   el.addEventListener('keydown', (k) => {
     if (k.key === 'Enter' && !k.shiftKey) { k.preventDefault(); el.blur(); }
-    if (k.key === 'Escape') { el.textContent = u.text; finish(false); }
+    if (k.key === 'Escape') { k.stopPropagation(); el.textContent = u.text; finish(false); }
   });
   el.addEventListener('blur', () => finish(true), { once: true });
+}
+$('#transcript').addEventListener('dblclick', (e) => {
+  if (e.target.closest('.cmt')) return;
+  startEdit(e.target.closest('.u[data-id]'));
 });
 
 const persistDoc = debounce((d) => {
   api.invoke('save_session', { doc: d }).catch((e) => toast(String(e), 'error'));
 }, 300);
+
+/* ───────────── 노트: 메모 · 요약 고치기 · 코멘트 ───────────── */
+// 기다리던 저장을 바로 보낸다 (다른 기록으로 옮겨 가거나 기록을 다시 읽기 전에)
+function flushSaves() {
+  memoSave.flush();
+  persistDoc.flush();
+}
+// 쓰는 중인 코멘트 · 요약을 저장해 닫고, 기다리던 저장도 보낸다
+function commitEdits() {
+  if (S.cmt) closeComment(true);
+  if (S.sumEdit) endSummaryEdit(true);
+  flushSaves();
+}
+// 지운 기록: 저장하지 않고 닫는다
+function dropEdits() {
+  if (S.cmt) closeComment(false);
+  if (S.sumEdit) endSummaryEdit(false);
+  memoSave.cancel();
+}
+// 앱이 다시 읽어 준 기록으로 바꿀 때 메모 · 코멘트는 화면 것을 지킨다
+// (앱은 둘을 고치지 않으므로 화면 것이 가장 새것 — 다시 읽는 사이에 친 글자가 사라지지 않게)
+function adoptFresh(old, fresh) {
+  if (!old || !fresh || old.id !== fresh.id) return fresh;
+  fresh.notes = old.notes;
+  fresh.comments = old.comments;
+  if (S.sumEdit?.doc === old) S.sumEdit.doc = fresh;
+  if (S.cmt?.doc === old) S.cmt.doc = fresh;
+  return fresh;
+}
+
+function commentHtml(d, id) {
+  const c = d?.comments?.[id];
+  return c ? `<div class="cmt" data-cmt="${id}" title="코멘트 고치기"><svg><use href="#i-comment"/></svg><span>${esc(c)}</span></div>` : '';
+}
+
+// 노트를 펼칠지: 넓은 창은 처음부터 펼쳐 두고, 좁은 창은 눌러서 연다 (각각 마지막으로 고른 대로)
+const wideMq = matchMedia('(min-width: 760px)');
+const NTABS = ['memo', 'summary', 'comments'];
+const notesPref = { wide: null, narrow: null };
+let notesW = 380;
+try {
+  notesPref.wide = localStorage.getItem('notes.wide');
+  notesPref.narrow = localStorage.getItem('notes.narrow');
+  const t = localStorage.getItem('notes.tab');
+  if (NTABS.includes(t)) S.ntab = t;
+  notesW = +localStorage.getItem('notes.w') || 380;
+} catch { /* 저장소를 못 쓰면 기본값 */ }
+const layoutKey = () => (wideMq.matches ? 'wide' : 'narrow');
+function notesWanted() {
+  const v = notesPref[layoutKey()];
+  return v == null ? wideMq.matches : v === '1';
+}
+function setNotesWanted(on) {
+  const k = layoutKey();
+  notesPref[k] = on ? '1' : '0';
+  try { localStorage.setItem(`notes.${k}`, notesPref[k]); } catch { /* 이번만 */ }
+}
+wideMq.addEventListener('change', () => scheduleRender());
+const notesShown = () => !$('#notes').hidden;
+
+let memoFor = null;
+let cmtShown = '';
+function renderNotes() {
+  const d = doc();
+  const show = !!d && notesWanted() && !S.mini;
+  $('#notes').hidden = !show;
+  $('#notes-grip').hidden = !show;
+  const nb = $('#btn-notes');
+  nb.classList.toggle('on', show);
+  nb.disabled = !d;
+  placeSummary(show);
+  if (!show) return;
+  $$('#notes-tabs [data-ntab]').forEach((b) => {
+    const on = b.dataset.ntab === S.ntab;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  $$('#notes [data-npage]').forEach((p) => (p.hidden = p.dataset.npage !== S.ntab));
+  // 메모 칸: 다른 기록으로 바뀌었거나 쓰고 있지 않을 때만 채운다 (치는 중인 글자를 덮지 않게)
+  const m = $('#memo');
+  if (memoFor !== d.id || document.activeElement !== m) {
+    const v = d.notes || '';
+    if (m.value !== v) m.value = v;
+    if (memoFor !== d.id) { m.scrollTop = 0; setMemoState(''); }
+    memoFor = d.id;
+  }
+  renderCommentList(d);
+}
+// 요약 카드: 노트가 열려 있으면 노트의 요약 탭으로, 닫혀 있으면 녹취록 위로
+function placeSummary(inNotes) {
+  const card = $('#summary-card');
+  const slot = inNotes ? $('#notes-summary-slot') : body;
+  if (card.parentElement === slot) return;
+  slot.prepend(card);
+  if (inNotes) card.classList.remove('folded');
+}
+function renderCommentList(d) {
+  const cm = d.comments || {};
+  const keys = Object.keys(cm);
+  let items = [];
+  if (keys.length) {
+    const byId = new Map(d.utterances.map((u) => [u.id, u]));
+    items = keys.map((k) => ({ u: byId.get(+k), text: cm[k] })).filter((x) => x.u && x.text)
+      .sort((a, b) => a.u.startMs - b.u.startMs || a.u.id - b.u.id);
+  }
+  $('#cmt-count').textContent = items.length || '';
+  if (S.ntab !== 'comments') return;
+  const html = items.length
+    ? items.map(({ u, text }) => {
+      const s = resolveSpk(d, u.speaker);
+      return `<button class="cmt-item" data-goto="${u.id}" style="--c:${spkColor(s)}" title="녹취록에서 이 문장 보기">
+        <div class="cmt-meta"><b>${esc(speakerName(d, s))}</b><span>${fmt(u.startMs)}</span></div>
+        <div class="cmt-src">${esc(u.text)}</div><div class="cmt-text">${esc(text)}</div></button>`;
+    }).join('')
+    : '<div class="n-empty"><svg><use href="#i-comment"/></svg><b>아직 코멘트가 없어요</b><p>녹취록 문장에 마우스를 올리고 \'코멘트\'를 누르면<br>그 문장에 확인할 점 · 생각을 남길 수 있어요.</p></div>';
+  if (html !== cmtShown) { $('#cmt-list').innerHTML = html; cmtShown = html; }
+}
+function showNotesTab(t) {
+  if (!NTABS.includes(t)) return;
+  S.ntab = t;
+  try { localStorage.setItem('notes.tab', t); } catch { /* 이번만 */ }
+  cmtShown = '';
+  renderNotes();
+  renderSummary();
+}
+// on: 펼치기/접기 (없으면 뒤집기) · memo: 펼치면서 메모 칸에 바로 쓰게
+function toggleNotes(on, memo) {
+  if (!doc() || S.mini) return;
+  const want = typeof on === 'boolean' ? on : !notesShown();
+  setNotesWanted(want);
+  renderNotes();
+  renderSummary();
+  if (want && memo) { showNotesTab('memo'); $('#memo').focus(); }
+}
+$('#btn-notes').addEventListener('click', () => toggleNotes());
+$('#btn-notes-close').addEventListener('click', () => toggleNotes(false));
+$('#notes-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-ntab]');
+  if (b) showNotesTab(b.dataset.ntab);
+});
+$('#notes-tabs').addEventListener('keydown', (e) => {
+  const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+  if (!step) return;
+  e.preventDefault();
+  const next = NTABS[(NTABS.indexOf(S.ntab) + step + NTABS.length) % NTABS.length];
+  showNotesTab(next);
+  $(`#notes-tabs [data-ntab="${next}"]`).focus();
+});
+
+// 노트 너비 (넓은 창): 사이 막대를 끌어서
+const work = $('#work');
+const applyNotesW = () => work.style.setProperty('--notes-w', `${notesW}px`);
+applyNotesW();
+$('#notes-grip').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const grip = e.currentTarget;
+  grip.setPointerCapture(e.pointerId);
+  grip.classList.add('drag');
+  $('#app').classList.add('resizing');
+  const right = work.getBoundingClientRect().right;
+  const move = (m) => {
+    const max = Math.max(280, work.clientWidth - 360);
+    notesW = Math.round(Math.min(max, Math.max(280, right - m.clientX)));
+    applyNotesW();
+  };
+  const up = () => {
+    grip.removeEventListener('pointermove', move);
+    grip.classList.remove('drag');
+    $('#app').classList.remove('resizing');
+    try { localStorage.setItem('notes.w', String(notesW)); } catch { /* 이번만 */ }
+  };
+  grip.addEventListener('pointermove', move);
+  grip.addEventListener('pointerup', up, { once: true });
+  grip.addEventListener('pointercancel', up, { once: true });
+});
+$('#notes-grip').addEventListener('dblclick', () => {
+  notesW = 380;
+  applyNotesW();
+  try { localStorage.removeItem('notes.w'); } catch { /* 이번만 */ }
+});
+
+// 메모: 치는 대로 (잠깐 멈추면) 저장
+const memo = $('#memo');
+let memoReq = 0;
+function setMemoState(t, err = false) {
+  const s = $('#memo-state');
+  s.textContent = t;
+  s.classList.toggle('err', err);
+}
+const memoSave = debounce((d) => {
+  const my = ++memoReq;
+  api.invoke('save_session', { doc: d })
+    .then(() => { if (my === memoReq && memoFor === d.id) setMemoState('저장됨'); })
+    .catch((e) => { if (memoFor === d.id) setMemoState('저장하지 못했어요', true); toast(String(e), 'error'); });
+}, 700);
+memo.addEventListener('input', () => {
+  const d = doc();
+  if (!d || memoFor !== d.id) return;
+  d.notes = memo.value;
+  setMemoState('저장 중…');
+  memoSave(d);
+});
+memo.addEventListener('blur', () => memoSave.flush());
+// 지금 녹음 위치 · 듣고 있는 곳 (ms) — 둘 다 아니면 null
+function nowMs() {
+  if (S.live && S.rec === 'recording' && !S.fileMode) return S.livePosMs || Math.max(0, Date.now() - S.timerStart);
+  if (P.src && P.started) return audio.currentTime * 1000;
+  return null;
+}
+function insertTime() {
+  const ms = nowMs();
+  if (!doc()) return;
+  if (ms == null) { toast('녹음 중이거나 녹음을 듣는 중일 때 시각을 넣을 수 있어요'); return; }
+  const s = memo.selectionStart ?? memo.value.length;
+  const e = memo.selectionEnd ?? s;
+  const before = memo.value.slice(0, s);
+  memo.focus();
+  memo.setRangeText(`${before && !before.endsWith('\n') ? '\n' : ''}[${fmt(ms)}] `, s, e, 'end');
+  memo.dispatchEvent(new Event('input'));
+}
+$('#btn-memo-time').addEventListener('mousedown', (e) => e.preventDefault()); // 메모 칸의 커서 자리를 지킨다
+$('#btn-memo-time').addEventListener('click', insertTime);
+
+// 요약 고치기
+function startSummaryEdit() {
+  const d = doc();
+  if (!d) return;
+  if (S.summarizing && S.sumId === d.id) { toast('요약을 만드는 중이에요. 끝난 뒤에 고칠 수 있어요'); return; }
+  if (S.sumEdit) {
+    const ta = $('#sum-edit');
+    if (ta) { ta.focus(); return; }
+    S.sumEdit = null; // 입력 칸이 사라진 편집 상태는 버리고 새로 연다 (버튼이 먹통이 되지 않게)
+  }
+  S.sumEdit = { doc: d, orig: d.summary || '' };
+  const card = $('#summary-card');
+  card.hidden = false;
+  card.classList.remove('folded');
+  card.classList.add('editing');
+  $('#summary-empty').hidden = true;
+  $('#sum-mark').hidden = true;
+  $('#summary-body').innerHTML = `<textarea class="sum-edit" id="sum-edit" spellcheck="false" placeholder="회의 요약을 적어 주세요.&#10;### 소제목 · - 목록 · - [ ] 할 일 · **굵게** 를 쓸 수 있어요."></textarea>
+    <div class="sum-edit-foot"><small>Ctrl+Enter 저장 · Esc 취소</small><button class="btn ghost sm" data-sum="cancel">취소</button><button class="btn sm" data-sum="save">저장</button></div>`;
+  const ta = $('#sum-edit');
+  ta.value = S.sumEdit.orig;
+  ta.style.height = `${Math.min(Math.max(220, ta.scrollHeight + 4), Math.round(window.innerHeight * 0.6))}px`;
+  ta.focus();
+  ta.setSelectionRange(0, 0);
+  ta.scrollTop = 0;
+}
+function endSummaryEdit(save) {
+  const e = S.sumEdit;
+  if (!e) return;
+  const v = ($('#sum-edit')?.value ?? e.orig).replace(/\s+$/, '');
+  S.sumEdit = null;
+  $('#summary-card').classList.remove('editing');
+  if (save && v.trim() !== e.orig.trim()) {
+    e.doc.summary = v.trim() ? v : null;
+    e.doc.summaryEdited = !!v.trim();
+    persistDoc(e.doc);
+    toast(v.trim() ? '요약을 저장했어요' : '요약을 비웠어요');
+  }
+  renderSummary();
+}
+async function cancelSummaryEdit() {
+  const e = S.sumEdit;
+  if (!e) return;
+  const v = $('#sum-edit')?.value ?? '';
+  if (v.trim() !== e.orig.trim() && !(await api.ask('고친 요약을 버릴까요?', { title: '받아쓰기', kind: 'warning' }))) return;
+  if (S.sumEdit === e) endSummaryEdit(false);
+}
+$('#btn-edit-summary').addEventListener('click', startSummaryEdit);
+$('#btn-summary-write').addEventListener('click', startSummaryEdit);
+$('#summary-card').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-sum]');
+  if (!b) return;
+  if (b.dataset.sum === 'save') endSummaryEdit(true);
+  else cancelSummaryEdit();
+});
+$('#summary-card').addEventListener('keydown', (k) => {
+  if (k.target.id !== 'sum-edit') return;
+  if (k.key === 'Enter' && k.ctrlKey) { k.preventDefault(); endSummaryEdit(true); }
+  if (k.key === 'Escape') { k.stopPropagation(); cancelSummaryEdit(); }
+});
+
+// 문장 코멘트: 팝오버에서 쓰고, 바깥을 누르거나 Enter 로 저장
+function openComment(id, anchor) {
+  const d = doc();
+  const u = d?.utterances.find((x) => x.id === id);
+  if (!u || !anchor) return;
+  if (S.cmt) closeComment(true);
+  const s = resolveSpk(d, u.speaker);
+  const q = $('#cmt-quote');
+  q.style.setProperty('--c', spkColor(s));
+  q.innerHTML = `<b>${esc(speakerName(d, s))}</b><span>${fmt(u.startMs)}</span><p>${esc(u.text)}</p>`;
+  const cur = d.comments?.[id] || '';
+  const ta = $('#cmt-input');
+  ta.value = cur;
+  $('#cmt-del').hidden = !cur;
+  showPopover($('#pop-cmt'), anchor, 'left', true);
+  S.cmt = { doc: d, id };
+  // 녹음 중이어도 쓰는 동안 화면이 새 문장 쪽으로 끌려 내려가지 않게
+  follow = false;
+  hideTools();
+  ta.focus();
+  ta.setSelectionRange(cur.length, cur.length);
+}
+function closeComment(save) {
+  const c = S.cmt;
+  if (!c) return;
+  S.cmt = null;
+  $('#pop-cmt').hidden = true;
+  if (!save) return;
+  const v = $('#cmt-input').value.trim();
+  const old = c.doc.comments?.[c.id] || '';
+  if (v === old) return;
+  c.doc.comments = { ...(c.doc.comments || {}) };
+  if (v) c.doc.comments[c.id] = v;
+  else delete c.doc.comments[c.id];
+  persistDoc(c.doc);
+  scheduleRender();
+  toast(v ? (old ? '코멘트를 고쳤어요' : '코멘트를 달았어요') : '코멘트를 지웠어요');
+}
+$('#cmt-input').addEventListener('keydown', (k) => {
+  // 한글 조합 중의 Enter 는 글자를 마무리하는 것 — 저장하지 않는다
+  if (k.isComposing || k.keyCode === 229) return;
+  if (k.key === 'Enter' && !k.shiftKey) { k.preventDefault(); closeComment(true); }
+  if (k.key === 'Escape') { k.stopPropagation(); closeComment(false); }
+});
+$('#cmt-save').addEventListener('click', () => closeComment(true));
+$('#cmt-del').addEventListener('click', () => { $('#cmt-input').value = ''; closeComment(true); });
+$('#transcript').addEventListener('click', (e) => {
+  const c = e.target.closest('.cmt[data-cmt]');
+  if (c) openComment(+c.dataset.cmt, c);
+});
+$('#cmt-list').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-goto]');
+  if (b) gotoUtterance(+b.dataset.goto);
+});
+// 녹취록에서 그 문장으로 가서 잠깐 빛나게
+function gotoUtterance(id) {
+  const el = $(`#transcript .u[data-id="${id}"]`);
+  if (!el) return;
+  follow = false;
+  const center = () => {
+    const r = el.getBoundingClientRect(), b = body.getBoundingClientRect();
+    body.scrollTo({ top: body.scrollTop + r.top - b.top - body.clientHeight / 3, behavior: 'instant' });
+  };
+  center();
+  requestAnimationFrame(center); // 화면 밖 문단은 그려지면서 높이가 바뀐다
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1900);
+}
+
+// 문장 위에 마우스를 올리면 뜨는 도구: 고치기 · 코멘트 (문장마다 버튼을 두지 않고 하나를 옮겨 다닌다)
+const tools = $('#u-tools');
+let toolsId = null;
+function showTools(el, hint = false) {
+  if (!el || S.mini) return;
+  toolsId = +el.dataset.id;
+  tools.classList.toggle('hinting', hint);
+  tools.hidden = false;
+  const r = el.getBoundingClientRect(), b = body.getBoundingClientRect();
+  const top = r.top - b.top + body.scrollTop;
+  tools.style.top = `${hint ? top + r.height + 4 : Math.max(0, top - 18)}px`;
+  tools.style.left = `${Math.max(4, r.right - b.left + body.scrollLeft - tools.offsetWidth + 6)}px`;
+}
+function hideTools() {
+  tools.hidden = true;
+  toolsId = null;
+}
+body.addEventListener('mouseover', (e) => {
+  if (editing || e.target.closest('#u-tools')) return;
+  const el = e.target.closest('#transcript .u[data-id]');
+  if (!el) { if (toolsId != null) hideTools(); return; }
+  if (+el.dataset.id !== toolsId || tools.hidden) showTools(el);
+});
+body.addEventListener('mouseleave', () => { if (!editing) hideTools(); });
+tools.addEventListener('mousedown', (e) => e.preventDefault());
+tools.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-tool]');
+  // 녹음 중에는 문단이 다시 그려질 수 있어 id 로 다시 찾는다
+  const el = toolsId != null && $(`#transcript .u[data-id="${toolsId}"]`);
+  if (!b || !el) { hideTools(); return; }
+  if (b.dataset.tool === 'edit') startEdit(el);
+  else openComment(toolsId, el);
+});
+
+/* ───────────── 창 크게 (최대화 · 전체 화면) ───────────── */
+const WIN = { max: false, full: false };
+async function syncMaxed() {
+  try {
+    WIN.max = !!(await api.win.isMaximized());
+    WIN.full = !!(await api.win.isFullscreen());
+  } catch { return; }
+  const big = WIN.max || WIN.full;
+  $('#app').classList.toggle('maxed', big);
+  $('#btn-max use').setAttribute('href', big ? '#i-restore' : '#i-maximize');
+  $('#btn-max').title = WIN.full ? '전체 화면 끝내기 (F11 · Esc)' : WIN.max ? '원래 크기로 (F11: 전체 화면)' : '화면 가득 크게 보기 (F11: 전체 화면)';
+}
+async function toggleMax() {
+  if (S.mini) return;
+  try {
+    if (WIN.full) await api.win.setFullscreen(false);
+    else await api.win.toggleMaximize();
+  } catch (e) { toast(String(e), 'error'); }
+  setTimeout(syncMaxed, 80);
+}
+async function toggleFullscreen() {
+  if (S.mini) return;
+  try { await api.win.setFullscreen(!WIN.full); } catch (e) { toast(String(e), 'error'); }
+  setTimeout(syncMaxed, 80);
+}
+$('#btn-max').addEventListener('click', toggleMax);
+api.win.onResized?.(debounce(syncMaxed, 120));
 
 // 복사 · 저장
 $('#btn-copy').addEventListener('click', async () => {
@@ -956,7 +1414,10 @@ function showPopover(pop, anchor, align = 'left', below = false) {
   if (below && top + p.height > appR.height - 8) top = Math.max(8, a.top - p.height - 6);
   pop.style.top = `${top}px`;
 }
-function hidePopovers() { $$('.popover').forEach((p) => (p.hidden = true)); }
+function hidePopovers() {
+  if (S.cmt) closeComment(true); // 쓰던 코멘트는 바깥을 눌러도 저장
+  $$('.popover').forEach((p) => (p.hidden = true));
+}
 document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name')) hidePopovers(); });
 
 $('#btn-save').addEventListener('click', (e) => showPopover($('#pop-save'), e.currentTarget, 'right'));
@@ -997,9 +1458,16 @@ $('#pop-source').addEventListener('click', (e) => {
 });
 
 // 요약
-$('#btn-summary').addEventListener('click', async () => {
+$('#btn-summary').addEventListener('click', () => runSummary());
+$('#btn-summary-ai').addEventListener('click', () => runSummary());
+async function runSummary() {
   const d = doc();
   if (!d || S.summarizing) return;
+  if (S.sumEdit?.doc === d) { toast('요약을 고치는 중이에요. 저장하거나 취소한 뒤에 AI 로 요약할 수 있어요', 'warn'); return; }
+  // 직접 고친 요약은 묻고 바꾼다
+  if (d.summary && d.summaryEdited
+    && !(await api.ask('직접 고친 요약이 있어요.\nAI 로 새로 요약하면 지금 요약이 바뀌어요. 계속할까요?', { title: '받아쓰기', kind: 'warning' }))) return;
+  if (doc() !== d || S.summarizing) return;
   if (S.rec !== 'idle' && S.live) toast('지금까지의 내용으로 요약할게요');
   // 방금 고친 문장이 요약에 들어가게, 기다리던 저장을 먼저 보낸다 (요약은 그 저장이 끝난 뒤 기록을 읽는다)
   persistDoc.flush();
@@ -1012,12 +1480,18 @@ $('#btn-summary').addEventListener('click', async () => {
   $('#summary-card').classList.remove('folded');
   renderSummary();
   updateActions();
-  // 녹음 중에 요약해도 위에 뜬 요약 카드를 보고 있게 따라가기를 멈춘다
-  follow = false;
-  body.scrollTop = 0;
+  if (notesShown()) {
+    // 노트가 열려 있으면 요약은 노트의 요약 탭에 — 녹취록은 보던 곳 그대로
+    showNotesTab('summary');
+  } else {
+    // 녹음 중에 요약해도 위에 뜬 요약 카드를 보고 있게 따라가기를 멈춘다
+    follow = false;
+    body.scrollTop = 0;
+  }
   try {
     const r = await api.invoke('summarize', { id: d.id, token: S.sumToken });
     d.summary = r.text;
+    d.summaryEdited = false;
     if (r.title) { d.title = r.title; d.autoTitle = false; renderMeta(); }
   } catch (e) {
     // 사람이 멈춘 것은 오류가 아니다
@@ -1030,7 +1504,7 @@ $('#btn-summary').addEventListener('click', async () => {
     renderSummary();
     updateActions();
   }
-});
+}
 $('#summary-card').addEventListener('click', (e) => {
   const b = e.target.closest('#btn-cancel-summary');
   if (!b || !S.summarizing || S.sumCancelling) return;
@@ -1088,9 +1562,26 @@ $$('[data-close]').forEach((b) => b.addEventListener('click', closePanels));
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#update-modal').hidden) { closeUpdateModal(); return; }
   if (e.key === 'Escape' && !hotkeyCapturing) {
+    // 아무것도 열려 있지 않으면 전체 화면을 끝낸다
+    const nothingOpen = $('#findbar').hidden && $$('.panel, .popover').every((p) => p.hidden);
+    if (nothingOpen && WIN.full) toggleFullscreen();
     if (!$('#findbar').hidden && $$('.panel').every((p) => p.hidden)) closeFind();
     closePanels();
     hidePopovers();
+  }
+  if (e.key === 'F11' && !S.mini) { e.preventDefault(); toggleFullscreen(); return; }
+  // Ctrl+M: 노트 열기 · 메모로 / 메모를 쓰는 중이면 닫기
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === 'KeyM' && !S.mini) {
+    e.preventDefault();
+    if (notesShown() && document.activeElement === memo) { memo.blur(); toggleNotes(false); } else toggleNotes(true, true);
+    return;
+  }
+  // Ctrl+; : 메모에 지금 시각
+  if (e.ctrlKey && !e.altKey && e.code === 'Semicolon' && !S.mini && doc()) {
+    e.preventDefault();
+    if (!notesShown() || S.ntab !== 'memo') toggleNotes(true, true);
+    insertTime();
+    return;
   }
   if (e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
     e.preventDefault();
@@ -1154,6 +1645,7 @@ async function renderHistory() {
 }
 // 기록 하나를 연다 — 받아 적는 중인 회의는 최신 문장으로, 지난 회의는 처음부터 (q: 찾을 말)
 async function openSession(id, q = '') {
+  commitEdits();
   if (S.liveDoc && id === S.liveDoc.id) { S.live = true; S.viewDoc = null; }
   else { S.viewDoc = await call('load_session', { id }); S.live = false; }
   closePanels();
@@ -1172,7 +1664,7 @@ $('#history-list').addEventListener('click', async (e) => {
     if (ok) {
       const gone = del.dataset.del;
       await call('delete_session', { id: gone });
-      if (S.viewDoc?.id === gone) { S.viewDoc = null; S.live = true; }
+      if (S.viewDoc?.id === gone) { dropEdits(); S.viewDoc = null; S.live = true; }
       if (S.liveDoc?.id === gone && S.rec === 'idle') S.liveDoc = null;
       renderDock();
       renderDoc();
@@ -2117,6 +2609,7 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://mini', (e) => setMini(!!e.payload));
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await refreshState();
+  syncMaxed();
   $('#drop-exts').textContent = exts().join(' · ');
   renderUpdate();
   if (S.app.hotkeyError) setTimeout(() => toast(S.app.hotkeyError, 'warn'), 600);
@@ -2152,6 +2645,8 @@ function demoDoc() {
     utterances: lines.map(([s, e, spk, text], i) => ({ id: i, startMs: s, endMs: e, speaker: spk, text, latencyMs: 1400 + ((i * 523) % 1700) })),
     summary: '### 한 줄 요약\n다음 달 15일 앱 출시를 확정하고 목요일에 최종 점검한다.\n\n### 결정 사항\n- 출시일 **15일** 확정, 목요일 최종 점검\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일',
     audioFile: null,
+    notes: '[00:07] 결제 모듈 — 테스트 서버 검증 결과 금요일에 공유받기\n[00:35] 키오스크 인덱스: 2초 → 0.4초\n\n- 매장 피드백 양식 미리 보내 두기',
+    comments: { 4: '0.4초는 피크 시간대 기준인지 확인', 6: '금요일 공유 — 담당 박 디자인' },
     // 회의 후 다시 정리 전 (화면 미리보기에서 '화자 정리 되돌리기' 버튼을 보이게)
     beforeRefine: { speakers: { 0: '김 팀장', 1: '이 개발', 2: '박 디자인', 3: '최 기획' }, assign: lines.map((l, i) => [i, i === 3 ? 3 : l[2]]) },
   };
@@ -2277,7 +2772,17 @@ function createMock() {
       return null;
     },
     listen: async (ev, fn) => { handlers[ev] = fn; },
-    win: { minimize() {}, hide() {} },
+    win: {
+      minimize() {},
+      hide() {},
+      _max: false,
+      _full: false,
+      async toggleMaximize() { this._max = !this._max; },
+      async setFullscreen(on) { this._full = !!on; },
+      async isMaximized() { return this._max; },
+      async isFullscreen() { return this._full; },
+      onResized() {},
+    },
     save: async () => null,
     open: async () => null,
     ask: async (m) => confirm(m),

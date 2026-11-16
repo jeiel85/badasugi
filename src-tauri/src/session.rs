@@ -34,6 +34,15 @@ pub struct SessionDoc {
     pub speakers: BTreeMap<u32, String>,
     pub utterances: Vec<Utterance>,
     pub summary: Option<String>,
+    /// 사람이 요약을 직접 고쳤다 (AI 로 다시 요약하기 전에 물어본다)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub summary_edited: bool,
+    /// 회의를 보면서 적은 메모 (사람만 고친다 — 앱은 손대지 않는다)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    /// 문장마다 단 코멘트: 발화 id → 코멘트
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub comments: BTreeMap<u64, String>,
     pub audio_file: Option<String>,
     /// 합친 화자: 원래 번호 → 합쳐진 번호 (녹음 중 새로 들어오는 발화에도 적용)
     pub speaker_map: BTreeMap<u32, u32>,
@@ -366,6 +375,14 @@ impl SessionDoc {
         }
     }
 
+    /// 기록으로 남길 내용이 있나: 받아 적은 문장 · 직접 쓴 메모 · 요약
+    /// (문장이 하나도 받아 적히지 않았어도 회의 중 쓴 메모는 버리지 않는다)
+    pub fn has_content(&self) -> bool {
+        !self.utterances.is_empty()
+            || !self.notes.trim().is_empty()
+            || self.summary.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }
+
     pub fn upsert(&mut self, u: Utterance) {
         self.duration_ms = self.duration_ms.max(u.end_ms);
         match self.utterances.iter_mut().find(|x| x.id == u.id) {
@@ -384,19 +401,20 @@ impl SessionDoc {
         v.len()
     }
 
-    /// 연속된 같은 화자 발화를 한 문단으로 묶는다
-    fn paragraphs(&self) -> Vec<(Option<u32>, u64, u64, String)> {
-        let mut out: Vec<(Option<u32>, u64, u64, String)> = Vec::new();
+    /// 연속된 같은 화자 발화를 한 문단으로 묶는다 (화자, 시작, 끝, 글, 문단에 든 발화 id)
+    fn paragraphs(&self) -> Vec<(Option<u32>, u64, u64, String, Vec<u64>)> {
+        let mut out: Vec<(Option<u32>, u64, u64, String, Vec<u64>)> = Vec::new();
         for u in &self.utterances {
             if let Some(last) = out.last_mut() {
                 if last.0 == u.speaker && u.start_ms.saturating_sub(last.2) < 15_000 {
                     last.2 = u.end_ms;
                     last.3.push(' ');
                     last.3.push_str(&u.text);
+                    last.4.push(u.id);
                     continue;
                 }
             }
-            out.push((u.speaker, u.start_ms, u.end_ms, u.text.clone()));
+            out.push((u.speaker, u.start_ms, u.end_ms, u.text.clone(), vec![u.id]));
         }
         out
     }
@@ -415,16 +433,35 @@ impl SessionDoc {
             s.push_str(sum.trim());
             s.push_str("\n\n");
         }
+        if !self.notes.trim().is_empty() {
+            s.push_str("## 메모\n\n");
+            s.push_str(self.notes.trim());
+            s.push_str("\n\n");
+        }
         s.push_str("## 녹취록\n\n");
-        for (spk, start, _, text) in self.paragraphs() {
+        let starts: HashMap<u64, u64> = if self.comments.is_empty() {
+            HashMap::new()
+        } else {
+            self.utterances.iter().map(|u| (u.id, u.start_ms)).collect()
+        };
+        for (spk, start, _, text, ids) in self.paragraphs() {
             s.push_str(&format!("**{}** `{}`  \n{}\n\n", self.speaker_name(spk), fmt_time(start), text));
+            // 문단 안 문장에 단 코멘트는 문단 바로 아래 인용으로 (어느 문장인지 시각을 붙여)
+            for id in ids {
+                let Some(c) = self.comments.get(&id).map(|c| c.trim()).filter(|c| !c.is_empty()) else {
+                    continue;
+                };
+                let at = starts.get(&id).copied().unwrap_or(start);
+                let body = c.lines().collect::<Vec<_>>().join("  \n> ");
+                s.push_str(&format!("> 💬 `{}` {}\n\n", fmt_time(at), body));
+            }
         }
         s
     }
 
     pub fn to_text(&self) -> String {
         let mut s = String::new();
-        for (spk, start, _, text) in self.paragraphs() {
+        for (spk, start, _, text, _) in self.paragraphs() {
             s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), text));
         }
         s
@@ -529,7 +566,7 @@ impl SessionStore {
         if !self.dirty || self.last_save.elapsed() <= autosave_every(n) {
             return Ok(());
         }
-        let Some(doc) = self.current.as_ref().filter(|d| !d.utterances.is_empty()) else {
+        let Some(doc) = self.current.as_ref().filter(|d| d.has_content()) else {
             return Ok(());
         };
         let md = self.last_md.elapsed() >= MD_EVERY;
@@ -549,7 +586,7 @@ impl SessionStore {
         let Some(doc) = self.current.as_ref() else {
             return Ok(());
         };
-        if doc.utterances.is_empty() {
+        if !doc.has_content() {
             return Ok(());
         }
         write_doc(&self.dir, doc)?;
@@ -612,6 +649,10 @@ impl SessionStore {
                 cur.speaker_map = doc.speaker_map.clone();
             }
             cur.summary = doc.summary.clone();
+            cur.summary_edited = doc.summary_edited;
+            // 메모 · 코멘트는 화면에서만 고친다 → 화면 것을 그대로
+            cur.notes = doc.notes.clone();
+            cur.comments = doc.comments.clone();
             // 화면이 지웠다고 알린 발화만 지우고, 그 사이 새로 들어온 발화는 지킨다
             // (긴 회의에서 편집할 때마다 문장 수의 제곱만큼 찾지 않게 id 로 한 번에)
             let deleted: std::collections::HashSet<u64> = doc.deleted.iter().copied().collect();
@@ -628,6 +669,11 @@ impl SessionStore {
                 }
                 true
             });
+            // 지운 문장에 달려 있던 코멘트는 함께 지운다
+            if !cur.comments.is_empty() {
+                let ids: std::collections::HashSet<u64> = cur.utterances.iter().map(|u| u.id).collect();
+                cur.comments.retain(|id, c| ids.contains(id) && !c.trim().is_empty());
+            }
             let map = cur.speaker_map.clone();
             if !map.is_empty() {
                 let resolved: Vec<Option<u32>> = cur.utterances.iter().map(|u| cur.resolve(u.speaker)).collect();
@@ -663,6 +709,10 @@ impl SessionStore {
         }
         // 화면 사본은 발화가 도착 순서로 쌓여 있을 수 있다 → 시간 순으로 저장 (MD·TXT·SRT 순서)
         doc.utterances.sort_by(|a, b| a.start_ms.cmp(&b.start_ms).then(a.id.cmp(&b.id)));
+        if !doc.comments.is_empty() {
+            let ids: std::collections::HashSet<u64> = doc.utterances.iter().map(|u| u.id).collect();
+            doc.comments.retain(|id, c| ids.contains(id) && !c.trim().is_empty());
+        }
         doc.duration_ms = doc.duration_ms.max(old.duration_ms);
         write_doc(&self.dir, &doc)
     }
@@ -685,7 +735,7 @@ impl SessionStore {
         let Some(doc) = self.current.as_ref() else {
             return Ok(());
         };
-        if doc.utterances.is_empty() {
+        if !doc.has_content() {
             let p = self.json_path(&doc.id);
             if p.exists() {
                 write_doc(&self.dir, doc)?;
@@ -718,6 +768,21 @@ impl SessionStore {
                         if snippet.is_empty() {
                             snippet = format!("{} · {}", fmt_time(u.start_ms), around(&u.text, &q, 60));
                         }
+                    }
+                }
+                // 직접 적은 메모 · 코멘트에서도 찾는다
+                for c in d.comments.values() {
+                    if c.to_lowercase().contains(&q) {
+                        hits += 1;
+                        if snippet.is_empty() {
+                            snippet = format!("코멘트 · {}", around(c, &q, 60));
+                        }
+                    }
+                }
+                if d.notes.to_lowercase().contains(&q) {
+                    hits += 1;
+                    if snippet.is_empty() {
+                        snippet = format!("메모 · {}", around(&d.notes, &q, 60));
                     }
                 }
                 if !in_title && hits == 0 {
@@ -1062,5 +1127,86 @@ mod tests {
         store.delete(&d.id).unwrap();
         assert!(store.list().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_and_comments_are_saved_while_recording_and_after() {
+        let dir = std::env::temp_dir().join(format!("bd-notes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-16_100000".into();
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 1)];
+        let mut screen = d.clone();
+        store.begin(d);
+        // 녹음 중: 화면에서 메모 · 코멘트 · 요약을 고침 (그 사이 새 문장이 들어옴)
+        store.current.as_mut().unwrap().upsert(u(2, 10000, 0));
+        screen.notes = "결제 일정 다시 확인".into();
+        screen.comments.insert(1, "숫자 확인 필요".into());
+        screen.summary = Some("직접 쓴 요약".into());
+        screen.summary_edited = true;
+        store.save_doc(screen.clone()).unwrap();
+        let cur = store.current.clone().unwrap();
+        assert_eq!(cur.utterances.len(), 3);
+        assert_eq!(cur.notes, "결제 일정 다시 확인");
+        assert_eq!(cur.comments.get(&1).map(String::as_str), Some("숫자 확인 필요"));
+        assert!(cur.summary_edited);
+        // 문장을 지우면 그 문장의 코멘트도 함께 사라진다
+        screen.utterances.retain(|x| x.id != 1);
+        screen.deleted = vec![1];
+        store.save_doc(screen.clone()).unwrap();
+        assert!(store.current.as_ref().unwrap().comments.is_empty());
+        // 녹음이 끝난 뒤(저장된 기록)에도
+        store.flush().unwrap();
+        store.current = None;
+        screen.deleted.clear();
+        screen.comments.insert(0, "첫 문장\n두 줄".into());
+        // 빈 코멘트는 남기지 않는다
+        screen.comments.insert(2, "  ".into());
+        store.save_doc(screen).unwrap();
+        let saved = store.load("2026-11-16_100000").unwrap();
+        assert_eq!(saved.notes, "결제 일정 다시 확인");
+        assert_eq!(saved.comments.len(), 1);
+        let md = saved.to_markdown();
+        assert!(md.contains("## 메모\n\n결제 일정 다시 확인"));
+        assert!(md.contains("> 💬 `00:00` 첫 문장  \n> 두 줄"));
+        // 요약에 보내는 녹취록에는 메모 · 코멘트가 섞이지 않는다
+        assert!(!saved.to_text().contains("첫 문장"));
+        // 메모 · 코멘트로도 찾는다
+        assert_eq!(store.search("두 줄").len(), 1);
+        assert_eq!(store.search("결제 일정").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_keep_a_meeting_that_has_no_recognized_speech() {
+        let dir = std::env::temp_dir().join(format!("bd-notes-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-16_110000".into();
+        let mut screen = d.clone();
+        store.begin(d);
+        // 받아 적힌 문장이 하나도 없는 녹음은 남기지 않지만
+        store.flush().unwrap();
+        assert!(store.load("2026-11-16_110000").is_ok()); // 녹음 중에는 메모리에서 읽힘
+        assert!(!dir.join("2026-11-16_110000.json").exists());
+        // 메모를 쓰면 문장이 없어도 저장된다
+        screen.notes = "인식이 안 돼서 손으로 적음".into();
+        store.save_doc(screen).unwrap();
+        assert!(dir.join("2026-11-16_110000.json").exists());
+        store.current = None;
+        assert_eq!(store.load("2026-11-16_110000").unwrap().notes, "인식이 안 돼서 손으로 적음");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_records_without_notes_still_load_and_stay_clean() {
+        let old = r#"{"version":1,"id":"2026-11-01_090000","title":"t","utterances":[{"id":0,"startMs":0,"endMs":10,"speaker":0,"text":"a"}]}"#;
+        let d: SessionDoc = serde_json::from_str(old).unwrap();
+        assert!(d.notes.is_empty() && d.comments.is_empty() && !d.summary_edited);
+        // 비어 있으면 파일에 쓰지 않는다 (예전 버전이 읽어도 그대로)
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("notes") && !json.contains("comments") && !json.contains("summaryEdited"));
     }
 }

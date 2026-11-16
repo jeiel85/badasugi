@@ -11,6 +11,7 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-toggle-maximize",
+    "core:window:allow-set-fullscreen",
     "dialog:allow-save",
     "dialog:allow-open",
     "dialog:allow-ask",

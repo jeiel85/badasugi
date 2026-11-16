@@ -800,9 +800,17 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 if let Some(doc) = store.current.take() {
                     if doc.utterances.is_empty() {
                         let audio = store.audio_path(&doc.id);
+                        // 받아 적힌 문장이 없어도 회의 중 직접 쓴 메모 · 요약은 버리지 않는다 (녹음 파일도 함께 둔다)
+                        if doc.has_content() {
+                            if session::write_doc(&store.dir, &doc).is_ok() {
+                                let _ = app.emit(
+                                    "bd://toast",
+                                    "받아 적힌 문장은 없지만 메모는 회의 기록에 남겨 두었어요".to_string(),
+                                );
+                            }
                         // 받아 적힌 문장이 없어도(인터넷 끊김·API 키 오류 등) 5초 넘는 녹음은 지우지 않고 기록으로 남긴다
                         // → 나중에 회의 기록에서 다시 듣거나, 녹음 파일로 다시 받아 적을 수 있다
-                        if doc.audio_file.is_some() && doc.duration_ms >= 5_000 && audio.is_file() {
+                        } else if doc.audio_file.is_some() && doc.duration_ms >= 5_000 && audio.is_file() {
                             if session::write_doc(&store.dir, &doc).is_ok() {
                                 let _ = app.emit(
                                     "bd://toast",
@@ -1221,6 +1229,7 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     let loaded = st.store.lock().load(&id);
     let mut latest = loaded.unwrap_or(doc2);
     latest.summary = Some(sum.text.clone());
+    latest.summary_edited = false;
     let title = sum.title.filter(|_| latest.auto_title);
     if let Some(t) = &title {
         latest.title = t.clone();
@@ -1299,7 +1308,10 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let mut s = st.settings.lock().clone();
     if mini {
-        // 최대화된 상태였다면 먼저 원래 크기로 돌려놓고 그 크기를 기억한다 (돌아올 때 꽉 찬 창이 되지 않게)
+        // 전체 화면 · 최대화된 상태였다면 먼저 원래 크기로 돌려놓고 그 크기를 기억한다 (돌아올 때 꽉 찬 창이 되지 않게)
+        if w.is_fullscreen().unwrap_or(false) {
+            let _ = w.set_fullscreen(false);
+        }
         if w.is_maximized().unwrap_or(false) {
             let _ = w.unmaximize();
         }
