@@ -11,7 +11,7 @@
 //!                                   [ASR 워커 ×N] 인식 → 후처리 → Transcript 이벤트
 //! ```
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::asr::{self, AsrRequest, EngineConfig};
 use crate::audio::{Capture, CaptureConfig, Notify, RawChunk, SourceKind, SRC_MIC};
 use crate::decode::AudioFile;
-use crate::diarize::{Diarizer, KnownVoice, UtteranceVoice};
+use crate::diarize::{Diarizer, KnownVoice, SpeakerHints, UtteranceVoice};
 use crate::resample::Resampler;
 use crate::speaker::{DiarizationConfig, SpeakerEncoder};
 use crate::vad::{Segmenter, SegmenterConfig, SpeechSegment};
@@ -129,8 +129,8 @@ pub enum Event {
 
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
 
-/// 사람이 녹음 중에 합친 화자 (실시간 화자 → 합쳐진 화자). 회의 후 다시 정리할 때 한 화자로 묶어 둔다.
-pub type SpeakerMerges = Arc<parking_lot::Mutex<BTreeMap<u32, u32>>>;
+/// 사람이 녹음 중에 합친 화자 · 이름 붙인 화자. 회의 후 다시 정리가 그 결정을 되돌리지 않게 알려 둔다.
+pub type SharedHints = Arc<parking_lot::Mutex<SpeakerHints>>;
 
 struct Job {
     id: u64,
@@ -192,13 +192,13 @@ pub struct Pipeline {
     backend: Option<JoinHandle<()>>,
     sink: EventSink,
     file_mode: bool,
-    merges: SpeakerMerges,
+    hints: SharedHints,
 }
 
 impl Pipeline {
-    /// 사람이 합친 화자를 알려 주는 손잡이 — 녹음이 끝나 정리하는 동안에도 고칠 수 있게 복제해 둘 수 있다
-    pub fn speaker_merges(&self) -> SpeakerMerges {
-        self.merges.clone()
+    /// 사람이 합친 화자 · 이름 붙인 화자를 알려 주는 손잡이 — 녹음이 끝나 정리하는 동안에도 고칠 수 있게 복제해 둘 수 있다
+    pub fn speaker_hints(&self) -> SharedHints {
+        self.hints.clone()
     }
 
     /// 실시간 녹음 전사를 시작한다.
@@ -227,8 +227,8 @@ impl Pipeline {
         if let Some(message) = note {
             sink(Event::Status { message });
         }
-        let merges = SpeakerMerges::default();
-        let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, merges.clone(), None);
+        let hints = SharedHints::default();
+        let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, hints.clone(), None);
         let flags = Arc::new(Flags::default());
         let dsp = {
             let sink = sink.clone();
@@ -246,7 +246,7 @@ impl Pipeline {
             backend: Some(backend.handle),
             sink,
             file_mode: false,
-            merges,
+            hints,
         })
     }
 
@@ -273,14 +273,14 @@ impl Pipeline {
             sink(Event::Status { message });
         }
         let inflight = Arc::new(Inflight::default());
-        let merges = SpeakerMerges::default();
+        let hints = SharedHints::default();
         let flags = Arc::new(Flags::default());
         let backend = spawn_backend(
             &cfg,
             diarizer,
             sink.clone(),
             Some(inflight.clone()),
-            merges.clone(),
+            hints.clone(),
             Some(flags.clone()),
         );
         // 인식이 밀린 만큼만 앞서 디코딩한다 (결과가 차례로 나오고 메모리도 일정)
@@ -299,7 +299,7 @@ impl Pipeline {
             backend: None,
             sink,
             file_mode: true,
-            merges,
+            hints,
         })
     }
 
@@ -403,7 +403,7 @@ fn spawn_backend(
     diarizer: Option<Diarizer>,
     sink: EventSink,
     inflight: Option<Arc<Inflight>>,
-    merges: SpeakerMerges,
+    hints: SharedHints,
     file_flags: Option<Arc<Flags>>,
 ) -> Backend {
     let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<SpeechSegment>();
@@ -445,8 +445,8 @@ fn spawn_backend(
             // 모든 발화 인식이 끝난 뒤, 회의 전체를 보고 화자를 다시 정리한다 (Stopped 보다 먼저)
             if let Some(d) = diarizer.filter(|d| !d.is_empty()) {
                 let t = Instant::now();
-                let merges = merges.lock().clone();
-                let r = d.finish(&merges);
+                let hints = hints.lock().clone();
+                let r = d.finish(&hints);
                 log::info!(
                     "화자 다시 정리: 조각 {}개 중 {}개 옮김 · 화자 {}명 ({}ms)",
                     r.labels.len(),
