@@ -700,7 +700,13 @@ fn read_error(e: std::io::Error) -> anyhow::Error {
     }
 }
 
-/// 스트리밍 답을 한 줄씩 (SSE 의 "data: …" 줄 · Ollama 의 JSON 줄). `f` 가 false 를 주면 그만 읽는다
+/// 끝 신호 없이 연결이 닫힘 (서버 · 프록시가 도중에 정상 종료) — 받은 데까지를 쓰면 잘린 회의록이 저장된다
+fn cut_short() -> anyhow::Error {
+    anyhow!("요약 답이 끝나기 전에 연결이 닫혔어요 (서버가 답을 끝까지 보내지 않음). 다시 요약해 주세요")
+}
+
+/// 스트리밍 답을 한 줄씩 (SSE 의 "data: …" 줄 · Ollama 의 JSON 줄). `f` 가 false 를 주면 그만 읽는다.
+/// 연결이 닫혀도 그냥 돌아오니, 끝 신호를 받았는지는 부르는 쪽이 따로 확인한다 ([`cut_short`])
 fn each_line(r: impl std::io::Read, mut f: impl FnMut(&str) -> Result<bool>) -> Result<()> {
     use std::io::BufRead;
     let mut rd = std::io::BufReader::new(r);
@@ -744,6 +750,7 @@ fn stream_error(v: &Value) -> Option<anyhow::Error> {
 /// Ollama 의 답 (한 줄에 JSON 하나, 마지막 줄 "done": true 에 토큰 수)
 fn read_ollama_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     let mut out = Reply::default();
+    let mut complete = false;
     each_line(r, |line| {
         if line.trim().is_empty() {
             return Ok(true);
@@ -762,10 +769,14 @@ fn read_ollama_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> R
         if v["done"].as_bool() == Some(true) {
             out.in_tokens = v["prompt_eval_count"].as_u64().unwrap_or(0);
             out.out_tokens = v["eval_count"].as_u64().unwrap_or(0);
+            complete = true;
             return Ok(false);
         }
         Ok(true)
     })?;
+    if !complete {
+        return Err(cut_short());
+    }
     out.text = out.text.trim().to_string();
     Ok(out)
 }
@@ -848,12 +859,15 @@ fn openai_reply(v: &Value) -> Result<Reply> {
     })
 }
 
-/// OpenAI 호환 스트리밍 답 (SSE). 토큰 수는 마지막 조각의 usage (Groq 는 x_groq.usage 에도)
+/// OpenAI 호환 스트리밍 답 (SSE). 토큰 수는 마지막 조각의 usage (Groq 는 x_groq.usage 에도).
+/// 끝 신호는 `[DONE]`, 그것을 안 보내는 서버를 위해 finish_reason 이 온 것도 끝으로 본다
 fn read_openai_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     let mut out = Reply::default();
     let mut filtered = false;
+    let mut complete = false;
     each_line(r, |line| {
         if line.strip_prefix("data:").is_some_and(|d| d.trim() == "[DONE]") {
+            complete = true;
             return Ok(false);
         }
         let Some(v) = sse_json(line) else { return Ok(true) };
@@ -868,8 +882,9 @@ fn read_openai_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> R
             out.text.push_str(t);
             on_text(t);
         }
-        if c["finish_reason"].as_str() == Some("content_filter") {
-            filtered = true;
+        if let Some(reason) = c["finish_reason"].as_str() {
+            complete = true;
+            filtered |= reason == "content_filter";
         }
         let usage = if v["usage"].is_object() { &v["usage"] } else { &v["x_groq"]["usage"] };
         if usage.is_object() {
@@ -880,6 +895,9 @@ fn read_openai_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> R
     })?;
     if filtered {
         bail!("모델이 요약을 거절했습니다 (콘텐츠 필터)");
+    }
+    if !complete {
+        return Err(cut_short());
     }
     out.text = out.text.trim().to_string();
     Ok(out)
@@ -1034,6 +1052,7 @@ fn read_anthropic_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -
     let mut out = Reply::default();
     let mut stop = String::new();
     let mut why = String::new();
+    let mut complete = false;
     each_line(r, |line| {
         let Some(v) = sse_json(line) else { return Ok(true) };
         match v["type"].as_str().unwrap_or("") {
@@ -1068,7 +1087,10 @@ fn read_anthropic_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -
                 out.in_tokens = u["input_tokens"].as_u64().unwrap_or(out.in_tokens);
                 out.out_tokens = u["output_tokens"].as_u64().unwrap_or(out.out_tokens);
             }
-            "message_stop" => return Ok(false),
+            "message_stop" => {
+                complete = true;
+                return Ok(false);
+            }
             "error" => return Err(stream_error(&v).unwrap_or_else(|| anyhow!("요약 API 오류"))),
             _ => {}
         }
@@ -1076,6 +1098,10 @@ fn read_anthropic_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -
     })?;
     if stop == "refusal" {
         bail!("모델이 요약을 거절했습니다. {why}");
+    }
+    // 끝 신호는 message_stop (그 전에 stop_reason 까지 왔으면 답은 다 받은 것)
+    if !complete && stop.is_empty() {
+        return Err(cut_short());
     }
     out.text = out.text.trim().to_string();
     Ok(out)
@@ -1528,6 +1554,26 @@ mod tests {
         let overloaded = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
         let e = read_anthropic_stream(overloaded.as_bytes(), &mut |_| {}).unwrap_err();
         assert_eq!(e.downcast_ref::<ApiError>().map(|a| a.status), Some(529));
+    }
+
+    /// 끝 신호 없이 연결이 닫히면 받은 데까지를 요약으로 쓰지 않는다 (잘린 회의록이 저장되지 않게)
+    #[test]
+    fn a_stream_cut_short_is_an_error() {
+        let cut = |r: Result<Reply>| r.unwrap_err().to_string().contains("끝나기 전에 연결이 닫혔어요");
+        assert!(cut(read_ollama_stream(
+            "{\"message\":{\"content\":\"### 논의\\n- 가\"},\"done\":false}\n".as_bytes(),
+            &mut |_| {}
+        )));
+        assert!(cut(read_openai_stream("data: {\"choices\":[{\"delta\":{\"content\":\"### 논의\\n- 가\"}}]}\n\n".as_bytes(), &mut |_| {})));
+        assert!(cut(read_anthropic_stream(
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n\
+             data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"### 제목\\n\"}}\n\n"
+                .as_bytes(),
+            &mut |_| {}
+        )));
+        // [DONE] 을 안 보내는 서버라도 finish_reason 까지 왔으면 다 받은 것
+        let r = read_openai_stream("data: {\"choices\":[{\"delta\":{\"content\":\"끝\"},\"finish_reason\":\"stop\"}]}\n\n".as_bytes(), &mut |_| {});
+        assert_eq!(r.unwrap().text, "끝");
     }
 
     #[test]
