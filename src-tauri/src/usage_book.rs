@@ -83,8 +83,12 @@ impl UsageBook {
         });
     }
 
+    /// 보냈지만 실패한 음성 인식 요청 — 요청 수에도 센다 (모두 실패해도 사용량에 보이게). 소리 길이는 더하지 않는다
     pub fn stt_failed(&self, provider: &str) {
-        self.with(provider, |t| t.stt_failures += 1);
+        self.with(provider, |t| {
+            t.stt_requests += 1;
+            t.stt_failures += 1;
+        });
     }
 
     pub fn summary(&self, provider: &str, in_tokens: u64, out_tokens: u64) {
@@ -151,7 +155,7 @@ mod tests {
         let again = UsageBook::load(path);
         let r = again.report();
         let g = &r.today["groq"];
-        assert_eq!((g.stt_requests, g.stt_failures), (2, 1));
+        assert_eq!((g.stt_requests, g.stt_failures), (3, 1), "실패한 요청도 요청 수에");
         assert!((g.stt_secs - 5.5).abs() < 1e-9);
         assert_eq!(r.month["gemini"].sum_in_tokens, 1200);
         assert!(!r.today.contains_key("ollama"));

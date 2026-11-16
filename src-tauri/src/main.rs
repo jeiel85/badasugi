@@ -730,7 +730,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             return;
         }
         Event::ApiUsage { audio_ms, ok } => {
-            // 실제로 보낸 요청만 센다 (연결 문제로 미뤄 두거나 건너뛴 발화는 세지 않는다)
+            // 실제로 보낸 요청만 센다 — 실패한 요청도 요청 수에 넣고, 연결 문제로 미뤄 두거나 건너뛴 발화는 세지 않는다
             let provider = *st.api_provider.lock();
             if let Some(p) = provider {
                 let book = app.state::<usage_book::UsageBook>();

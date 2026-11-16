@@ -7,8 +7,11 @@ const T = window.__TAURI__;
 // 기록을 읽고 쓰는 명령은 앱이 작업 스레드에서 처리한다 — 보낸 순서대로 끝나도록 하나씩 보낸다
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
 const ORDERED_CMDS = new Set(['save_session', 'load_session', 'delete_session', 'export_session', 'session_text', 'session_audio']);
+// 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약은 몇 분 걸릴 수 있다)
+const AFTER_CMDS = new Set(['summarize']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
+  if (AFTER_CMDS.has(cmd)) return orderedChain.then(() => T.core.invoke(cmd, args));
   if (!ORDERED_CMDS.has(cmd)) return T.core.invoke(cmd, args);
   const p = orderedChain.then(() => T.core.invoke(cmd, args));
   orderedChain = p.catch(() => {});
@@ -130,9 +133,19 @@ async function call(cmd, args) {
     throw e;
   }
 }
+// 마지막 호출만 ms 뒤에 실행. .flush() 는 기다리는 호출을 바로 실행한다
 function debounce(fn, ms) {
-  let t;
-  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  let t, pending = null;
+  const run = () => {
+    clearTimeout(t);
+    if (!pending) return;
+    const a = pending;
+    pending = null;
+    fn(...a);
+  };
+  const f = (...a) => { pending = a; clearTimeout(t); t = setTimeout(run, ms); };
+  f.flush = run;
+  return f;
 }
 
 function md(src) {
@@ -841,6 +854,8 @@ $('#btn-summary').addEventListener('click', async () => {
   const d = doc();
   if (!d || S.summarizing) return;
   if (S.rec !== 'idle' && S.live) toast('지금까지의 내용으로 요약할게요');
+  // 방금 고친 문장이 요약에 들어가게, 기다리던 저장을 먼저 보낸다 (요약은 그 저장이 끝난 뒤 기록을 읽는다)
+  persistDoc.flush();
   S.summarizing = true;
   S.sumProgress = null;
   S.sumId = d.id;
