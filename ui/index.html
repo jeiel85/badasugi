@@ -37,8 +37,17 @@
     <!-- 기록 보기 배너 -->
     <div class="viewing" id="viewing" hidden>
       <svg><use href="#i-history"/></svg>
-      <span id="viewing-label">기록 보기</span>
+      <span id="viewing-label">지난 회의</span>
+      <button class="chip-btn" id="btn-view-list" title="회의 기록 목록 열기">목록</button>
       <button class="chip-btn" id="btn-back-live">실시간으로 돌아가기</button>
+    </div>
+
+    <!-- 회의를 마친 뒤: 저장됐다고 알리고, 화면 비우기 · 지난 회의로 가는 길 -->
+    <div class="ended" id="ended" hidden>
+      <svg><use href="#i-check"/></svg>
+      <span id="ended-label">회의를 마쳤어요 · 기록에 저장됨</span>
+      <button class="chip-btn" id="btn-ended-list" title="지난 회의 기록 보기">회의 기록</button>
+      <button class="chip-btn primary" id="btn-new" title="화면을 비우고 다음 회의를 준비해요 (방금 회의는 기록에 남아요)">새 회의</button>
     </div>
 
     <!-- 회의 제목 + 화자 -->
@@ -87,6 +96,10 @@
         <p class="hint">아래 버튼이나 <kbd id="hotkey-hint">Ctrl+Alt+R</kbd> 로 시작하세요.<br />말하는 사람을 구분해서 바로 글로 옮겨 드려요.</p>
         <p class="hint file-hint">녹음 파일은 창에 끌어다 놓거나 <button class="link" id="btn-open-file">파일 불러오기</button></p>
         <div class="setup" id="setup"></div>
+        <div class="recent" id="recent" hidden>
+          <div class="recent-head"><span>최근 회의</span><button class="link" id="btn-recent-all">전체 보기</button></div>
+          <div class="recent-list" id="recent-list"></div>
+        </div>
       </div>
 
       <div class="transcript" id="transcript"></div>
