@@ -1217,6 +1217,7 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     let loaded = st.store.lock().load(&id);
     let mut latest = loaded.unwrap_or(doc2);
     latest.summary = Some(sum.text.clone());
+    latest.summary_edited = false;
     let title = sum.title.filter(|_| latest.auto_title);
     if let Some(t) = &title {
         latest.title = t.clone();
@@ -1295,7 +1296,10 @@ fn set_mini_inner(app: &AppHandle, mini: bool, startup: bool) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let mut s = st.settings.lock().clone();
     if mini {
-        // 최대화된 상태였다면 먼저 원래 크기로 돌려놓고 그 크기를 기억한다 (돌아올 때 꽉 찬 창이 되지 않게)
+        // 전체 화면 · 최대화된 상태였다면 먼저 원래 크기로 돌려놓고 그 크기를 기억한다 (돌아올 때 꽉 찬 창이 되지 않게)
+        if w.is_fullscreen().unwrap_or(false) {
+            let _ = w.set_fullscreen(false);
+        }
         if w.is_maximized().unwrap_or(false) {
             let _ = w.unmaximize();
         }
