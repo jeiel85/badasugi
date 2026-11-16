@@ -58,7 +58,7 @@ impl ApiTranscriber {
             rb = rb.bearer_auth(&self.api_key);
         }
         let resp = rb.send().map_err(|e| ApiError::Network(describe_http_error(&e)))?;
-        // 공급자가 알려 주는 남은 한도 (설정 › API 사용량)
+        // 공급자가 알려 주는 남은 한도 (설정 › 사용량)
         crate::usage::record_headers(&self.url, resp.headers());
         let status = resp.status();
         let retry_after = retry_after(resp.headers());

@@ -631,7 +631,7 @@ $('#btn-rec').addEventListener('click', async () => {
     await api.invoke('toggle_recording');
   } catch (e) {
     toast(String(e), 'error');
-    if (/모델|API 키/.test(String(e))) openPanel('settings');
+    if (/모델|API 키/.test(String(e))) openPanel('settings', 'record');
   }
 });
 
@@ -894,14 +894,42 @@ $('#summary-card').addEventListener('click', (e) => {
 });
 
 /* ───────────── 패널 ───────────── */
-function openPanel(name) {
+// tab: 설정을 열 때 보여 줄 분류 (없으면 마지막으로 본 분류)
+function openPanel(name, tab) {
   closePanels();
   hidePopovers();
   $('#scrim').hidden = false;
   $(`#panel-${name}`).hidden = false;
-  if (name === 'settings') renderSettings();
+  if (name === 'settings') { showSetTab(tab || S.setTab || 'record'); renderSettings(); }
   if (name === 'history') renderHistory();
 }
+// 설정 분류: 녹음 · 화자 · 요약 · 사용량 · 일반
+const SET_TABS = ['record', 'speaker', 'summary', 'usage', 'general'];
+function showSetTab(tab) {
+  const changed = S.setTab !== tab;
+  S.setTab = tab;
+  $$('#set-tabs [data-tab]').forEach((b) => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  $$('#settings .set-page').forEach((p) => (p.hidden = p.dataset.page !== tab));
+  if (changed) $('#settings').scrollTop = 0;
+  if (tab === 'usage') renderUsage();
+}
+$('#set-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tab]');
+  if (b) showSetTab(b.dataset.tab);
+});
+$('#set-tabs').addEventListener('keydown', (e) => {
+  const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+  if (!d) return;
+  e.preventDefault();
+  const next = SET_TABS[(SET_TABS.indexOf(S.setTab) + d + SET_TABS.length) % SET_TABS.length];
+  showSetTab(next);
+  $(`#set-tabs [data-tab="${next}"]`).focus();
+});
 function closePanels() {
   $$('.panel').forEach((p) => (p.hidden = true));
   $('#scrim').hidden = true;
@@ -932,7 +960,7 @@ document.addEventListener('wheel', (e) => { if (e.ctrlKey) { e.preventDefault();
 document.addEventListener('click', (e) => {
   const dl = e.target.closest('[data-dl]');
   if (dl) queueDownloads(dl.dataset.dl.split(','));
-  if (e.target.closest('[data-open-settings]')) openPanel('settings');
+  if (e.target.closest('[data-open-settings]')) openPanel('settings', 'record');
   const url = e.target.closest('[data-url]');
   if (url) { e.preventDefault(); call('open_url', { url: url.dataset.url }); }
 });
@@ -1024,7 +1052,7 @@ async function startFile(path) {
   } catch (e) {
     S.fileMode = false;
     toast(String(e), 'error');
-    if (/모델|API 키/.test(String(e))) openPanel('settings');
+    if (/모델|API 키/.test(String(e))) openPanel('settings', 'record');
   }
   renderDock();
 }
@@ -1404,6 +1432,7 @@ function onUpdate(u) {
   }
   if (u?.state === 'error') toast(u.message || '업데이트 확인 실패', 'error');
   renderUpdate();
+  renderAbout();
 }
 // 업데이트 팝업: 지금 버전 이후 바뀐 내용을 버전별로 보여 주고, 확인한 뒤 적용
 async function openUpdateModal() {
@@ -1498,6 +1527,8 @@ function renderSettings() {
   renderModels();
 
   $('#opt-diar').checked = s.diarization.enabled;
+  // 화자 구분을 끄면 민감도 · 최대 화자 수는 쓰이지 않는다
+  $('#diar-tune').classList.toggle('off', !s.diarization.enabled);
   $('#opt-thr').value = s.diarization.threshold;
   $('#thr-label').textContent = s.diarization.threshold.toFixed(2);
   $('#opt-maxspk').value = String(s.diarization.maxSpeakers);
@@ -1524,15 +1555,25 @@ function renderSettings() {
   $('#opt-llm-custom-url').value = s.summary.customUrl;
   $('#opt-llm-custom-model').value = s.summary.customModel;
 
-  $('#opt-hotkey').value = s.hotkey || '없음';
+  renderHotkey();
   $('#opt-top').checked = s.alwaysOnTop;
   $('#opt-autostart').checked = S.app.autostart;
   $('#opt-audio').checked = s.saveAudio;
   $('#opt-unload').checked = s.unloadWhenIdle;
   $('#opt-autoupdate').checked = s.autoUpdate;
-  $('#opt-theme').value = s.theme;
+  setSeg('seg-theme', s.theme || 'system');
+  renderAbout();
+}
+// 앱 정보 카드: 버전 + 업데이트 상태
+function renderAbout() {
+  if (!S.app) return;
   $('#app-version').textContent = `v${S.app.version}`;
-  renderUsage();
+  const u = S.update;
+  const el = $('#about-update');
+  el.classList.toggle('ready', u?.state === 'ready');
+  el.textContent = u?.state === 'ready' ? `새 버전 v${u.version} 준비됨 · 쓰지 않을 때 적용돼요`
+    : u?.state === 'downloading' ? `새 버전 v${u.version} 내려받는 중…`
+      : S.settings?.autoUpdate ? '자동 업데이트 켜짐' : '자동 업데이트 꺼짐';
 }
 
 /* 기억한 목소리 */
@@ -1541,8 +1582,10 @@ async function renderVoices() {
   const box = $('#voice-list');
   let list = [];
   try { list = await api.invoke('list_voices'); } catch { /* 비움 */ }
-  box.innerHTML = list.map((v) => `<span class="voice-chip" title="회의 ${v.meetings}번 · ${minutes(v.secs)}">${esc(v.name)} <small>${v.meetings}회</small><button data-forget="${esc(v.name)}" title="이 목소리 잊기" aria-label="${esc(v.name)} 잊기">×</button></span>`).join('')
-    + (list.length > 1 ? '<button class="link danger" data-forget-all>모두 잊기</button>' : '');
+  box.innerHTML = list.length
+    ? list.map((v) => `<span class="voice-chip" title="회의 ${v.meetings}번 · ${minutes(v.secs)}">${esc(v.name)} <small>${v.meetings}회</small><button data-forget="${esc(v.name)}" title="이 목소리 잊기" aria-label="${esc(v.name)} 잊기">×</button></span>`).join('')
+      + (list.length > 1 ? '<button class="link danger" data-forget-all>모두 잊기</button>' : '')
+    : '<span class="voice-empty">아직 기억한 목소리가 없어요. 회의에서 화자 이름을 바꾸면 여기에 생겨요.</span>';
 }
 $('#voice-list').addEventListener('click', async (e) => {
   const one = e.target.closest('[data-forget]');
@@ -1568,12 +1611,11 @@ const PROVIDER = {
 const LIMIT_LABEL = { requests: '요청', tokens: '토큰', 'input-tokens': '입력 토큰', 'output-tokens': '출력 토큰', 'audio-seconds': '오디오(초)' };
 const n0 = (v) => Number(v || 0).toLocaleString('ko-KR');
 function minutes(secs) { return secs >= 60 ? `${(secs / 60).toFixed(1)}분` : `${Math.round(secs)}초`; }
-function tallyText(t) {
-  if (!t) return '없음';
-  const parts = [];
-  if (t.sttRequests) parts.push(`음성 인식 ${minutes(t.sttSecs)} (${n0(t.sttRequests)}회${t.sttFailures ? ` · 실패 ${n0(t.sttFailures)}` : ''})`);
-  if (t.sumRequests) parts.push(`요약 ${n0(t.sumRequests)}회 (토큰 ${n0(t.sumInTokens)} / ${n0(t.sumOutTokens)})`);
-  return parts.join(' · ') || '없음';
+function tallyLines(t) {
+  const out = [];
+  if (t?.sttRequests) out.push(`음성 인식 ${minutes(t.sttSecs)} · ${n0(t.sttRequests)}회${t.sttFailures ? ` (실패 ${n0(t.sttFailures)})` : ''}`);
+  if (t?.sumRequests) out.push(`요약 ${n0(t.sumRequests)}회 · 토큰 입력 ${n0(t.sumInTokens)} · 출력 ${n0(t.sumOutTokens)}`);
+  return out.length ? out : ['없음'];
 }
 // 재설정 시각(ms). Groq · OpenAI 는 받은 때부터 "1h9m7.2s" · "6ms" 같은 길이, Claude 는 "2026-11-16T08:30:00Z",
 // retry-after 는 초 또는 HTTP 날짜. 알아볼 수 없으면 null
@@ -1596,10 +1638,10 @@ function untilText(ms) {
   const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
   return m ? `${h}시간 ${m}분` : `${h}시간`;
 }
-// 응답 헤더 → "요청 1,999 / 2,000 남음 (3분 뒤 다시 채워짐) · 토큰 … (3분 전 기준)"
-// 받은 지 오래돼 재설정 시각이 지났으면, 남은 양은 이미 다시 채워졌다고 알려 준다
-function limitsText(rate) {
-  if (!rate) return '';
+// 응답 헤더 → { lines: ["요청 1,999 / 2,000 남음 · 3분 뒤 다시 채워짐", "토큰 …"], when: "3분 전" }
+// 받은 지 오래돼 재설정 시각이 지났으면, 남은 양은 이미 다시 채워졌다고 알려 준다. 한도 정보가 없으면 null
+function limitsInfo(rate) {
+  if (!rate) return null;
   const g = {};
   let retry = '';
   for (const [k, v] of rate.items) {
@@ -1610,17 +1652,17 @@ function limitsText(rate) {
   }
   const resetNote = (v) => {
     const t = resetAt(v, rate.at);
-    if (t == null) return ` (재설정 ${esc(v)})`;
-    return t <= Date.now() ? ' (지금은 다시 채워졌어요)' : ` (${untilText(t)} 뒤 다시 채워짐)`;
+    if (t == null) return ` · 재설정 ${esc(v)}`;
+    return t <= Date.now() ? ' · 지금은 다시 채워졌어요' : ` · ${untilText(t)} 뒤 다시 채워짐`;
   };
   const parts = Object.entries(g).filter(([, x]) => x.remaining != null).map(([name, x]) =>
     `${esc(LIMIT_LABEL[name] || name)} ${n0(x.remaining)}${x.limit ? ` / ${n0(x.limit)}` : ''} 남음${x.reset ? resetNote(x.reset) : ''}`);
   const retryAt = retry ? resetAt(retry, rate.at) : null;
   if (retryAt != null && retryAt > Date.now()) parts.push(`한도 초과 — ${untilText(retryAt)} 뒤 다시`);
-  if (!parts.length) return '';
+  if (!parts.length) return null;
   const ago = Math.max(0, Math.round(Date.now() / 1000 - rate.at));
   const when = ago < 60 ? '방금' : ago < 3600 ? `${Math.round(ago / 60)}분 전` : `${Math.round(ago / 3600)}시간 전`;
-  return `${parts.join(' · ')} <small>(${when} 기준)</small>`;
+  return { lines: parts, when };
 }
 async function renderUsage() {
   const box = $('#usage-box');
@@ -1633,15 +1675,17 @@ async function renderUsage() {
     box.innerHTML = '<div class="usage-empty">아직 API 를 쓴 기록이 없어요. 로컬 엔진과 Ollama 는 사용량이 없어요.</div>';
     return;
   }
+  // 항목마다 한 줄씩 (음성 인식 · 요약 · 한도 종류)
+  const lines = (arr) => arr.map((x) => `<div>${x}</div>`).join('');
   box.innerHTML = ids.map((id) => {
     const p = PROVIDER[id] || { name: id, url: '', link: '' };
     const rate = (r.rates || []).find((x) => x.provider === id);
-    const lim = limitsText(rate);
+    const lim = limitsInfo(rate);
     return `<div class="usage-card">
       <div class="usage-head"><b>${esc(p.name)}</b>${p.url ? `<button class="link" data-url="${p.url}">${esc(p.link)}</button>` : ''}</div>
-      <div class="usage-row"><span>오늘</span><span>${esc(tallyText(r.today?.[id]))}</span></div>
-      <div class="usage-row"><span>이번 달</span><span>${esc(tallyText(r.month?.[id]))}</span></div>
-      ${lim ? `<div class="usage-row"><span>남은 한도</span><span>${lim}</span></div>` : ''}
+      <div class="usage-row"><span>오늘</span><span>${lines(tallyLines(r.today?.[id]).map(esc))}</span></div>
+      <div class="usage-row"><span>이번 달</span><span>${lines(tallyLines(r.month?.[id]).map(esc))}</span></div>
+      ${lim ? `<div class="usage-row"><span>남은 한도<small>${lim.when} 기준</small></span><span>${lines(lim.lines)}</span></div>` : ''}
     </div>`;
   }).join('');
 }
@@ -1708,7 +1752,7 @@ bind('opt-openai-model', (t) => (S.settings.openaiModel = t.value));
 bind('opt-groq-model', (t) => (S.settings.groqModel = t.value));
 bind('opt-custom-url', (t) => (S.settings.customUrl = t.value.trim()));
 bind('opt-custom-model', (t) => (S.settings.customModel = t.value.trim()));
-bind('opt-diar', (t) => { S.settings.diarization.enabled = t.checked; });
+bind('opt-diar', (t) => { S.settings.diarization.enabled = t.checked; $('#diar-tune').classList.toggle('off', !t.checked); });
 bind('opt-thr', (t) => { S.settings.diarization.threshold = +t.value; $('#thr-label').textContent = (+t.value).toFixed(2); }, 'input');
 bind('opt-maxspk', (t) => (S.settings.diarization.maxSpeakers = +t.value));
 bind('opt-voices', (t) => { S.settings.rememberVoices = t.checked; renderVoices(); });
@@ -1726,8 +1770,8 @@ bind('opt-llm-custom-model', (t) => (S.settings.summary.customModel = t.value.tr
 bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
 bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
 bind('opt-unload', (t) => (S.settings.unloadWhenIdle = t.checked));
-bind('opt-autoupdate', (t) => (S.settings.autoUpdate = t.checked));
-bind('opt-theme', (t) => { S.settings.theme = t.value; applyTheme(); });
+bind('opt-autoupdate', (t) => { S.settings.autoUpdate = t.checked; renderAbout(); });
+bindSeg('seg-theme', (v) => { S.settings.theme = v; applyTheme(); });
 $('#opt-autostart').addEventListener('change', (e) => call('set_autostart', { enabled: e.target.checked }).then(() => (S.app.autostart = e.target.checked)));
 
 for (const [id, name] of KEY_INPUTS) {
@@ -1765,17 +1809,36 @@ $('#btn-test').addEventListener('click', async (e) => {
   b.textContent = '연결 테스트';
 });
 
-// 단축키 입력
+// 단축키 입력 — 키캡을 누르면 새 조합을 기다린다
 let hotkeyCapturing = false;
 const hk = $('#opt-hotkey');
-function stopHotkeyCapture() { hotkeyCapturing = false; hk.classList.remove('capturing'); if (S.settings) hk.value = S.settings.hotkey || '없음'; }
-hk.addEventListener('click', () => { hotkeyCapturing = true; hk.classList.add('capturing'); hk.value = '조합키를 누르세요 (Esc 취소 · Backspace 해제)'; });
+const HOTKEY_DESC = '어디서든 녹음을 시작하고 멈춰요';
+const keycaps = (keys) => keys.map((k) => `<kbd>${esc(k)}</kbd>`).join('<i>+</i>');
+function renderHotkey(note) {
+  const desc = $('#hotkey-desc');
+  desc.classList.toggle('warn', !!note);
+  if (hotkeyCapturing) {
+    desc.textContent = note || 'Esc 취소 · Backspace 단축키 없애기';
+    return;
+  }
+  const k = S.settings?.hotkey;
+  hk.innerHTML = k ? keycaps(k.split('+')) : '<span class="kc-note">없음 · 눌러서 정하기</span>';
+  desc.textContent = HOTKEY_DESC;
+}
+function stopHotkeyCapture() { hotkeyCapturing = false; hk.classList.remove('capturing'); if (S.settings) renderHotkey(); }
+hk.addEventListener('click', () => {
+  if (hotkeyCapturing) return;
+  hotkeyCapturing = true;
+  hk.classList.add('capturing');
+  hk.innerHTML = '<span class="kc-note">조합키를 누르세요…</span>';
+  renderHotkey();
+});
 hk.addEventListener('blur', stopHotkeyCapture);
 hk.addEventListener('keydown', (e) => {
   if (!hotkeyCapturing) return;
   e.preventDefault();
   if (e.key === 'Escape') return stopHotkeyCapture();
-  if (e.key === 'Backspace') { S.settings.hotkey = ''; saveSettings(); return stopHotkeyCapture(); }
+  if (e.key === 'Backspace') { S.settings.hotkey = ''; saveSettings(); renderDock(); return stopHotkeyCapture(); }
   const mods = [];
   if (e.ctrlKey) mods.push('Ctrl');
   if (e.altKey) mods.push('Alt');
@@ -1786,8 +1849,9 @@ hk.addEventListener('keydown', (e) => {
   else if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
   else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
   else if (['Space', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Pause'].includes(e.code)) key = e.code;
-  if (!key) return;
-  if (!mods.length && !/^F\d/.test(key)) { hk.value = 'Ctrl·Alt·Shift 와 함께 눌러 주세요'; return; }
+  // 조합키만 누른 동안은 누른 것을 보여 준다
+  if (!key) { if (mods.length) hk.innerHTML = keycaps([...mods, '…']); return; }
+  if (!mods.length && !/^F\d/.test(key)) { hk.innerHTML = '<span class="kc-note">조합키를 누르세요…</span>'; renderHotkey('Ctrl · Alt · Shift 와 함께 눌러 주세요'); return; }
   const prev = S.settings.hotkey;
   S.settings.hotkey = [...mods, key].join('+');
   stopHotkeyCapture();
@@ -1801,6 +1865,7 @@ hk.addEventListener('keydown', (e) => {
       renderDock();
       toast(String(err), 'error');
     });
+  renderDock();
 });
 
 $('#btn-github').addEventListener('click', () => call('open_url', { url: 'https://github.com/jeiel85/badasugi' }));

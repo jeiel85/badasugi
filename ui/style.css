@@ -233,10 +233,62 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .h-live { font-size: 10.5px; font-weight: 700; color: var(--rec); flex: none; }
 
 /* 설정 */
-.settings section { padding: 14px 4px 16px; border-bottom: 1px solid var(--line); }
-.settings section:last-child { border-bottom: 0; }
-.settings h4 { margin: 0 0 10px; font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: .02em; }
-.desc { font-size: 12px; color: var(--muted); margin: 8px 0 10px; line-height: 1.6; }
+/* 분류 탭 — 패널 머리 바로 아래, 밑줄로 지금 탭 표시 (엔진 · 테마 같은 선택 칸과 헷갈리지 않게) */
+#panel-settings .panel-head { border-bottom: 0; height: 48px; }
+.set-tabs { display: flex; padding: 0 10px; border-bottom: 1px solid var(--line); flex: none; }
+.set-tabs button { flex: 1; padding: 8px 0 9px; font-size: 13px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s, border-color .15s; }
+.set-tabs button:hover { color: var(--text-2); }
+.set-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.set-tabs button:focus-visible { outline: none; color: var(--text); background: var(--accent-soft); border-radius: 8px 8px 0 0; }
+.settings { padding-top: 4px; }
+.settings section { padding: 16px 2px 2px; }
+.settings h4 { margin: 0 0 8px 2px; font-size: 13px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
+.sec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.sec-head h4 { margin: 0 0 0 2px; }
+.sec-head .btn.ghost { margin: 0; }
+.desc { font-size: 12px; color: var(--muted); margin: 8px 2px 10px; line-height: 1.6; }
+
+/* 항목 묶음 — 둥근 카드 안에 줄을 나눠 담는다 */
+.set-group { margin-top: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.set-group > .row, .set-group > .field, .set-group > .voice-list { margin: 0; padding: 11px 13px; }
+.set-group > * + * { border-top: 1px solid var(--line); }
+.set-group .field > span { color: var(--text); font-size: 13px; }
+.set-group .field input:not([type=range]), .set-group .field select, .set-group .field textarea { background: var(--bg); }
+.set-group.off { opacity: .45; pointer-events: none; }
+.row > span { display: flex; flex-direction: column; min-width: 0; }
+.row > span small { display: block; margin: 2px 0 0; font-size: 11.5px; font-weight: 400; line-height: 1.45; color: var(--muted); }
+.row select.compact { width: auto; min-width: 112px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); font-size: 12.5px; outline: none; flex: none; }
+.row select.compact:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* 단축키 — 키캡처럼 보여 주고, 눌러서 새 조합 입력 */
+.keycap { display: inline-flex; align-items: center; gap: 3px; flex: none; min-height: 32px; padding: 4px 6px; border-radius: 9px; background: var(--bg); border: 1px solid var(--line-strong); color: var(--text); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.keycap:hover, .keycap:focus-visible { border-color: var(--accent); outline: none; }
+.keycap kbd { font-size: 12px; font-weight: 700; padding: 2px 7px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line-strong); border-bottom-width: 2px; color: var(--text); }
+.keycap i { font-style: normal; font-size: 11px; color: var(--muted); }
+.keycap .kc-note { padding: 0 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.keycap.capturing { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.keycap.capturing .kc-note { color: var(--accent); }
+#hotkey-desc.warn { color: var(--warn); }
+
+/* 테마 같은 작은 선택 칸 */
+.seg.seg-sm { grid-auto-columns: auto; flex: none; }
+.seg.seg-sm button { padding: 4px 10px; font-size: 12px; }
+
+/* 앱 정보 */
+.settings .about { padding-top: 22px; }
+.about-card { display: flex; align-items: center; gap: 12px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.about-card .logo { width: 34px; height: 34px; flex: none; }
+.about-card .btn.ghost { margin: 0; }
+.about-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.about-text b { font-size: 13.5px; }
+.about-text b span { font-weight: 600; color: var(--text-2); }
+.about-text small { font-size: 11.5px; color: var(--muted); }
+.about-text small.ready { color: var(--ok); font-weight: 600; }
+.about-links { display: flex; align-items: center; gap: 6px; margin-top: 12px; padding: 0 2px; font-size: 12px; color: var(--muted); }
+.about-links > span { margin-right: auto; }
+.about-links .chip-btn { color: var(--text-2); }
+.about-links .chip-btn:hover { color: var(--accent); }
+.about-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 0 2px; }
 .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; padding: 3px; border-radius: 10px; background: var(--sunken); border: 1px solid var(--line); }
 .seg button { padding: 6px 4px; border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--text-2); white-space: nowrap; }
 .seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
@@ -246,9 +298,7 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .field input:not([type=range]), .field select, .field textarea { width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line-strong); background: var(--surface); outline: none; font-size: 13px; transition: border-color .15s, box-shadow .15s; user-select: text; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .field textarea { resize: vertical; min-height: 54px; line-height: 1.5; }
-#opt-hotkey { cursor: pointer; font-weight: 600; text-align: center; }
-#opt-hotkey.capturing { border-color: var(--accent); color: var(--accent); }
-.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: 13px; font-weight: 600; color: var(--text-2); cursor: pointer; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; }
 .switch { appearance: none; width: 36px; height: 21px; border-radius: 999px; background: var(--line-strong); position: relative; cursor: pointer; transition: background .18s; flex: none; margin: 0; }
 .switch::after { content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); transition: transform .18s; }
 .switch:checked { background: var(--accent); }
@@ -280,15 +330,15 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 4px 0 0; }
 .badge.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
 .progress { height: 4px; border-radius: 4px; background: var(--sunken); overflow: hidden; margin-top: 6px; grid-column: 1 / -1; }
 .progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
-.voice-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.voice-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .voice-list:empty { display: none; }
-.voice-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--line); font-size: 12px; font-weight: 600; color: var(--text-2); }
+.voice-empty { font-size: 12px; color: var(--muted); }
+.voice-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--bg); box-shadow: 0 0 0 1px var(--line-strong); font-size: 12px; font-weight: 600; color: var(--text); }
 .voice-chip small { font-weight: 400; color: var(--muted); }
 .voice-chip button { width: 18px; height: 18px; border-radius: 50%; color: var(--muted); font-size: 13px; line-height: 1; }
 .voice-chip button:hover { background: var(--sunken); color: var(--rec); }
-.voice-list .link { font-size: 12px; align-self: center; margin-left: 2px; }
-.model-mini { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--text-2); }
-.about-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+.voice-list .link { font-size: 12px; margin-left: auto; }
+.model-mini { cursor: default; font-weight: 600; }
 
 /* 토스트 — 업데이트 팝업(.modal 45) 위에 둬서 팝업에서 적용이 막히거나 실패한 이유가 가려지지 않게 */
 .toast { position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%); max-width: calc(100% - 32px); padding: 9px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-lg); z-index: 48; animation: toast-in .18s ease-out; white-space: pre-line; text-align: center; }
@@ -417,11 +467,12 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .usage-card { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 8px 10px; }
 .usage-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; margin-bottom: 4px; }
 .usage-head .link { font-size: 11.5px; }
-.usage-row { display: grid; grid-template-columns: 52px 1fr; gap: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.usage-row { display: grid; grid-template-columns: 62px 1fr; gap: 6px; padding: 3px 0; font-size: 12px; color: var(--text-2); line-height: 1.55; }
 .usage-row > span:first-child { color: var(--muted); }
+.usage-row > span:first-child small { display: block; font-size: 10.5px; }
+.usage-row + .usage-row { border-top: 1px dashed var(--line); }
 .usage-row small { color: var(--muted); font-size: 11px; }
 .usage-empty { font-size: 12px; color: var(--muted); }
-.settings h4 .usage-refresh { float: right; font-size: 11.5px; font-weight: 600; letter-spacing: 0; }
 
 /* 업데이트 배너를 조금 더 눈에 띄게 + 눌러서 자세히 */
 .update-bar { padding: 8px 6px 8px 12px; font-size: 13px; }
