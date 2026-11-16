@@ -49,6 +49,19 @@ pub struct SessionDoc {
     /// 회의 후 화자 다시 정리를 반영할 때마다 1씩 오른다. 이보다 오래된 화면 사본이 늦게 저장되면
     /// 화자 배정 · 이름은 지키고 제목 · 글자 · 삭제만 반영한다 (정리 결과를 덮어쓰지 않게).
     pub speaker_rev: u32,
+    /// 회의 후 화자 다시 정리 전(녹음 중에 정해진) 화자 배정 · 이름 — 정리가 마음에 들지 않으면 되돌린다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_refine: Option<SpeakerSnapshot>,
+}
+
+/// 한 시점의 화자 배정 · 이름
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SpeakerSnapshot {
+    /// 화자 번호 → 이름
+    pub speakers: BTreeMap<u32, String>,
+    /// [발화 id, 화자] — 화자가 없는 발화는 뺀다
+    pub assign: Vec<(u64, u32)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +156,7 @@ impl SessionDoc {
         auto_named: &BTreeMap<u32, String>,
         known: &[KnownVoice],
     ) -> Refined {
+        let before = self.speaker_snapshot();
         let smap = self.speaker_map.clone();
         // 자동으로 붙인 이름 중 지금도 그 화자에 그대로 붙어 있는 것만 자동 이름 (사람이 고쳤으면 사람 이름)
         let mut auto: BTreeMap<u32, String> =
@@ -237,11 +251,53 @@ impl SessionDoc {
         // 모든 문장이 최종 화자로 정리됐으므로 합친 기록은 더 필요 없다
         self.speaker_map.clear();
         self.speaker_rev += 1;
+        // 화면에 보이는 것(문장마다 화자 이름)이 바뀌었을 때만 되돌릴 거리를 남긴다
+        let shown = |snap: &SpeakerSnapshot| -> Vec<String> {
+            let by_id: HashMap<u64, u32> = snap.assign.iter().copied().collect();
+            let mut d = SessionDoc {
+                speakers: snap.speakers.clone(),
+                utterances: self.utterances.clone(),
+                ..Default::default()
+            };
+            for u in d.utterances.iter_mut() {
+                u.speaker = by_id.get(&u.id).copied();
+            }
+            d.utterances.iter().map(|u| d.speaker_name(u.speaker)).collect()
+        };
+        let changed = shown(&before) != shown(&self.speaker_snapshot());
+        self.before_refine = changed.then_some(before);
         Refined {
             moved,
             speakers: finals.len(),
             named,
         }
+    }
+
+    /// 지금의 화자 배정 · 이름 (합친 화자는 따라가서)
+    pub fn speaker_snapshot(&self) -> SpeakerSnapshot {
+        SpeakerSnapshot {
+            speakers: self.speakers.clone(),
+            assign: self.utterances.iter().filter_map(|u| Some((u.id, self.resolve(u.speaker)?))).collect(),
+        }
+    }
+
+    /// 회의 후 화자 다시 정리를 되돌린다: 녹음 중에 정해진 화자 배정 · 이름으로. 되돌릴 것이 없으면 false.
+    /// 글자 고친 것 · 지운 문장은 그대로 두고, 정리 뒤에 사람이 바꾼 화자 배정 · 이름은 정리 전 것으로 돌아간다.
+    pub fn undo_refinement(&mut self) -> bool {
+        let Some(snap) = self.before_refine.take() else {
+            return false;
+        };
+        let by_id: HashMap<u64, u32> = snap.assign.iter().copied().collect();
+        for u in self.utterances.iter_mut() {
+            if let Some(&s) = by_id.get(&u.id) {
+                u.speaker = Some(s);
+            }
+        }
+        self.speakers = snap.speakers;
+        self.speaker_map.clear();
+        // 되돌리기 전에 만든 화면 사본이 늦게 저장돼도 되돌린 배정을 덮지 않게
+        self.speaker_rev += 1;
+        true
     }
 
     /// 화자별 목소리: 문장별 목소리를 지금의 화자 배정(합친 화자 포함)대로 모은다.
@@ -603,11 +659,25 @@ impl SessionStore {
             doc.speakers = old.speakers.clone();
             doc.speaker_map = old.speaker_map.clone();
             doc.speaker_rev = old.speaker_rev;
+            doc.before_refine = old.before_refine.clone();
         }
         // 화면 사본은 발화가 도착 순서로 쌓여 있을 수 있다 → 시간 순으로 저장 (MD·TXT·SRT 순서)
         doc.utterances.sort_by(|a, b| a.start_ms.cmp(&b.start_ms).then(a.id.cmp(&b.id)));
         doc.duration_ms = doc.duration_ms.max(old.duration_ms);
         write_doc(&self.dir, &doc)
+    }
+
+    /// 저장된 기록의 화자 다시 정리를 되돌리고 되돌린 기록을 돌려준다 (녹음 중인 기록은 끝난 뒤에)
+    pub fn undo_refinement(&mut self, id: &str) -> Result<SessionDoc> {
+        if self.current.as_ref().is_some_and(|c| c.id == id) {
+            return Err(anyhow!("녹음이 끝난 뒤에 되돌릴 수 있어요"));
+        }
+        let mut doc = self.load(id)?;
+        if !doc.undo_refinement() {
+            return Err(anyhow!("되돌릴 화자 정리가 없어요"));
+        }
+        write_doc(&self.dir, &doc)?;
+        Ok(doc)
     }
 
     /// 발화를 모두 지운 경우에도 저장 (flush 는 빈 기록을 건너뛴다)
@@ -890,6 +960,63 @@ mod tests {
         assert_eq!(saved.utterances[0].text, "또 고침");
         assert_eq!(saved.speaker_rev, 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refinement_can_be_undone_back_to_the_live_speakers() {
+        let dir = std::env::temp_dir().join(format!("bd-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-16_135933".into();
+        // 녹음 중: 다섯 명, 넷에 이름 · 4번은 사람이 2번에 합쳐 둠
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2), u(3, 15000, 3), u(4, 20000, 2), u(5, 25000, 0)];
+        d.speaker_map.insert(4, 2);
+        for (k, n) in [(0, "이낙원 실장님"), (1, "가"), (2, "이도현 매니저"), (3, "나")] {
+            d.speakers.insert(k, n.into());
+        }
+        let screen = d.clone();
+        store.begin(d);
+        // 다시 정리가 모두 둘로 합쳐 버림
+        let labels = [[0, 0, 2], [1, 1, 0], [2, 2, 2], [3, 3, 0], [4, 4, 2], [5, 0, 0]];
+        store.current.as_mut().unwrap().apply_refinement(&labels, &[], &BTreeMap::new(), &[]);
+        store.flush().unwrap();
+        store.current = None;
+        let refined = store.load("2026-11-16_135933").unwrap();
+        assert_eq!(refined.speakers.len(), 2);
+        assert!(refined.before_refine.is_some());
+        // 정리 전 화면 사본이 늦게 저장돼도 되돌릴 거리는 남는다
+        let mut late = screen.clone();
+        late.utterances[1].text = "고친 글자".into();
+        store.save_doc(late).unwrap();
+        assert!(store.load("2026-11-16_135933").unwrap().before_refine.is_some());
+
+        let back = store.undo_refinement("2026-11-16_135933").unwrap();
+        assert_eq!(
+            back.utterances.iter().map(|u| u.speaker).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2), Some(3), Some(2), Some(0)]
+        );
+        assert_eq!(back.speakers, screen.speakers);
+        assert_eq!(back.utterances[1].text, "고친 글자");
+        assert!(back.before_refine.is_none());
+        assert_eq!(back.speaker_rev, refined.speaker_rev + 1);
+        // 되돌리기 전에 들고 있던 화면 사본(정리된 것)이 늦게 저장돼도 되돌린 배정을 덮지 않는다
+        store.save_doc(refined).unwrap();
+        let saved = store.load("2026-11-16_135933").unwrap();
+        assert_eq!(saved.speakers, screen.speakers);
+        assert_eq!(saved.utterances[3].speaker, Some(3));
+        assert!(store.undo_refinement("2026-11-16_135933").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_to_undo_when_refinement_changed_nothing() {
+        let mut d = SessionDoc::new("로컬".into());
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 1)];
+        d.speakers.insert(1, "박 대리".into());
+        d.apply_refinement(&[[0, 0, 0], [1, 1, 1]], &[], &BTreeMap::new(), &[]);
+        assert!(d.before_refine.is_none());
+        assert!(!d.undo_refinement());
     }
 
     #[test]

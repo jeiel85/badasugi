@@ -6,7 +6,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const T = window.__TAURI__;
 // 기록을 읽고 쓰는 명령은 앱이 작업 스레드에서 처리한다 — 보낸 순서대로 끝나도록 하나씩 보낸다
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
-const ORDERED_CMDS = new Set(['save_session', 'load_session', 'delete_session', 'export_session', 'session_text', 'session_audio']);
+const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약은 몇 분 걸릴 수 있다)
 const AFTER_CMDS = new Set(['summarize']);
 let orderedChain = Promise.resolve();
@@ -309,9 +309,13 @@ function renderMeta() {
   if (S.live) for (const p of S.pending.values()) if (p.speaker != null) spk.add(resolveSpk(d, p.speaker));
   const box = $('#speakers');
   if (box.querySelector('input')) return;
+  // 회의 후 화자 다시 정리가 화자를 바꿨으면, 녹음 중에 정해진 화자로 되돌릴 수 있다
+  const undo = d.beforeRefine && !(S.live && S.rec !== 'idle')
+    ? '<button class="link spk-undo" id="btn-undo-refine" title="회의가 끝난 뒤 다시 정리하기 전, 녹음 중에 정해진 화자 배정과 이름으로 돌아가요">화자 정리 되돌리기</button>'
+    : '';
   box.innerHTML = [...spk].sort((a, b) => a - b)
     .map((s) => `<button class="spk-chip" data-spk="${s}" style="--c:${spkColor(s)}" title="이름 바꾸기 · 다른 화자와 합치기"><i></i>${esc(speakerName(d, s))}</button>`)
-    .join('');
+    .join('') + undo;
 }
 
 // 긴 회의는 구간으로 나눠 정리한다 → "긴 회의라 나눠서 정리하는 중… (2/5)"
@@ -648,7 +652,7 @@ function onEvent(e) {
       const parts = [];
       if (e.moved) parts.push(`문장 ${e.moved}개의 화자를 바로잡았어요`);
       if (e.named) parts.push(`목소리로 ${e.named}명의 이름을 붙였어요`);
-      S.refineMsg = parts.length ? `회의 전체를 다시 듣고 ${parts.join(' · ')}` : '';
+      S.refineMsg = parts.length ? `회의 전체를 다시 듣고 ${parts.join(' · ')}\n마음에 들지 않으면 화자 옆 '화자 정리 되돌리기'를 눌러 주세요` : '';
       const id = S.liveDoc?.id;
       if (id) {
         api.invoke('load_session', { id }).then((fresh) => {
@@ -859,9 +863,28 @@ $('#pop-spk').addEventListener('click', (e) => {
   scheduleRender();
 });
 $('#speakers').addEventListener('click', (e) => {
+  if (e.target.closest('#btn-undo-refine')) return undoRefine();
   const c = e.target.closest('.spk-chip');
   if (c && !c.querySelector('input')) speakerMenu(c, c.dataset.spk, null);
 });
+async function undoRefine() {
+  const d = doc();
+  if (!d?.beforeRefine) return;
+  const ok = await api.ask('회의가 끝난 뒤 다시 정리한 화자를 되돌릴까요?\n녹음 중에 정해진 화자 배정과 이름으로 돌아가요. 고친 글자는 그대로예요.', { title: '받아쓰기', kind: 'info' });
+  if (!ok) return;
+  persistDoc.flush();
+  try {
+    const fresh = await api.invoke('undo_refinement', { id: d.id });
+    if (S.live && S.liveDoc?.id === d.id) S.liveDoc = fresh;
+    else if (S.viewDoc?.id === d.id) S.viewDoc = fresh;
+    invalidateTranscript();
+    $('#speakers').innerHTML = '';
+    scheduleRender();
+    toast('녹음 중에 정해진 화자로 되돌렸어요');
+  } catch (err) {
+    toast(String(err), 'error');
+  }
+}
 $('#transcript').addEventListener('click', (e) => {
   const n = e.target.closest('.g-name');
   if (n) speakerMenu(n, n.dataset.spk, n.dataset.ids || '');
@@ -2060,6 +2083,8 @@ function demoDoc() {
     utterances: lines.map(([s, e, spk, text], i) => ({ id: i, startMs: s, endMs: e, speaker: spk, text, latencyMs: 1400 + ((i * 523) % 1700) })),
     summary: '### 한 줄 요약\n다음 달 15일 앱 출시를 확정하고 목요일에 최종 점검한다.\n\n### 결정 사항\n- 출시일 **15일** 확정, 목요일 최종 점검\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일',
     audioFile: null,
+    // 회의 후 다시 정리 전 (화면 미리보기에서 '화자 정리 되돌리기' 버튼을 보이게)
+    beforeRefine: { speakers: { 0: '김 팀장', 1: '이 개발', 2: '박 디자인', 3: '최 기획' }, assign: lines.map((l, i) => [i, i === 3 ? 3 : l[2]]) },
   };
 }
 
@@ -2155,7 +2180,12 @@ function createMock() {
       if (cmd === 'forget_all_voices') { mockVoices = []; return; }
       if (cmd === 'set_mini') { st.settings.miniMode = args.mini; handlers['bd://mini'] && handlers['bd://mini']({ payload: args.mini }); return; }
       if (cmd === 'list_sessions') return mockSessions();
-      if (cmd === 'load_session') { const m = mockSessions().find((x) => x.id === args.id); return { ...demoDoc(), ...(m && { id: m.id, title: m.title, startedAt: m.startedAt }) }; }
+      if (cmd === 'load_session' || cmd === 'undo_refinement') {
+        const m = mockSessions().find((x) => x.id === args.id);
+        const d = { ...demoDoc(), ...(m && { id: m.id, title: m.title, startedAt: m.startedAt }) };
+        if (cmd === 'undo_refinement') { delete d.beforeRefine; d.speakers = { 0: '김 팀장', 1: '이 개발', 2: '박 디자인', 3: '최 기획' }; d.utterances[3].speaker = 3; }
+        return d;
+      }
       if (cmd === 'session_text') return '데모';
       if (cmd === 'toggle_recording') { const h = handlers['bd://rec']; st.rec = st.rec === 'idle' ? 'recording' : 'idle'; h && h({ payload: st.rec }); return; }
       return null;

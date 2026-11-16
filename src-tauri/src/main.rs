@@ -97,8 +97,8 @@ pub(crate) struct AppState {
     /// 이번 녹음에서 목소리로 자동으로 붙인 이름: 화자 → 이름 (회의가 끝나면 전체를 보고 다시 확인한다).
     /// 사람이 그 화자 이름을 고치면 빠진다.
     auto_named: Mutex<BTreeMap<u32, String>>,
-    /// 지금 녹음에서 사람이 합친 화자를 파이프라인에 알려 주는 손잡이 (정리하는 동안에도)
-    speaker_merges: Mutex<Option<badasugi_core::pipeline::SpeakerMerges>>,
+    /// 지금 녹음에서 사람이 합친 화자 · 이름 붙인 화자를 파이프라인에 알려 주는 손잡이 (정리하는 동안에도)
+    speaker_hints: Mutex<Option<badasugi_core::pipeline::SharedHints>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -584,7 +584,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
 
     match result {
         Ok(p) => {
-            *st.speaker_merges.lock() = Some(p.speaker_merges());
+            *st.speaker_hints.lock() = Some(p.speaker_hints());
             *st.pipeline.lock() = Some(p);
             *st.rec_started.lock() = Some(Instant::now());
             set_rec(app, RecState::Recording);
@@ -760,7 +760,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
         Event::Stopped => {
             // 파일 받아쓰기는 끝까지 가면 저절로 멈춘다
             drop(st.pipeline.lock().take());
-            *st.speaker_merges.lock() = None;
+            *st.speaker_hints.lock() = None;
             st.file_mode.store(false, Ordering::SeqCst);
             {
                 let mut store = st.store.lock();
@@ -1068,19 +1068,33 @@ fn save_session_now(app: &AppHandle, doc: SessionDoc) -> CmdResult<()> {
         store.save_doc(doc).map_err(err)?;
         store.current.as_ref().filter(|c| c.id == id).map(|c| (c.speaker_map.clone(), c.speakers.clone()))
     };
-    let live_merges = live.map(|(merges, names)| {
+    if let Some((merges, names)) = live {
         // 사람이 자동 이름을 고쳤으면 그 화자는 더 이상 자동 이름이 아니다
-        st.auto_named.lock().retain(|l, n| names.get(l) == Some(n));
-        merges
-    });
-    // 녹음 중에 합친 화자는 회의 후 다시 정리에서도 한 화자로 묶이게 파이프라인에 알린다
-    if let Some(map) = live_merges {
-        if let Some(h) = st.speaker_merges.lock().as_ref() {
-            *h.lock() = map;
+        let manual: BTreeMap<u32, String> = {
+            let mut auto = st.auto_named.lock();
+            auto.retain(|l, n| names.get(l) == Some(n));
+            names.into_iter().filter(|(l, n)| !auto.contains_key(l) && voices::is_real_name(n)).collect()
+        };
+        // 녹음 중에 합친 화자 · 사람이 붙인 이름은 회의 후 다시 정리에서도 지키게 파이프라인에 알린다
+        // (합친 화자는 한 화자로 묶고, 이름이 다른 화자끼리는 합치지 않는다)
+        if let Some(h) = st.speaker_hints.lock().as_ref() {
+            *h.lock() = badasugi_core::diarize::SpeakerHints { merges, names: manual };
         }
     }
     sync_session_voices(app, &id);
     Ok(())
+}
+
+/// 회의 후 화자 다시 정리를 되돌린다 (녹음 중에 정해진 화자 배정 · 이름으로) → 되돌린 기록
+#[tauri::command]
+async fn undo_refinement(app: AppHandle, id: String) -> CmdResult<SessionDoc> {
+    off_main(move || {
+        let doc = app.state::<AppState>().store.lock().undo_refinement(&id).map_err(err)?;
+        log::info!("화자 다시 정리를 되돌림: 기록 {id}");
+        sync_session_voices(&app, &id);
+        Ok(doc)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1735,7 +1749,7 @@ fn main() {
                 sleep_paused: AtomicBool::new(false),
                 sleep_notified: AtomicBool::new(false),
                 auto_named: Mutex::new(BTreeMap::new()),
-                speaker_merges: Mutex::new(None),
+                speaker_hints: Mutex::new(None),
             });
             app.manage(Updates::default());
             app.manage(VoiceBook::load(config_dir_for_usage.join("voices.json")));
@@ -1818,6 +1832,7 @@ fn main() {
             session_audio,
             load_session,
             save_session,
+            undo_refinement,
             delete_session,
             export_session,
             session_text,
