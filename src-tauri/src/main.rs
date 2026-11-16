@@ -1418,7 +1418,7 @@ fn on_display_change(app: &AppHandle) {
 fn get_usage(app: AppHandle) -> usage_book::UsageReport {
     let book = app.state::<usage_book::UsageBook>();
     book.save();
-    // 모델을 기록하기 전(v0.4.5 까지) 사용분은 지금 설정한 모델 단가로 셈한다
+    // 모델을 기록하기 전(v0.4.6 까지) 사용분은 지금 설정한 모델 단가로 셈한다
     let s = app.state::<AppState>().settings.lock().clone();
     let legacy = |provider: &str, u: usage_book::Use| -> Option<String> {
         let m = match (u, provider) {

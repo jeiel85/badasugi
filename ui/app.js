@@ -1808,7 +1808,7 @@ function costNotes(id, t, c) {
   if (id === 'groq' && billed > (t?.sttSecs || 0) * 1.05 + 1) {
     out.push(`Groq 는 10초보다 짧은 음성 인식 요청도 10초로 매겨, 이번 달은 ${minutes(billed)}어치로 셈했어요.`);
   }
-  if (c?.estimated) out.push('모델을 기록하기 전(v0.4.5까지) 사용분은 지금 설정한 모델 단가로 셈했어요.');
+  if (c?.estimated) out.push('모델을 기록하기 전(v0.4.6까지) 사용분은 지금 설정한 모델 단가로 셈했어요.');
   if (c?.unpriced?.length) out.push(`단가를 몰라 금액에서 뺐어요: ${c.unpriced.join(', ')}`);
   return out;
 }
