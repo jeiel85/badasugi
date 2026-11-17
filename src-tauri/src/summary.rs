@@ -18,15 +18,33 @@ use serde_json::{json, Value};
 use crate::session::SessionDoc;
 use crate::settings::{get_key, SummarySettings};
 
-const SYSTEM: &str = "당신은 한국 회사의 회의록을 정리하는 비서입니다. \
+/// "남은 질문" 기준. 꼼꼼한 모델일수록 다른 데서 결론 난 것 · 스쳐 간 이야기 · 음성 인식 잡음까지
+/// "확인이 필요하다"며 끌어올려(67분 인수인계 회의에서 8개, 대부분 확인할 필요가 없었다) 좁혀 둔다
+macro_rules! open_questions_rule {
+    () => {
+        "\"남은 질문\"에는 회의에서 누군가 분명히 묻거나 문제로 꺼냈는데 회의가 끝날 때까지 답이나 방향이 나오지 않아, \
+회의 뒤에 누군가 따로 챙겨야 하는 것만 적으세요. 다음은 넣지 마세요.\n\
+- 회의 중 어디에서든 답이 나왔거나 방향이 정해진 것, 결정 사항 · 할 일에 이미 담긴 것\n\
+- 현황 설명이나 의견 · 제안이 지나가듯 나오고 아무도 되묻거나 문제 삼지 않은 것\n\
+- 회의에서 묻지 않았는데 정리하면서 궁금해지거나 정해지지 않은 것처럼 보이는 것\n\
+- 음성 인식이 불분명해서 생긴 의문 (잘못 들린 말, 누가 말했는지, 발언의 정확한 뜻)\n\
+넣을지 애매하면 빼세요. 남은 질문은 보통 0~3개이고, 없으면 \"없음\"이라고 쓰세요.\n\n"
+    };
+}
+
+const SYSTEM: &str = concat!(
+    "당신은 한국 회사의 회의록을 정리하는 비서입니다. \
 녹취록은 음성 인식 결과라서 오탈자와 잘못 들린 단어가 있을 수 있으니 문맥으로 바로잡아 이해하세요. \
-녹취록에 없는 내용은 지어내지 마세요. 결과는 한국어 마크다운으로, 아래 형식만 출력하세요.\n\n\
+녹취록에 없는 내용은 지어내지 마세요.\n\n",
+    open_questions_rule!(),
+    "결과는 한국어 마크다운으로, 아래 형식만 출력하세요.\n\n\
 ### 제목\n(회의 주제를 20자 이내 명사형으로)\n\n\
 ### 한 줄 요약\n(회의 전체를 한 문장으로)\n\n\
 ### 주요 논의\n- (핵심 논의를 3~7개 불릿으로, 누가 어떤 의견을 냈는지 화자 이름 포함)\n\n\
 ### 결정 사항\n- (확정된 것만. 없으면 \"없음\")\n\n\
 ### 할 일\n- [ ] (할 일) — 담당: (화자) / 기한: (언급된 경우)\n\n\
-### 남은 질문\n- (결론이 나지 않았거나 확인이 필요한 것. 없으면 \"없음\")";
+### 남은 질문\n- (회의가 끝날 때까지 답이 나오지 않아 따로 챙겨야 할 것만. 없으면 \"없음\")"
+);
 
 const GROQ_URL: &str = "https://api.groq.com/openai/v1";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
@@ -35,15 +53,21 @@ const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2026-10-21";
 
 /// 긴 회의: 구간 하나를 나중에 합칠 메모로 정리하라는 지시
-const PART_SYSTEM: &str = "당신은 한국 회사의 회의록을 정리하는 비서입니다. \
+const PART_SYSTEM: &str = concat!(
+    "당신은 한국 회사의 회의록을 정리하는 비서입니다. \
 회의가 길어서 녹취록을 여러 구간으로 나눠 받고 있습니다. 받은 구간의 내용을 나중에 회의 전체 회의록으로 합칠 수 있게 빠짐없이 메모하세요. \
 녹취록은 음성 인식 결과라서 오탈자와 잘못 들린 단어가 있을 수 있으니 문맥으로 바로잡아 이해하세요. \
-녹취록에 없는 내용은 지어내지 마세요. 숫자 · 날짜 · 사람 이름 · 제품 이름은 그대로 옮기세요. \
-결과는 한국어 마크다운으로, 아래 형식만 출력하세요.\n\n\
+녹취록에 없는 내용은 지어내지 마세요. 숫자 · 날짜 · 사람 이름 · 제품 이름은 그대로 옮기세요.\n\n",
+    open_questions_rule!(),
+    "결과는 한국어 마크다운으로, 아래 형식만 출력하세요.\n\n\
 ### 논의\n- (누가 어떤 의견을 냈는지 화자 이름 포함)\n\n\
 ### 결정 사항\n- (확정된 것만. 없으면 \"없음\")\n\n\
 ### 할 일\n- [ ] (할 일) — 담당: (화자) / 기한: (언급된 경우)\n\n\
-### 남은 질문\n- (없으면 \"없음\")";
+### 남은 질문\n- (이 구간이 끝날 때까지 답이 나오지 않은 것만. 없으면 \"없음\")"
+);
+
+/// 구간 메모를 합칠 때: 앞 구간의 남은 질문이 뒤 구간에서 풀렸으면 빼게 한다
+const DROP_RESOLVED: &str = "어느 구간 메모의 남은 질문이든 다른 구간에서 답이 나왔거나 방향이 정해졌으면(결정 사항 · 할 일에 담겼으면) 남은 질문에서 빼세요.";
 
 /// 한 번에 보낼 녹취록 글자 수 (제공자별). 넘으면 구간으로 나눠 메모한 뒤 합친다
 fn chunk_budget(provider: &str) -> usize {
@@ -420,7 +444,7 @@ impl Run<'_> {
         if g.len() < 2 {
             return Ok(g.to_vec());
         }
-        match self.ask(PART_SYSTEM, &format!("{head}{MERGE_ASK}\n\n{}", render_notes(g))) {
+        match self.ask(PART_SYSTEM, &format!("{head}{MERGE_ASK} {DROP_RESOLVED}\n\n{}", render_notes(g))) {
             Ok(text) => {
                 self.done += 1;
                 self.report(0);
@@ -498,7 +522,7 @@ fn run_summary(
         if joined.chars().count() <= budget || round >= 3 {
             let user = format!(
                 "{head}이 회의는 길어서 녹취록을 구간별로 먼저 메모했습니다. 아래 구간 메모를 모두 합쳐 회의 전체 회의록을 만드세요. \
-                 같은 내용은 하나로 합치고, 결정 사항과 할 일은 빠뜨리지 마세요.\n\n{joined}"
+                 같은 내용은 하나로 합치고, 결정 사항과 할 일은 빠뜨리지 마세요. {DROP_RESOLVED}\n\n{joined}"
             );
             match r.ask(SYSTEM, &user) {
                 Ok(out) => {
@@ -1346,6 +1370,7 @@ mod tests {
         let last = calls.last().unwrap();
         assert!(!last.0, "마지막은 최종 회의록 형식");
         assert!(last.1.contains("## 구간 1 (00:00~") && last.1.contains(&format!("메모{parts}")));
+        assert!(last.1.contains(DROP_RESOLVED), "다른 구간에서 풀린 남은 질문은 빼라고");
         assert_eq!(out, format!("메모{}", parts + 1));
         let seen = seen.borrow();
         assert_eq!(seen.last().map(|p| (p.done, p.total)), Some((parts + 1, parts + 1)));
