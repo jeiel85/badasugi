@@ -1235,6 +1235,19 @@
     const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+    // 화면 높이의 가로 띠(위에서 top, 아래에서 bottom 비율을 뺀 곳)에 걸친 요소를 알린다.
+    // rootMargin 의 % 는 스펙상 루트 '너비' 기준이라 넓은 화면에선 띠가 사라진다 → 높이로 픽셀을 셈하고 높이가 바뀌면 다시 만든다
+    const band = (targets, top, bottom, cb) => {
+      let io, h = 0, tm;
+      const make = () => {
+        if (innerHeight === h) return;
+        h = innerHeight; io?.disconnect();
+        io = new IntersectionObserver(cb, { rootMargin: `-${Math.round(h * top)}px 0px -${Math.round(h * bottom)}px 0px` });
+        targets.forEach((t) => io.observe(t));
+      };
+      make();
+      addEventListener('resize', () => { clearTimeout(tm); tm = setTimeout(make, 150); });
+    };
     // 화면에 보일 때만 돌리는 반복 연출
     function gate(el) {
       let vis = false, waiters = [];
@@ -1248,12 +1261,11 @@
     const onScroll = () => nav.classList.toggle('scrolled', scrollY > 8);
     addEventListener('scroll', onScroll, { passive: true }); onScroll();
     const linkMap = new Map($$('#links a').map((a) => [a.getAttribute('href').slice(1), a]));
-    const navIo = new IntersectionObserver((es) => es.forEach((e) => {
+    band($$('main section[id]'), 0.45, 0.5, (es) => es.forEach((e) => {
       const a = linkMap.get(e.target.id); if (!a) return;
       if (e.isIntersecting) { linkMap.forEach((x) => x.classList.remove('on')); a.classList.add('on'); }
       else a.classList.remove('on');
-    }), { rootMargin: '-45% 0px -50% 0px' });
-    $$('main section[id]').forEach((s) => navIo.observe(s));
+    }));
 
     /* 최신 릴리스: 버전 · 설치 파일 바로 받기 · 크기 */
     fetch('https://api.github.com/repos/jeiel85/badasugi/releases/latest', { headers: { Accept: 'application/vnd.github+json' } })
@@ -1508,8 +1520,7 @@
         $$('.step').forEach((s) => s.classList.toggle('on', +s.dataset.step === n));
       };
       set(1); $$('.step')[0].classList.add('on');
-      const sio = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) set(+e.target.dataset.step); }), { rootMargin: '-58% 0px -38% 0px' });
-      $$('.step').forEach((s) => sio.observe(s));
+      band($$('.step'), 0.58, 0.38, (es) => es.forEach((e) => { if (e.isIntersecting) set(+e.target.dataset.step); }));
       // 시계
       const vt = $('#vis-t'); let ms = 0;
       if (!RM) setInterval(() => { ms = (ms + 37) % 6000; vt.textContent = `00:0${Math.floor(ms / 1000)}.${String(ms % 1000).padStart(3, '0')}`; }, 37);
