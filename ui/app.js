@@ -1784,6 +1784,13 @@ function askSuggestions(d) {
   return out;
 }
 const canAsk = (d) => !!(d && (d.utterances.length || (d.summary || '').trim() || (d.notes || '').trim()));
+// 같은 질문 · 답 (앱이 다시 읽어 준 사본은 객체가 달라 내용으로 본다)
+const sameQa = (x, y) => x.q === y.q && x.at === y.at && x.a === y.a;
+// 화면이 들고 있는 그 회의의 사본들 — 녹음 중인 회의 · 보던 회의 · 묻거나 지울 때 쥐고 있던 것.
+// 앱이 다시 읽어 준 사본으로 바뀌었거나 그 사이 다른 회의로 옮겨 갔어도, 돌아왔을 때 맞게 보이도록 모두 고친다
+function copiesOf(id, ...held) {
+  return [...new Set([...held, S.liveDoc, S.viewDoc].filter((x) => x && x.id === id))];
+}
 function qaHtml(x, i) {
   const meta = [String(x.at || '').slice(11, 16), x.model].filter(Boolean).join(' · ');
   return `<div class="qa" data-i="${i}"><div class="qa-q">${esc(x.q)}</div><div class="qa-a md">${askHtml(x.a)}</div>`
@@ -1877,11 +1884,10 @@ async function askMeeting(question) {
   renderAsk();
   try {
     const item = await api.invoke('ask_meeting', { id: d.id, question: q, token: my.token });
-    // 그 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었으면 지금 사본에 — 다시 읽은 사본에 이 답이 이미 있으면 그대로
-    const cur = doc();
-    const target = cur && cur.id === my.id ? cur : my.doc;
-    const have = (target.qa || []).some((y) => y.q === item.q && y.at === item.at && y.a === item.a);
-    if (!have) target.qa = [...(target.qa || []), item];
+    // 그 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었을 수 있다 → 그 회의의 사본마다, 이미 있으면 그대로
+    for (const t of copiesOf(my.id, my.doc)) {
+      if (!(t.qa || []).some((y) => sameQa(y, item))) t.qa = [...(t.qa || []), item];
+    }
   } catch (e) {
     const msg = String(e);
     if (msg !== ASK_CANCELLED) toast(msg, 'error');
@@ -1936,11 +1942,10 @@ async function deleteQa(d, item) {
   qaDeleting = true;
   try {
     await api.invoke('delete_qa', { id: d.id, item });
-    // 지우는 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었을 수 있다 → 지금 화면의 그 회의 사본에서 내용으로 찾는다
-    const cur = doc();
-    for (const t of new Set([d, cur && cur.id === d.id ? cur : null].filter(Boolean))) {
+    // 지우는 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었을 수 있다 → 그 회의의 사본마다 내용으로 찾는다
+    for (const t of copiesOf(d.id, d)) {
       if (!item) { t.qa = []; continue; }
-      const k = (t.qa || []).findIndex((y) => y.q === item.q && y.at === item.at && y.a === item.a);
+      const k = (t.qa || []).findIndex((y) => sameQa(y, item));
       if (k >= 0) t.qa.splice(k, 1);
     }
   } catch (err) {
