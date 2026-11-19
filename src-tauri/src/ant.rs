@@ -115,8 +115,11 @@ fn registry_path_dirs() -> Vec<PathBuf> {
                 continue;
             }
             if rc == 0 {
-                let s = String::from_utf16_lossy(&buf[..bytes as usize / 2]);
-                dirs.extend(std::env::split_paths(s.trim_end_matches('\0')));
+                // 변수를 펼친 값은 알려 준 길이가 실제보다 길 수 있다(펼치기 전 추정치) — 첫 NUL 까지만 읽는다
+                // (그 뒤는 버퍼에 남은 글자라 마지막 폴더에 쓰레기가 붙었다)
+                let n = (bytes as usize / 2).min(buf.len());
+                let end = buf[..n].iter().position(|&c| c == 0).unwrap_or(n);
+                dirs.extend(std::env::split_paths(&String::from_utf16_lossy(&buf[..end])));
             }
             break;
         }
@@ -164,6 +167,13 @@ mod tests {
         // 시스템 PATH 에는 언제나 Windows 폴더가 있다
         let dirs = registry_path_dirs();
         assert!(dirs.iter().any(|d| d.to_string_lossy().to_lowercase().contains("windows")), "{dirs:?}");
-        assert!(dirs.iter().all(|d| !d.to_string_lossy().contains('%')), "변수가 펼쳐지지 않음: {dirs:?}");
+        for d in &dirs {
+            let s = d.to_string_lossy();
+            assert!(!s.contains('\0'), "NUL 뒤 글자가 붙음: {s:?}");
+            // 정의된 변수만 펼쳐졌는지 본다 — 설치 프로그램이 남긴 정의 안 된 변수(%PyCharm% 등)는 Windows 도 그대로 둔다
+            for var in s.split('%').skip(1).step_by(2).filter(|v| !v.is_empty()) {
+                assert!(std::env::var_os(var).is_none(), "변수가 펼쳐지지 않음: {s}");
+            }
+        }
     }
 }
