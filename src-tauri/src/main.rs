@@ -5,6 +5,7 @@ mod ant;
 mod ask;
 mod logging;
 mod power;
+mod prompts;
 mod session;
 mod settings;
 mod smoke;

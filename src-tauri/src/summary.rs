@@ -15,73 +15,15 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
+use crate::prompts;
 use crate::session::SessionDoc;
 use crate::settings::{get_key, SummarySettings};
-
-/// "남은 질문" 기준. 꼼꼼한 모델일수록 다른 데서 결론 난 것 · 스쳐 간 이야기 · 음성 인식 잡음까지
-/// "확인이 필요하다"며 끌어올려(67분 인수인계 회의에서 8개, 대부분 확인할 필요가 없었다) 좁혀 둔다
-macro_rules! open_questions_rule {
-    () => {
-        "\"남은 질문\"에는 회의에서 누군가 분명히 묻거나 문제로 꺼냈는데 회의가 끝날 때까지 답이나 방향이 나오지 않아, \
-회의 뒤에 누군가 따로 챙겨야 하는 것만 적으세요. 다음은 넣지 마세요.\n\
-- 회의 중 어디에서든 답이 나왔거나 방향이 정해진 것, 결정 사항 · 할 일에 이미 담긴 것\n\
-- 현황 설명이나 의견 · 제안이 지나가듯 나오고 아무도 되묻거나 문제 삼지 않은 것\n\
-- 회의에서 묻지 않았는데 정리하면서 궁금해지거나 정해지지 않은 것처럼 보이는 것\n\
-- 음성 인식이 불분명해서 생긴 의문 (잘못 들린 말, 누가 말했는지, 발언의 정확한 뜻)\n\
-넣을지 애매하면 빼세요. 남은 질문은 보통 0~3개이고, 없으면 \"없음\"이라고 쓰세요.\n\n"
-    };
-}
-
-/// 회의록 문체 — 서술형 문장이 아니라 개조식으로 가볍게. 회의록을 받아 본 사람의 피드백(2026-11-19):
-/// 불릿마다 "~은 ~라고 말했습니다. 또 ~했습니다"처럼 두세 문장씩 풀어 써서 무겁고 읽기 느리다
-macro_rules! style_rule {
-    () => {
-        "문체는 서술형 문장이 아니라 개조식으로, 가볍게 쓰세요.\n\
-- \"~했습니다\" · \"~라고 말했습니다\" · \"~입니다\" 같은 서술형으로 끝내지 말고, 명사형이나 \"~함\" · \"~필요\" · \"~예정\"처럼 짧게 끝내세요.\n\
-- 불릿 하나에는 요점 하나만, 한 줄(40자 안팎)로 쓰세요. 배경 · 이유는 꼭 필요할 때만 \"— 이유\"처럼 짧게 붙이세요.\n\
-- 누가 한 말인지는 문장으로 풀지 말고 \"김 팀장:\"처럼 화자 이름을 앞에 붙이세요.\n\
-- 같은 내용을 여러 곳에 되풀이하지 마세요.\n\n"
-    };
-}
-
-const SYSTEM: &str = concat!(
-    "당신은 한국 회사의 회의록을 정리하는 비서입니다. \
-녹취록은 음성 인식 결과라서 오탈자와 잘못 들린 단어가 있을 수 있으니 문맥으로 바로잡아 이해하세요. \
-녹취록에 없는 내용은 지어내지 마세요.\n\n",
-    style_rule!(),
-    open_questions_rule!(),
-    "결과는 한국어 마크다운으로, 아래 형식만 출력하세요.\n\n\
-### 제목\n(회의 주제를 20자 이내 명사형으로)\n\n\
-### 한 줄 요약\n(회의 전체를 개조식 한 줄로, 60자 이내)\n\n\
-### 주요 논의\n- **(주제)**\n  - (요점 — 누가 한 말인지 중요하면 화자 이름을 앞에)\n\
-(주제는 3~7개, 주제마다 하위 불릿 1~4개)\n\n\
-### 결정 사항\n- (확정된 것만, 한 줄씩. 없으면 \"없음\")\n\n\
-### 할 일\n- [ ] (할 일) — 담당: (화자) / 기한: (언급된 경우)\n\n\
-### 남은 질문\n- (회의가 끝날 때까지 답이 나오지 않아 따로 챙겨야 할 것만, 한 줄씩. 없으면 \"없음\")"
-);
 
 const GROQ_URL: &str = "https://api.groq.com/openai/v1";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 const OPENAI_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2026-10-21";
-
-/// 긴 회의: 구간 하나를 나중에 합칠 메모로 정리하라는 지시
-const PART_SYSTEM: &str = concat!(
-    "당신은 한국 회사의 회의록을 정리하는 비서입니다. \
-회의가 길어서 녹취록을 여러 구간으로 나눠 받고 있습니다. 받은 구간의 내용을 나중에 회의 전체 회의록으로 합칠 수 있게 빠짐없이 메모하세요. \
-녹취록은 음성 인식 결과라서 오탈자와 잘못 들린 단어가 있을 수 있으니 문맥으로 바로잡아 이해하세요. \
-녹취록에 없는 내용은 지어내지 마세요. 숫자 · 날짜 · 사람 이름 · 제품 이름은 그대로 옮기세요.\n\n",
-    open_questions_rule!(),
-    "결과는 한국어 마크다운으로, 아래 형식만 출력하세요.\n\n\
-### 논의\n- (누가 어떤 의견을 냈는지 화자 이름 포함)\n\n\
-### 결정 사항\n- (확정된 것만. 없으면 \"없음\")\n\n\
-### 할 일\n- [ ] (할 일) — 담당: (화자) / 기한: (언급된 경우)\n\n\
-### 남은 질문\n- (이 구간이 끝날 때까지 답이 나오지 않은 것만. 없으면 \"없음\")"
-);
-
-/// 구간 메모를 합칠 때: 앞 구간의 남은 질문이 뒤 구간에서 풀렸으면 빼게 한다
-const DROP_RESOLVED: &str = "어느 구간 메모의 남은 질문이든 다른 구간에서 답이 나왔거나 방향이 정해졌으면(결정 사항 · 할 일에 담겼으면) 남은 질문에서 빼세요.";
 
 /// 한 번에 보낼 녹취록 글자 수 (제공자별). 넘으면 구간으로 나눠 메모한 뒤 합친다
 pub(crate) fn chunk_budget(provider: &str) -> usize {
@@ -123,7 +65,7 @@ const REPORT_EVERY: Duration = Duration::from_millis(200);
 /// 답 형식의 섹션: (이름, 답 전체에서 차지하는 몫, 보통 길이(글자))
 type Sections = &'static [(&'static str, f32, f32)];
 
-/// [`SYSTEM`] 형식 — 몫은 실제 회의록에서 섹션마다 차지하는 대략의 비율
+/// [`prompts::summary`] 형식 — 몫은 실제 회의록에서 섹션마다 차지하는 대략의 비율
 const FINAL_SECTIONS: Sections = &[
     ("제목", 0.02, 20.0),
     ("한 줄 요약", 0.05, 50.0),
@@ -133,7 +75,7 @@ const FINAL_SECTIONS: Sections = &[
     ("남은 질문", 0.09, 100.0),
 ];
 
-/// [`PART_SYSTEM`] 형식 (구간 메모 · 메모 합치기 · 줄이기)
+/// [`prompts::summary_part`] 형식 (구간 메모 · 메모 합치기 · 줄이기)
 const PART_SECTIONS: Sections = &[
     ("논의", 0.55, 600.0),
     ("결정 사항", 0.15, 200.0),
@@ -407,11 +349,6 @@ fn pack(notes: &[Note], budget: usize) -> Vec<std::ops::Range<usize>> {
     out
 }
 
-const MERGE_ASK: &str = "다음은 이 회의 여러 구간의 메모입니다. 하나의 메모로 합치세요. \
-같은 내용은 하나로 합치고, 결정 사항과 할 일은 빠뜨리지 마세요.";
-const SHRINK_ASK: &str = "다음은 이 회의 한 구간의 메모입니다. 결정 사항 · 할 일 · 숫자 · 이름은 그대로 두고, \
-나머지 논의는 핵심만 남겨 절반 길이로 줄이세요.";
-
 /// 요청 하나 보내기: (지시, 내용, 받는 대로 글 조각을 넘길 곳) → 결과
 type Ask<'a> = dyn FnMut(&str, &str, &mut dyn FnMut(&str)) -> Result<Reply> + 'a;
 
@@ -439,7 +376,7 @@ impl Run<'_> {
     /// 한도 초과(429)면 알려 준 시간만큼 기다렸다 다시 (몇 번까지만).
     /// 답을 받는 동안 어느 섹션을 쓰는지로 진행을 알린다
     fn ask(&mut self, system: &str, user: &str) -> Result<String> {
-        let sections = if system == SYSTEM { FINAL_SECTIONS } else { PART_SECTIONS };
+        let sections = if system == prompts::summary() { FINAL_SECTIONS } else { PART_SECTIONS };
         let mut tries = 0;
         loop {
             let (done, total, progress) = (self.done, self.total, self.progress);
@@ -477,7 +414,7 @@ impl Run<'_> {
         if g.len() < 2 {
             return Ok(g.to_vec());
         }
-        match self.ask(PART_SYSTEM, &format!("{head}{MERGE_ASK} {DROP_RESOLVED}\n\n{}", render_notes(g))) {
+        match self.ask(prompts::summary_part(), &format!("{head}{}\n\n{}", prompts::merge_notes(), render_notes(g))) {
             Ok(text) => {
                 self.done += 1;
                 self.report(0);
@@ -509,7 +446,7 @@ fn run_summary(
     let mut r = Run { call, progress, on_reply, done: 0, total: 1 };
     let len = text.chars().count();
     if len <= budget {
-        match r.ask(SYSTEM, &format!("{head}녹취록:\n{text}")) {
+        match r.ask(prompts::summary(), &format!("{head}녹취록:\n{text}")) {
             Ok(out) => return Ok(out),
             // 생각보다 컸다 (토큰이 글자보다 많은 모델 등) — 나눠서
             Err(e) if too_large(&e) && len > MIN_CHUNK * 2 => budget = len / 2 + 1,
@@ -530,7 +467,7 @@ fn run_summary(
             notes.len() + 1,
             notes.len() + 1 + parts.len()
         );
-        match r.ask(PART_SYSTEM, &user) {
+        match r.ask(prompts::summary_part(), &user) {
             Ok(text) => {
                 notes.push(Note { from, to, text });
                 r.done += 1;
@@ -553,11 +490,8 @@ fn run_summary(
     for round in 0.. {
         let joined = render_notes(&notes);
         if joined.chars().count() <= budget || round >= 3 {
-            let user = format!(
-                "{head}이 회의는 길어서 녹취록을 구간별로 먼저 메모했습니다. 아래 구간 메모를 모두 합쳐 회의 전체 회의록을 만드세요. \
-                 같은 내용은 하나로 합치고, 결정 사항과 할 일은 빠뜨리지 마세요. {DROP_RESOLVED}\n\n{joined}"
-            );
-            match r.ask(SYSTEM, &user) {
+            let user = format!("{head}{}\n\n{joined}", prompts::merge_final());
+            match r.ask(prompts::summary(), &user) {
                 Ok(out) => {
                     r.done = r.total;
                     r.report(0);
@@ -581,8 +515,8 @@ fn run_summary(
             r.total += notes.len();
             r.report(0);
             for i in 0..notes.len() {
-                let user = format!("{head}{SHRINK_ASK}\n\n{}", notes[i].render("구간"));
-                notes[i].text = r.ask(PART_SYSTEM, &user)?;
+                let user = format!("{head}{}\n\n{}", prompts::shrink_note(), notes[i].render("구간"));
+                notes[i].text = r.ask(prompts::summary_part(), &user)?;
                 r.done += 1;
                 r.report(0);
             }
@@ -1454,7 +1388,7 @@ mod tests {
     fn short_meeting_is_one_request() {
         let mut sent = Vec::new();
         let mut call = |sys: &str, user: &str, _: &mut dyn FnMut(&str)| {
-            sent.push((sys == SYSTEM, user.to_string()));
+            sent.push((sys == prompts::summary(), user.to_string()));
             Ok(Reply { text: "요약".into(), in_tokens: 10, out_tokens: 5, ..Default::default() })
         };
         let (req, on_reply) = counter();
@@ -1468,7 +1402,7 @@ mod tests {
         let t = transcript(200, 60); // 약 1.5만 글자
         let mut calls = Vec::new();
         let mut call = |sys: &str, user: &str, _: &mut dyn FnMut(&str)| {
-            calls.push((sys == PART_SYSTEM, user.to_string()));
+            calls.push((sys == prompts::summary_part(), user.to_string()));
             Ok(Reply { text: format!("메모{}", calls.len()), in_tokens: 1, out_tokens: 1, ..Default::default() })
         };
         let seen = std::cell::RefCell::new(Vec::new());
@@ -1480,7 +1414,7 @@ mod tests {
         let last = calls.last().unwrap();
         assert!(!last.0, "마지막은 최종 회의록 형식");
         assert!(last.1.contains("## 구간 1 (00:00~") && last.1.contains(&format!("메모{parts}")));
-        assert!(last.1.contains(DROP_RESOLVED), "다른 구간에서 풀린 남은 질문은 빼라고");
+        assert!(last.1.contains(prompts::drop_resolved()), "다른 구간에서 풀린 남은 질문은 빼라고");
         assert_eq!(out, format!("메모{}", parts + 1));
         let seen = seen.borrow();
         assert_eq!(seen.last().map(|p| (p.done, p.total)), Some((parts + 1, parts + 1)));
@@ -1491,7 +1425,7 @@ mod tests {
         let t = transcript(60, 60);
         let mut call = |sys: &str, user: &str, _: &mut dyn FnMut(&str)| {
             // 처음 한 번 보낸 요청(전체)과 큰 구간은 거절
-            if sys == SYSTEM && !user.contains("구간 메모") || user.chars().count() > 1_500 {
+            if sys == prompts::summary() && !user.contains("구간 메모") || user.chars().count() > 1_500 {
                 return Err(too_big());
             }
             Ok(Reply { text: "ok".into(), ..Default::default() })
@@ -1517,7 +1451,7 @@ mod tests {
                 "나".repeat(1_000)
             } else if user.contains("녹취록:") {
                 "가".repeat(2_500)
-            } else if sys == SYSTEM {
+            } else if sys == prompts::summary() {
                 "최종".into()
             } else {
                 "다".repeat(1_500)
@@ -1567,7 +1501,17 @@ mod tests {
         assert_eq!(req.get(), 2, "실패 전에 성공한 두 요청");
     }
 
-    const ANSWER: &str = "### 제목\n출시 일정 회의\n\n### 한 줄 요약\n15일에 출시한다.\n\n### 주요 논의\n- 김 팀장: 일정 확인\n- 이 개발: QA 기간\n\n### 결정 사항\n- 15일 출시\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인\n\n### 남은 질문\n- 없음\n";
+    const ANSWER: &str = "### 제목\n출시 일정 회의\n\n### 한 줄 요약\n15일에 출시한다.\n\n### 주요 논의\n- 일정 확인 (김 팀장)\n- QA 기간 (이 개발)\n\n### 결정 사항\n- 15일 출시\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인\n\n### 남은 질문\n- 없음\n";
+
+    #[test]
+    fn prompts_ask_for_the_sections_progress_follows() {
+        // 진행 막대 · 제목 뽑기는 답의 "### 섹션" 줄을 본다 — prompts/*.md 의 형식과 이름이 같아야 한다
+        for (prompt, sections) in [(prompts::summary(), FINAL_SECTIONS), (prompts::summary_part(), PART_SECTIONS)] {
+            let asked: Vec<&str> = prompt.lines().filter_map(|l| l.strip_prefix("### ")).collect();
+            let known: Vec<&str> = sections.iter().map(|s| s.0).collect();
+            assert_eq!(asked, known);
+        }
+    }
 
     #[test]
     fn writing_follows_the_sections() {
