@@ -152,6 +152,47 @@ fn resolve_with(map: &BTreeMap<u32, u32>, s: Option<u32>) -> Option<u32> {
     Some(s)
 }
 
+/// 기본 화자 이름 "화자 3" → 3 (사람이 붙인 이름이면 None)
+fn default_speaker_no(name: &str) -> Option<u32> {
+    let n = name.strip_prefix("화자 ")?;
+    n.bytes().all(|b| b.is_ascii_digit()).then(|| n.parse().ok()).flatten()
+}
+
+/// 글 속 기본 화자 이름 "화자 3"(또는 "화자3")을 번호표대로 한 번에 바꾼다 (바꾼 이름이 다시 바뀌지 않게).
+/// "발화자 3" · "화자 30" · "화자 3명" 은 그 화자가 아니므로 그대로. 화면(ui/app.js `SPK_DEFAULT_RE`)과 같은 규칙
+fn replace_default_speakers(text: &str, map: &BTreeMap<u32, String>) -> String {
+    const KEY: &str = "화자";
+    if map.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(KEY) {
+        // 앞 글자는 이미 내보낸 글의 끝 (바꿔 넣은 이름이 아니라 원래 글로 본다)
+        let prev = text[..text.len() - rest.len() + i].chars().next_back();
+        out.push_str(&rest[..i]);
+        let after = &rest[i + KEY.len()..];
+        let digits = after.strip_prefix(' ').unwrap_or(after);
+        let len = digits.bytes().take_while(u8::is_ascii_digit).count();
+        let name = (len > 0 && !prev.is_some_and(char::is_alphanumeric) && !digits[len..].starts_with('명'))
+            .then(|| digits[..len].parse::<u32>().ok())
+            .flatten()
+            .and_then(|n| map.get(&n));
+        match name {
+            Some(name) => {
+                out.push_str(name);
+                rest = &digits[len..];
+            }
+            None => {
+                out.push_str(KEY);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn fmt_time(ms: u64) -> String {
     let s = ms / 1000;
     if s >= 3600 {
@@ -566,6 +607,37 @@ impl SessionDoc {
             .filter(|u| u.speaker.is_some() && seen.insert(u.speaker))
             .map(|u| self.speaker_name(u.speaker))
             .collect()
+    }
+
+    /// `then` 기록으로 만든 요약 글의 기본 화자 이름("화자 3")을 지금 이름으로 — 요약하는 동안 사람이
+    /// 이름을 붙이거나 합쳤어도 요약이 옛 이름으로 남지 않게. 문장마다 그때 이름 → 지금 이름을 보고,
+    /// 그 화자 문장의 과반이 간 이름으로 바꾼다 (문단 몇 개만 다른 화자로 옮긴 것은 이름이 바뀐 게 아니다).
+    /// 사람이 붙인 이름은 요약 속 다른 낱말과 겹칠 수 있어 그대로 둔다. 화면(ui/app.js
+    /// `followSpeakerNames`)도 같은 규칙으로 이름을 바꿀 때마다 요약을 고친다.
+    pub fn carry_speaker_names(&self, text: &str, then: &SessionDoc) -> String {
+        let now: HashMap<u64, String> =
+            self.utterances.iter().map(|u| (u.id, self.speaker_name(self.resolve(u.speaker)))).collect();
+        // 그때 기본 이름의 번호 → (그 화자 문장 수, 지금 이름별 문장 수)
+        let mut votes: BTreeMap<u32, (usize, BTreeMap<&str, usize>)> = BTreeMap::new();
+        for u in &then.utterances {
+            let old = then.speaker_name(u.speaker);
+            let (Some(n), Some(new)) = (default_speaker_no(&old), now.get(&u.id)) else {
+                continue;
+            };
+            let v = votes.entry(n).or_default();
+            v.0 += 1;
+            if *new != old {
+                *v.1.entry(new.as_str()).or_default() += 1;
+            }
+        }
+        let map: BTreeMap<u32, String> = votes
+            .into_iter()
+            .filter_map(|(n, (all, to))| {
+                let (name, c) = to.into_iter().max_by_key(|x| x.1)?;
+                (c * 2 > all).then(|| (n, name.to_string()))
+            })
+            .collect();
+        replace_default_speakers(text, &map)
     }
 
     fn speaker_count(&self) -> usize {
@@ -1269,6 +1341,48 @@ mod tests {
             embedding: e.iter().map(|x| x / n).collect(),
             dur_ms: 4000,
         }
+    }
+
+    #[test]
+    fn default_speaker_names_in_text_are_replaced_at_once() {
+        let map: BTreeMap<u32, String> = [(1, "화자 2".to_string()), (2, "김 팀장".to_string())].into();
+        let r = |t: &str| replace_default_speakers(t, &map);
+        assert_eq!(r("- 일정 확인 (화자 2)"), "- 일정 확인 (김 팀장)");
+        assert_eq!(r("화자 2: 일정 · 담당: 화자2"), "김 팀장: 일정 · 담당: 김 팀장");
+        // 한 번에 바꾸므로 "화자 1" → "화자 2" 가 다시 "김 팀장" 이 되지 않는다
+        assert_eq!(r("화자 1, 화자 2"), "화자 2, 김 팀장");
+        // 다른 화자 · 다른 낱말은 그대로
+        for t in ["화자 20 의견", "발화자 2", "화자 2명이 참석", "화자 3", "화자", "화자 "] {
+            assert_eq!(r(t), t);
+        }
+        assert_eq!(default_speaker_no("화자 12"), Some(12));
+        assert_eq!(default_speaker_no("화자 1a"), None);
+        assert_eq!(default_speaker_no("김 팀장"), None);
+    }
+
+    #[test]
+    fn summary_follows_names_given_while_summarizing() {
+        let mut then = SessionDoc::new("로컬".into());
+        then.utterances = vec![u(0, 0, 0), u(1, 5000, 1), u(2, 10000, 2), u(3, 15000, 1), u(4, 20000, 2), u(5, 25000, 2)];
+        then.speakers.insert(3, "박 대리".into());
+        then.utterances.push(u(6, 30000, 3));
+        let text = "- 일정 확인 (화자 1)\n- 예산 (화자 2)\n- 장표 (화자 3)\n- 회의실 (박 대리)";
+        let mut now = then.clone();
+        // 1번(화자 2)에 이름을 붙이고, 0번(화자 1)을 2번(화자 3)에 합치고, 사람 이름은 고쳤다
+        now.speakers.insert(1, "이도현".into());
+        now.speaker_map.insert(0, 2);
+        now.utterances[0].speaker = Some(2);
+        now.speakers.insert(3, "최 부장".into());
+        assert_eq!(
+            now.carry_speaker_names(text, &then),
+            "- 일정 확인 (화자 3)\n- 예산 (이도현)\n- 장표 (화자 3)\n- 회의실 (박 대리)"
+        );
+        // 문단 하나만 다른 화자로 옮긴 것은 이름이 바뀐 게 아니다 (2번 문장 셋 중 하나)
+        let mut moved = then.clone();
+        moved.utterances[2].speaker = Some(0);
+        assert_eq!(moved.carry_speaker_names(text, &then), text);
+        // 아무것도 안 바뀌면 그대로
+        assert_eq!(then.carry_speaker_names(text, &then), text);
     }
 
     #[test]

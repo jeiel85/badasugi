@@ -1271,8 +1271,10 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     let sum = res.map_err(err)?.map_err(err)?;
     // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
     let loaded = st.store.lock().load(&id);
-    let mut latest = loaded.unwrap_or(doc2);
-    latest.summary = Some(sum.text.clone());
+    let mut latest = loaded.unwrap_or_else(|_| doc2.clone());
+    // 그 사이 화자에 이름을 붙였거나 합쳤으면 요약 속 "화자 3" 도 지금 이름으로
+    let text = latest.carry_speaker_names(&sum.text, &doc2);
+    latest.summary = Some(text.clone());
     latest.summary_edited = false;
     let title = sum.title.filter(|_| latest.auto_title);
     if let Some(t) = &title {
@@ -1281,7 +1283,7 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     }
     let saved = st.store.lock().save_doc(latest);
     saved.map_err(err)?;
-    Ok(SummaryDto { text: sum.text, title })
+    Ok(SummaryDto { text, title })
 }
 
 /// 그 번호의 요약을 멈춘다 — 아직 시작 전이면(화면이 앞선 저장을 기다리는 중) 시작하자마자 멈추게 신호를 먼저 꽂아 둔다
