@@ -1877,10 +1877,11 @@ async function askMeeting(question) {
   renderAsk();
   try {
     const item = await api.invoke('ask_meeting', { id: d.id, question: q, token: my.token });
-    // 그 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었으면 지금 사본에
+    // 그 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었으면 지금 사본에 — 다시 읽은 사본에 이 답이 이미 있으면 그대로
     const cur = doc();
     const target = cur && cur.id === my.id ? cur : my.doc;
-    target.qa = [...(target.qa || []), item];
+    const have = (target.qa || []).some((y) => y.q === item.q && y.at === item.at && y.a === item.a);
+    if (!have) target.qa = [...(target.qa || []), item];
   } catch (e) {
     const msg = String(e);
     if (msg !== ASK_CANCELLED) toast(msg, 'error');

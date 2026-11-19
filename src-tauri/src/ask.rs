@@ -32,6 +32,8 @@ const SYSTEM: &str = "당신은 한국 회사의 회의 기록을 보고 질문�
 const HISTORY: usize = 6;
 /// 앞선 답 하나는 이 글자까지만 이어 보낸다
 const HISTORY_ANSWER_CHARS: usize = 1_500;
+/// 앞선 질문 하나는 이 글자까지만
+const HISTORY_QUESTION_CHARS: usize = 500;
 /// 너무 크다고 거절되면 반씩 줄이되 이보다 작게는 줄이지 않는다
 const MIN_BUDGET: usize = 2_000;
 
@@ -207,6 +209,36 @@ fn context(doc: &SessionDoc, query: &str, budget: usize) -> Context {
     }
 }
 
+/// 앞 `n` 글자 (잘랐으면 끝에 …)
+fn clip(s: &str, n: usize) -> String {
+    let mut c: String = s.chars().take(n).collect();
+    if c.len() < s.len() {
+        c.push('…');
+    }
+    c
+}
+
+/// 앞선 질문 · 답 중 최근 것부터 합쳐 `cap` 글자 안쪽까지 (오래된 것부터 차례로). 가장 최근 답은 넘치면
+/// 잘라서라도 넣는다 — 이어 묻는 말("그건 누가 해?")은 바로 앞 답을 가리키기 쉽다
+fn recent_within(past: &[(String, String)], cap: usize) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut used = 0;
+    for (q, a) in past.iter().rev() {
+        let n = q.chars().count() + a.chars().count();
+        if used + n > cap {
+            let room = cap.saturating_sub(q.chars().count());
+            if out.is_empty() && room >= 100 {
+                out.push((q.clone(), clip(a, room)));
+            }
+            break;
+        }
+        used += n;
+        out.push((q.clone(), a.clone()));
+    }
+    out.reverse();
+    out
+}
+
 /// 이 회의에 묻는다. 답은 받는 대로 `on_event` 로, 사용량은 요청이 성공할 때마다 `on_usage(제공자, 응답)` 로
 pub fn ask(
     cfg: &SummarySettings,
@@ -240,20 +272,14 @@ fn ask_with(
         bail!("아직 물어볼 회의 내용이 없어요");
     }
     // 앞선 질문 · 답 (최근 것) — "그건 누가 하기로 했어?" 처럼 이어 묻는 말을 알아듣게
-    let past: Vec<(String, String)> = doc
+    let all_past: Vec<(String, String)> = doc
         .qa
         .iter()
         .skip(doc.qa.len().saturating_sub(HISTORY))
-        .map(|x| {
-            let mut a: String = x.a.chars().take(HISTORY_ANSWER_CHARS).collect();
-            if a.len() < x.a.len() {
-                a.push('…');
-            }
-            (x.q.clone(), a)
-        })
+        .map(|x| (clip(&x.q, HISTORY_QUESTION_CHARS), clip(&x.a, HISTORY_ANSWER_CHARS)))
         .collect();
     // 녹취록을 고를 때는 바로 앞 질문도 함께 본다
-    let query = match past.last() {
+    let query = match all_past.last() {
         Some((q, _)) => format!("{question}\n{q}"),
         None => question.to_string(),
     };
@@ -262,7 +288,12 @@ fn ask_with(
         if cancel.load(Ordering::SeqCst) {
             return Err(anyhow::Error::new(summary::AskCancelled));
         }
-        let ctx = context(doc, &query, budget);
+        // 앞선 대화도 한 번에 보낼 크기 안에서 — 자리의 1/3 까지 최근 것부터, 나머지를 회의 기록에
+        // (너무 크다고 거절돼 자리를 줄이면 앞선 대화도 함께 준다)
+        let past = recent_within(&all_past, budget / 3);
+        let talk = past.iter().map(|(q, a)| q.chars().count() + a.chars().count()).sum::<usize>()
+            + question.chars().count();
+        let ctx = context(doc, &query, budget.saturating_sub(talk).max(budget / 4));
         let head = format!("다음은 이 회의의 기록입니다.\n\n{}", ctx.text);
         let mut turns = vec![Turn { user: true, text: &head, cache: true }];
         for (q, a) in &past {
@@ -450,6 +481,38 @@ mod tests {
         assert_eq!((seen[1].0, seen[1].1.as_str()), (true, "VPN 은 얼마야?"));
         assert_eq!((seen[2].0, seen[2].2), (false, false));
         assert_eq!((seen[3].0, seen[3].1.as_str(), seen[3].2), (true, "그건 언제 다시 봐?", false));
+    }
+
+    /// 앞선 질문 · 답이 길어도 요청 전체가 한 번에 보낼 크기 안쪽 — 최근 것부터 남고, 줄여 다시 보내면 함께 준다
+    #[test]
+    fn past_answers_fit_in_the_request_budget() {
+        let mut d = meeting();
+        for i in 0..6 {
+            d.qa.push(QaItem { q: format!("질문 {i}"), a: "긴 답 ".repeat(100), ..Default::default() });
+        }
+        let total = |turns: &[Turn]| turns.iter().map(|t| t.text.chars().count()).sum::<usize>();
+        let mut sent = Vec::new();
+        let mut chat = |_: &str, turns: &[Turn], _: &mut dyn FnMut(&str)| {
+            sent.push((total(turns), turns.iter().filter(|t| !t.user).count(), turns[turns.len() - 3].text.to_string()));
+            if sent.len() == 1 {
+                return Err(anyhow::Error::new(ApiError { status: 413, retry_after: None, msg: "Request too large".into() }));
+            }
+            reply("답")
+        };
+        ask_with(&mut chat, "groq", 4_000, &d, "VPN 비용?", &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).unwrap();
+        // 첫 요청: 4천 자 자리 안쪽(머리말 · '…' 줄 몇 개 여유), 앞선 답은 1/3 자리만큼 최근 것만
+        assert!(sent[0].0 <= 4_000 + 300, "{}", sent[0].0);
+        assert!(sent[0].1 >= 1 && sent[0].1 < 6, "{}", sent[0].1);
+        assert_eq!(sent[0].2, "질문 5", "가장 최근 질문이 마지막 앞선 대화");
+        // 다시 보낼 때는 앞선 대화까지 함께 줄어든다
+        assert!(sent[1].0 <= 2_000 + 300 && sent[1].1 < sent[0].1, "{:?}", (sent[1].0, sent[1].1));
+
+        // 가장 최근 답 하나가 자리보다 길면 잘라서라도 넣는다
+        let past = vec![("앞 질문".to_string(), "가".repeat(100)), ("바로 앞 질문".to_string(), "나".repeat(2_000))];
+        let kept = recent_within(&past, 500);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "바로 앞 질문");
+        assert!(kept[0].1.chars().count() <= 500 && kept[0].1.ends_with('…'));
     }
 
     #[test]
