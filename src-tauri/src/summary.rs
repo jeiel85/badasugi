@@ -681,7 +681,8 @@ pub fn summarize(
         }
         call(s, u, t)
     };
-    let raw = run_summary(&mut guarded, progress, &on_reply, &head, &doc.to_text(), chunk_budget(&provider))?;
+    // 중요 표시 ⭐ 한 문장은 녹취록에 ⭐ 를 붙여 보낸다 (요약이 꼭 다루고 그 불릿에 ⭐)
+    let raw = run_summary(&mut guarded, progress, &on_reply, &head, &doc.to_ai_text(), chunk_budget(&provider))?;
     if raw.trim().is_empty() {
         bail!("요약 결과가 비어 있습니다");
     }

@@ -6,6 +6,8 @@
 
 {{rules/evidence_time.md}}
 
+{{rules/starred.md}}
+
 결과는 한국어 마크다운으로, 아래 형식만 출력하세요.
 
 ### 제목

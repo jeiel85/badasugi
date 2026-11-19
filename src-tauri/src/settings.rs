@@ -37,6 +37,8 @@ pub struct Settings {
     pub unload_when_idle: bool,
 
     pub hotkey: String,
+    /// 중요 표시 ⭐ 전역 단축키 — 녹음 · 다시 듣기 중 지금 말하는 곳을 메모에 `[시각] ⭐` 로 (빈 값이면 없음)
+    pub star_hotkey: String,
     pub always_on_top: bool,
     /// "system" | "light" | "dark"
     pub theme: String,
@@ -113,6 +115,7 @@ impl Default for Settings {
             save_audio: false,
             unload_when_idle: true,
             hotkey: "Ctrl+Alt+R".into(),
+            star_hotkey: "Ctrl+Alt+B".into(),
             always_on_top: false,
             theme: "system".into(),
             auto_update: true,
@@ -243,5 +246,12 @@ mod tests {
         std::fs::write(&path, br#"{ "openaiModel": "gpt-4o-mini-transcribe" }"#).unwrap();
         assert_eq!(Settings::load(&path).openai_model, "gpt-4o-mini-transcribe");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_settings_get_the_star_hotkey() {
+        // 중요 표시 단축키가 생기기 전의 설정 파일도 기본 단축키로 읽힌다 (녹음 단축키는 그대로)
+        let s: Settings = serde_json::from_str(r#"{ "hotkey": "Ctrl+Shift+F9" }"#).unwrap();
+        assert_eq!((s.hotkey.as_str(), s.star_hotkey.as_str()), ("Ctrl+Shift+F9", "Ctrl+Alt+B"));
     }
 }

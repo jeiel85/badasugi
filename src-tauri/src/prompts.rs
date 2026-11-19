@@ -27,6 +27,9 @@ const FILES: &[(&str, &str)] = &[
     // 요약 불릿 끝의 근거 시각 [12:34] — 화면에서 눌러 녹취록 그 문장으로 간다 (회의에 묻기와 같은 표기).
     // 긴 회의는 구간 메모에도 달게 해, 메모를 합치고 줄여도 시각이 회의록까지 살아남게 한다
     ("rules/evidence_time.md", include_str!("../prompts/rules/evidence_time.md")),
+    // 중요 표시 ⭐ — 회의 중 단축키로 표시한 문장은 녹취록에 "⭐ 문장"으로 간다(SessionDoc::to_ai_text).
+    // 요약이 꼭 다루고 그 불릿에도 ⭐ 를 달게 해, 긴 회의의 구간 메모를 합치고 줄여도 남게 한다
+    ("rules/starred.md", include_str!("../prompts/rules/starred.md")),
 ];
 
 /// md 를 보낼 글로: `{{다른 파일}}` 자리를 그 파일 내용으로 바꾸고 끝의 줄바꿈을 뗀다
@@ -128,5 +131,16 @@ mod tests {
         }
         // 화면이 누를 수 있는 표기 — 회의에 묻기와 같은 [분:초]
         assert!(ask().contains("[12:34]"));
+    }
+
+    #[test]
+    fn starred_parts_survive_every_step() {
+        // 회의록 · 구간 메모 모두 ⭐ 표시한 발언을 꼭 다루고, 메모를 합치거나 줄여도 ⭐ 줄을 지우지 않는다
+        for (name, text) in [("summary", summary()), ("summary_part", summary_part())] {
+            assert!(text.contains("⭐ 바로 뒤의 문장은"), "{name}: 중요 표시 규칙");
+        }
+        for (name, text) in [("merge_notes", merge_notes()), ("merge_final", merge_final()), ("shrink_note", shrink_note())] {
+            assert!(text.contains("⭐ 가 붙은 줄"), "{name}: ⭐ 줄을 지키라는 말");
+        }
     }
 }
