@@ -148,6 +148,61 @@ function resolveSpk(d, s) {
   for (let i = 0; i < 16 && d.speakerMap[s] != null && d.speakerMap[s] !== s; i++) s = d.speakerMap[s];
   return s;
 }
+// 글 속 기본 화자 이름 "화자 3"(또는 "화자3"). "발화자 3" · "화자 30" · "화자 3명" 은 그 화자가 아니다
+// (앱 session.rs `replace_default_speakers` 와 같은 규칙)
+const SPK_DEFAULT_RE = /(?<![\p{L}\p{N}])화자 ?(\d+)(?![\d명])/gu;
+// 화자 이름을 붙이거나 · 합치거나 · 문단을 옮기는 일(change)을 하고, 요약 속 기본 이름("화자 3")도 새 이름으로.
+// 문장마다 전 이름 → 새 이름을 보고, 그 화자 문장의 과반이 간 이름으로 한 번에 바꾼다
+// (문단 몇 개만 다른 화자로 옮긴 것은 이름이 바뀐 게 아니다). 사람이 붙인 이름은 요약 속 다른 낱말과 겹칠 수
+// 있어 그대로 두고, 요약에 그 이름이 보이면 다시 요약하라고 알린다. 요약하는 중에 바꾼 이름은 앱이 요약을
+// 받을 때 같은 규칙으로 고친다 (session.rs `carry_speaker_names`). 돌려주는 것: 알릴 말 { msg, warn } 또는 null
+function followSpeakerNames(d, change) {
+  const names = () => new Map(d.utterances.map((u) => [u.id, speakerName(d, resolveSpk(d, u.speaker))]));
+  const before = names();
+  change();
+  const after = names();
+  const votes = new Map(); // 전 이름 → { all: 문장 수, to: 새 이름 → 문장 수 }
+  for (const [id, old] of before) {
+    const now = after.get(id);
+    if (now == null) continue;
+    const v = votes.get(old) || { all: 0, to: new Map() };
+    votes.set(old, v);
+    v.all++;
+    if (now !== old) v.to.set(now, (v.to.get(now) || 0) + 1);
+  }
+  const map = new Map(); // 기본 이름 번호 → 새 이름
+  const kept = []; // 바뀐 사람 이름 (요약에서 고치지 않는 것)
+  for (const [old, v] of votes) {
+    const top = [...v.to].sort((a, b) => b[1] - a[1])[0];
+    if (!top || top[1] * 2 <= v.all) continue;
+    const m = /^화자 (\d+)$/.exec(old);
+    if (m) map.set(+m[1], top[0]);
+    else if (old !== '발화') kept.push(old);
+  }
+  const fix = (t) => (map.size && t ? t.replace(SPK_DEFAULT_RE, (s, n) => map.get(+n) ?? s) : t);
+  const was = d.summary;
+  if (fix(was) !== was) d.summary = fix(was);
+  // 고치고 있는 요약도 (그대로 저장해도 옛 이름으로 돌아가지 않게)
+  const editing = S.sumEdit?.doc === d ? $('#sum-edit') : null;
+  if (S.sumEdit?.doc === d) S.sumEdit.orig = fix(S.sumEdit.orig);
+  if (editing && fix(editing.value) !== editing.value) {
+    const at = editing.selectionStart;
+    editing.value = fix(editing.value);
+    editing.setSelectionRange(at, at);
+  }
+  const text = editing ? editing.value : d.summary || '';
+  const summarizing = S.summarizing && S.sumId === d.id;
+  // "이낙원 실장님" 이 요약엔 "이낙원 실장" 으로 나오기도 해서 이름 첫 낱말(두 글자 이상)도 본다
+  const first = (n) => n.split(/\s+/)[0];
+  const stale = kept.filter((n) => summarizing || text.includes(n) || (first(n).length >= 2 && text.includes(first(n))));
+  if (stale.length) {
+    const list = stale.join(', ');
+    return summarizing
+      ? { msg: `만들고 있는 요약에는 예전 이름(${list})이 들어가요 · 끝난 뒤 다시 요약하면 바뀌어요`, warn: true }
+      : { msg: `요약에는 예전 이름(${list})이 남아 있어요 · AI 로 다시 요약하면 바뀌어요`, warn: true };
+  }
+  return d.summary !== was ? { msg: '요약 속 화자 이름도 바꿨어요' } : null;
+}
 // 찾는 말 (대소문자 무시) — 정규식 기호도 글자 그대로 찾는다
 const findRe = (q) => new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
 // 찾는 말 표시 — 원문에서 찾고 조각마다 이스케이프한다
@@ -826,9 +881,17 @@ function onEvent(e) {
       if (d) {
         d.speakers = d.speakers || {};
         if (d.speakers[e.speaker] == null) {
-          d.speakers[e.speaker] = e.name;
+          // 녹음 중에 만든 요약 속 "화자 3" 도 알아본 이름으로 (앱은 이름만 붙였으므로 요약은 화면이 고쳐 저장)
+          const note = followSpeakerNames(d, () => { d.speakers[e.speaker] = e.name; });
+          if (note) {
+            // 녹음 중에 다른 회의를 고치고 있을 수 있다 — debounce 는 마지막 문서만 보내므로, 기다리던 저장을 먼저
+            // 보내고 이 저장도 기다리지 않고 바로 보낸다 (곧이어 다른 회의를 고쳐도 서로 밀어내지 않게)
+            persistDoc.flush();
+            persistDoc(d);
+            persistDoc.flush();
+          }
           $('#speakers').innerHTML = '';
-          toast(`목소리로 '${e.name}'님을 알아봤어요`);
+          toast(`목소리로 '${e.name}'님을 알아봤어요${note ? ` · ${note.msg}` : ''}`);
           renderLive();
         }
       }
@@ -982,10 +1045,13 @@ function startRename(spk) {
   const done = (ok) => {
     if (ok) {
       const v = inp.value.trim();
-      d.speakers = d.speakers || {};
-      const def = speakerName({ utterances: d.utterances, speakers: {} }, +spk);
-      if (v && v !== def) d.speakers[spk] = v; else delete d.speakers[spk];
+      const note = followSpeakerNames(d, () => {
+        d.speakers = d.speakers || {};
+        const def = speakerName({ utterances: d.utterances, speakers: {} }, +spk);
+        if (v && v !== def) d.speakers[spk] = v; else delete d.speakers[spk];
+      });
       persistDoc(d);
+      if (note) toast(note.msg, note.warn ? 'warn' : '');
     }
     chip.innerHTML = '';
     $('#speakers').innerHTML = '';
@@ -1039,11 +1105,13 @@ $('#pop-spk').addEventListener('click', (e) => {
   if (b.dataset.act === 'rename') return startRename(spk);
   if (b.dataset.act === 'merge') {
     const to = +b.dataset.to;
-    d.speakerMap = d.speakerMap || {};
-    d.speakerMap[spk] = to;
-    for (const u of d.utterances) if (resolveSpk(d, u.speaker) === to) u.speaker = to;
-    if (d.speakers) delete d.speakers[spk];
-    toast(`'${speakerName(d, to)}'에 합쳤어요${S.rec !== 'idle' && S.live ? ' · 앞으로 들어오는 발화도 함께 적용돼요' : ''}`);
+    const note = followSpeakerNames(d, () => {
+      d.speakerMap = d.speakerMap || {};
+      d.speakerMap[spk] = to;
+      for (const u of d.utterances) if (resolveSpk(d, u.speaker) === to) u.speaker = to;
+      if (d.speakers) delete d.speakers[spk];
+    });
+    toast(`'${speakerName(d, to)}'에 합쳤어요${S.rec !== 'idle' && S.live ? ' · 앞으로 들어오는 발화도 함께 적용돼요' : ''}${note ? ` · ${note.msg}` : ''}`, note?.warn ? 'warn' : '');
   } else if (b.dataset.act === 'move') {
     let to = b.dataset.to;
     if (to === 'new') {
@@ -1053,7 +1121,8 @@ $('#pop-spk').addEventListener('click', (e) => {
       to = n;
     }
     const ids = new Set(pop.dataset.ids.split(',').filter(Boolean).map(Number));
-    for (const u of d.utterances) if (ids.has(u.id)) u.speaker = +to;
+    const note = followSpeakerNames(d, () => { for (const u of d.utterances) if (ids.has(u.id)) u.speaker = +to; });
+    if (note) toast(note.msg, note.warn ? 'warn' : '');
   }
   persistDoc(d);
   $('#speakers').innerHTML = '';
