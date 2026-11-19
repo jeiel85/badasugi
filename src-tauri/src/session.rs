@@ -226,6 +226,32 @@ pub fn note_comments(notes: &str) -> Vec<NoteComment> {
     out
 }
 
+/// 화자 한 명의 발언 통계 ([`SessionDoc::speaker_stats`])
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerStat {
+    /// 화자 번호 (합친 화자를 따라간 번호)
+    pub speaker: u32,
+    /// 말한 시간 — 문장 길이의 합 (ms)
+    pub ms: u64,
+    /// 발언 수 — 같은 화자가 15초 안에 이어 말한 문장은 한 번 (녹취록의 문단과 같은 묶음)
+    pub turns: usize,
+    /// 가장 길게 이어 말한 발언의 길이 · 시작 시각 (ms)
+    pub longest_ms: u64,
+    pub longest_at: u64,
+}
+
+/// 걸린 시간을 읽기 좋게: "45초" · "3분 12초" · "3분" · "1시간 5분"
+pub fn fmt_dur(ms: u64) -> String {
+    let s = (ms + 500) / 1000;
+    match s {
+        0..=59 => format!("{s}초"),
+        60..=3599 if s % 60 == 0 => format!("{}분", s / 60),
+        60..=3599 => format!("{}분 {}초", s / 60, s % 60),
+        _ if (s / 60) % 60 == 0 => format!("{}시간", s / 3600),
+        _ => format!("{}시간 {}분", s / 3600, (s / 60) % 60),
+    }
+}
+
 /// 중요 표시 ⭐ 코멘트면 ⭐ 뒤의 글(없으면 빈 글) — 메모의 `[12:34] ⭐` · `[12:34] ⭐ 가격 다시 확인` 줄.
 /// (화면의 ⭐ 단축키 · 문장 도구가 이렇게 적는다. 화면 쪽 app.js 의 starNote 와 같은 규칙)
 pub fn star_note(text: &str) -> Option<&str> {
@@ -659,6 +685,7 @@ impl SessionDoc {
                 s.push_str(&format!("**Q. {q}**\n\n{}\n\n", x.a.trim()));
             }
         }
+        s.push_str(&self.stats_markdown());
         s.push_str("## 녹취록\n\n");
         for (spk, start, _, text, ids) in self.paragraphs() {
             s.push_str(&format!("**{}** `{}`  \n{}\n\n", self.speaker_name(spk), fmt_time(start), text));
@@ -687,6 +714,68 @@ impl SessionDoc {
         for (spk, start, _, text, _) in self.paragraphs() {
             s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), text));
         }
+        s
+    }
+
+    /// 화자별 발언 통계 — 말한 시간이 많은 순. 화자가 없는 문장은 뺀다.
+    /// (화면 app.js 의 speakerStats 와 같은 규칙: 같은 화자가 앞 발언 끝에서 15초 안에 다시 말하면 같은 발언)
+    pub fn speaker_stats(&self) -> Vec<SpeakerStat> {
+        let mut us: Vec<(u32, &Utterance)> =
+            self.utterances.iter().filter_map(|u| Some((self.resolve(u.speaker)?, u))).collect();
+        us.sort_by_key(|(_, u)| (u.start_ms, u.id));
+        let mut by: BTreeMap<u32, SpeakerStat> = BTreeMap::new();
+        // 지금 이어지는 발언 (화자, 시작, 끝)
+        let mut cur: Option<(u32, u64, u64)> = None;
+        let close = |by: &mut BTreeMap<u32, SpeakerStat>, cur: Option<(u32, u64, u64)>| {
+            if let Some((s, start, end)) = cur {
+                let st = by.get_mut(&s).expect("발언을 연 화자");
+                let len = end.saturating_sub(start);
+                if st.turns == 1 || len > st.longest_ms {
+                    st.longest_ms = len;
+                    st.longest_at = start;
+                }
+            }
+        };
+        for (s, u) in us {
+            let st = by.entry(s).or_insert(SpeakerStat { speaker: s, ms: 0, turns: 0, longest_ms: 0, longest_at: 0 });
+            st.ms += u.end_ms.saturating_sub(u.start_ms);
+            if let Some((cs, _, end)) = cur.as_mut() {
+                if *cs == s && u.start_ms.saturating_sub(*end) < 15_000 {
+                    *end = (*end).max(u.end_ms);
+                    continue;
+                }
+            }
+            close(&mut by, cur.take());
+            by.get_mut(&s).expect("방금 넣은 화자").turns += 1;
+            cur = Some((s, u.start_ms, u.end_ms));
+        }
+        close(&mut by, cur);
+        let mut v: Vec<SpeakerStat> = by.into_values().collect();
+        v.sort_by(|a, b| b.ms.cmp(&a.ms).then(a.speaker.cmp(&b.speaker)));
+        v
+    }
+
+    /// Markdown 회의록의 발언 통계 표 (화자가 둘 이상일 때만)
+    fn stats_markdown(&self) -> String {
+        let stats = self.speaker_stats();
+        if stats.len() < 2 {
+            return String::new();
+        }
+        let total: u64 = stats.iter().map(|x| x.ms).sum();
+        let mut s = String::from("## 발언 통계\n\n| 화자 | 말한 시간 | 비율 | 발언 수 | 가장 긴 발언 |\n|---|---:|---:|---:|---|\n");
+        for x in &stats {
+            let pct = if total > 0 { (x.ms as f64 * 100.0 / total as f64).round() as u64 } else { 0 };
+            s.push_str(&format!(
+                "| {} | {} | {}% | {}번 | {} (`{}`부터) |\n",
+                self.speaker_name(Some(x.speaker)).replace('|', "\\|"),
+                fmt_dur(x.ms),
+                pct,
+                x.turns,
+                fmt_dur(x.longest_ms),
+                fmt_time(x.longest_at)
+            ));
+        }
+        s.push('\n');
         s
     }
 
@@ -1524,6 +1613,41 @@ mod tests {
         // 문장이 아직 없으면(녹음 직후) 붙을 곳이 없다
         d.utterances.clear();
         assert_eq!(d.anchored_comments()[0].1, None);
+    }
+
+    #[test]
+    fn speaker_stats_count_time_turns_and_the_longest_turn() {
+        let mut d = SessionDoc::new("로컬".into());
+        // 화자 0: 0~4 · 5~9 (이어 말함 → 발언 1번, 0~9초) · 40~44 (15초 넘게 쉬고 다시 → 2번째)
+        // 화자 1: 20~24 · 화자 2 는 화자 1 에 합쳐짐: 30~34 → 화자 1 의 발언 (24초 끝 → 6초 뒤라 이어 말함)
+        // 화자가 없는 문장은 세지 않는다
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 20000, 1), u(3, 30000, 2), u(4, 40000, 0)];
+        d.utterances.push(Utterance { id: 5, start_ms: 50000, end_ms: 60000, speaker: None, text: "?".into() });
+        d.speaker_map.insert(2, 1);
+        d.speakers.insert(1, "이 | 개발".into());
+        let s = d.speaker_stats();
+        assert_eq!(
+            s,
+            vec![
+                SpeakerStat { speaker: 0, ms: 12000, turns: 2, longest_ms: 9000, longest_at: 0 },
+                SpeakerStat { speaker: 1, ms: 8000, turns: 1, longest_ms: 14000, longest_at: 20000 },
+            ]
+        );
+        // Markdown 회의록: 녹취록 앞에 표 (이름의 | 는 표가 깨지지 않게)
+        let md = d.to_markdown();
+        assert!(md.contains(
+            "## 발언 통계\n\n| 화자 | 말한 시간 | 비율 | 발언 수 | 가장 긴 발언 |\n|---|---:|---:|---:|---|\n\
+             | 화자 1 | 12초 | 60% | 2번 | 9초 (`00:00`부터) |\n\
+             | 이 \\| 개발 | 8초 | 40% | 1번 | 14초 (`00:20`부터) |\n\n## 녹취록"
+        ));
+        // 화자가 하나뿐이면 표를 넣지 않는다
+        d.utterances.retain(|x| x.speaker == Some(0));
+        assert!(!d.to_markdown().contains("발언 통계"));
+        assert_eq!(fmt_dur(500), "1초");
+        assert_eq!(fmt_dur(192_000), "3분 12초");
+        assert_eq!(fmt_dur(180_000), "3분");
+        assert_eq!(fmt_dur(3_900_000), "1시간 5분");
+        assert_eq!(fmt_dur(7_200_000), "2시간");
     }
 
     #[test]
