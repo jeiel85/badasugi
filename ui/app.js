@@ -148,17 +148,27 @@ function resolveSpk(d, s) {
   for (let i = 0; i < 16 && d.speakerMap[s] != null && d.speakerMap[s] !== s; i++) s = d.speakerMap[s];
   return s;
 }
+// 찾는 말 (대소문자 무시) — 정규식 기호도 글자 그대로 찾는다
+const findRe = (q) => new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+// 찾는 말 표시 — 원문에서 찾고 조각마다 이스케이프한다
+// (바꾸기가 같은 자리를 세게, '&' 같은 글자가 &amp; 안에서 잡히지 않게)
 function hl(text) {
-  const t = esc(text);
-  if (!S.findQ) return t;
-  const q = esc(S.findQ).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return t.replace(new RegExp(q, 'gi'), (m) => `<mark>${m}</mark>`);
+  if (!S.findQ) return esc(text);
+  let out = '', last = 0;
+  for (const m of text.matchAll(findRe(S.findQ))) {
+    out += `${esc(text.slice(last, m.index))}<mark>${esc(m[0])}</mark>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(text.slice(last));
 }
 let toastTimer;
 function toast(msg, kind = '', ms) {
   const t = $('#toast');
   t.textContent = msg;
   t.className = `toast ${kind}`;
+  // 제안 막대가 떠 있으면 그 위로 (좁은 창에서는 막대가 두 줄이 되므로 높이를 재서)
+  const n = $('#nudge');
+  t.style.bottom = !S.mini && n && !n.hidden && n.offsetParent ? `${n.offsetParent.clientHeight - n.offsetTop + 8}px` : '';
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), ms ?? (kind === 'error' || kind === 'warn' ? 6500 : 2600));
@@ -1242,7 +1252,12 @@ function startEdit(el) {
       d.deleted = [...(d.deleted || []), u.id];
       persistDoc(d); // 이 문장에 붙어 있던 코멘트(메모의 시각 줄)는 가장 가까운 문장으로 옮겨 붙는다
       toast('발화를 지웠어요');
-    } else if (save && v !== u.text) { u.text = v; persistDoc(d); }
+    } else if (save && v !== u.text) {
+      const before = u.text;
+      u.text = v;
+      persistDoc(d);
+      suggestFromEdit(d, u.id, before, v);
+    }
     scheduleRender();
   };
   el.addEventListener('keydown', (k) => {
@@ -2390,9 +2405,10 @@ document.addEventListener('keydown', (e) => {
     insertTime();
     return;
   }
-  if (e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+  // Ctrl+F 찾기 · Ctrl+H 찾아 바꾸기 — 녹취록에서 고른 글자가 있으면 그 말로
+  if (e.ctrlKey && !e.altKey && (e.code === 'KeyF' || e.code === 'KeyH')) {
     e.preventDefault();
-    if (!S.mini && $$('.panel').every((p) => p.hidden)) openFind();
+    if (!S.mini && $$('.panel').every((p) => p.hidden)) openFind(pickedText(), e.code === 'KeyH');
   }
   const typing = e.target.closest?.('input:not([type=range]):not([type=checkbox]), textarea, select, [contenteditable="true"]');
   if (e.code === 'Space' && !typing && !e.ctrlKey && !e.altKey && P.src && !S.mini) { e.preventDefault(); togglePlay(); }
@@ -2459,6 +2475,7 @@ async function renderHistory() {
 // 기록 하나를 연다 — 받아 적는 중인 회의는 최신 문장으로, 지난 회의는 처음부터 (q: 찾을 말)
 async function openSession(id, q = '') {
   commitEdits();
+  hideNudge();
   if (S.liveDoc && id === S.liveDoc.id) { S.live = true; S.viewDoc = null; }
   else { S.viewDoc = await call('load_session', { id }); S.live = false; }
   closePanels();
@@ -2529,25 +2546,49 @@ if (api.onDrop) {
 }
 
 /* ───────────── 찾기 (Ctrl+F) ───────────── */
-function openFind(q) {
+// rep: 바꾸기 줄도 연다 (Ctrl+H)
+function openFind(q, rep = false) {
   const bar = $('#findbar');
   bar.hidden = false;
+  showRep(rep);
   const inp = $('#find-input');
-  if (q != null) { inp.value = q; S.findQ = q; S.findIdx = 0; renderDoc(); }
-  inp.focus();
-  inp.select();
+  if (q) { inp.value = q; S.findQ = q; S.findIdx = 0; renderDoc(); }
+  // 바꾸기는 찾을 말이 이미 있으면 바꿀 말 칸으로
+  const to = rep && inp.value.trim() ? $('#rep-input') : inp;
+  to.focus();
+  to.select();
 }
 function closeFind() {
   $('#findbar').hidden = true;
+  showRep(false);
   S.findQ = '';
   $('#find-input').value = '';
   renderDoc();
+}
+function showRep(on) {
+  $('#rep-row').hidden = !on;
+  $('#find-rep-toggle').classList.toggle('on', on);
+  $('#find-rep-toggle').setAttribute('aria-pressed', String(on));
+  syncRepBtns();
+}
+// 바꾸기: 지금 고른 곳이 있어야 · 모두 바꾸기: 찾을 말이 있어야 (요약 · 제목에만 있어도 바꾼다)
+function syncRepBtns(n = $$('#transcript mark').length) {
+  $('#rep-one').disabled = !n || !doc();
+  $('#rep-all').disabled = !S.findQ || !doc();
+}
+// 녹취록에서 고른 글자 (한 줄 · 40자까지) — 찾기 · 바꾸기를 그 말로 연다
+function pickedText() {
+  const sel = window.getSelection();
+  const t = sel?.toString().trim();
+  if (!t || t.length > 40 || /\n/.test(t) || !sel.anchorNode || !$('#transcript').contains(sel.anchorNode)) return '';
+  return t;
 }
 function updateFind(scroll) {
   const marks = $$('#transcript mark');
   const n = marks.length;
   if (S.findIdx >= n) S.findIdx = 0;
   $('#find-count').textContent = S.findQ ? (n ? `${S.findIdx + 1}/${n}` : '없음') : '';
+  syncRepBtns(n);
   marks.forEach((m, i) => m.classList.toggle('cur', i === S.findIdx));
   // scrollIntoView 는 창 전체까지 밀어 올리므로 본문만 스크롤한다
   if (scroll && n) {
@@ -2563,14 +2604,294 @@ function stepFind(dir) {
   updateFind(true);
 }
 $('#btn-find').addEventListener('click', () => ($('#findbar').hidden ? openFind() : closeFind()));
-$('#find-input').addEventListener('input', debounce((e) => { S.findQ = e.target.value.trim(); S.findIdx = 0; renderDoc(); updateFind(true); }, 150));
+const onFindInput = debounce(() => { S.findQ = $('#find-input').value.trim(); S.findIdx = 0; renderDoc(); updateFind(true); }, 150);
+$('#find-input').addEventListener('input', onFindInput);
 $('#find-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+  // 한글을 치는 중의 Enter 는 글자를 확정하는 것 — 다음 곳으로 넘기지 않는다
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    // 치자마자 누른 Enter 는 새로 찾은 첫 곳을 보여 주고, 그다음부터 다음 곳으로
+    const fresh = $('#find-input').value.trim() !== S.findQ;
+    onFindInput.flush();
+    if (!fresh) stepFind(e.shiftKey ? -1 : 1);
+  }
   if (e.key === 'Escape') { e.stopPropagation(); closeFind(); }
 });
 $('#find-next').addEventListener('click', () => stepFind(1));
 $('#find-prev').addEventListener('click', () => stepFind(-1));
 $('#find-close').addEventListener('click', closeFind);
+$('#find-rep-toggle').addEventListener('click', () => {
+  const on = $('#rep-row').hidden;
+  showRep(on);
+  (on && $('#find-input').value.trim() ? $('#rep-input') : $('#find-input')).focus();
+});
+$('#rep-input').addEventListener('keydown', (e) => {
+  // 한글을 치는 중의 Enter 는 글자를 확정하는 것 — 바꾸지 않는다
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); replaceAllFound(); return; }
+  if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) stepFind(-1); else replaceOne(); }
+  if (e.key === 'Escape') { e.stopPropagation(); closeFind(); }
+});
+$('#rep-one').addEventListener('click', replaceOne);
+$('#rep-all').addEventListener('click', replaceAllFound);
+
+/* ───────────── 바꾸기 (Ctrl+H) · 고친 말 제안 ─────────────
+   찾기와 같은 규칙(대소문자 무시)으로 받아 적은 문장만 바꾼다 — 받아 적는 중인 문장은 아직 글이 없다.
+   이미 바꿀 말과 같은 곳은 그대로 둔다: '스캔' → '스캔프리' 를 두 번 해도 '스캔프리프리' 가 되지 않게
+   바꿀 말 안에 들어 있는 찾는 말(이미 맞게 적힌 '스캔프리' 의 '스캔')은 건너뛴다. */
+function repMatches(text, q, to) {
+  // 이미 맞게 적힌 곳은 글자 그대로(대소문자까지) 같은 곳만 — 'okpos' → 'OKPOS' 는 바꿔야 하므로
+  const keep = [];
+  if (to && to.toLowerCase().includes(q.toLowerCase())) {
+    for (let at = text.indexOf(to); at >= 0; at = text.indexOf(to, at + 1)) keep.push([at, at + to.length]);
+  }
+  return [...text.matchAll(findRe(q))].map((m) => ({
+    at: m.index, len: m[0].length,
+    skip: m[0] === to || keep.some(([a, b]) => m.index >= a && m.index + m[0].length <= b),
+  }));
+}
+// text 안의 q 를 to 로 (only: 그 순번의 찾은 곳만) → [새 글, 바꾼 수]
+function replaceIn(text, q, to, only = -1) {
+  let out = '', last = 0, n = 0;
+  repMatches(text, q, to).forEach((m, i) => {
+    if (m.skip || (only >= 0 && i !== only)) return;
+    out += text.slice(last, m.at) + to;
+    last = m.at + m.len;
+    n++;
+  });
+  return [out + text.slice(last), n];
+}
+// 문장 글은 한 줄 — 지운 말 자리에 남은 겹친 띄어쓰기를 정리한다
+const tidy = (t) => t.replace(/\s{2,}/g, ' ').trim();
+
+// 지금 고른 곳 하나를 바꾸고 다음 곳으로
+function replaceOne() {
+  onFindInput.flush();
+  const d = doc(), q = S.findQ, to = $('#rep-input').value;
+  const marks = $$('#transcript mark');
+  if (!d || !q || !marks.length || editing) return;
+  const cur = marks[S.findIdx] || marks[0];
+  const el = cur.closest('.u[data-id]');
+  const u = el && d.utterances.find((x) => x.id === +el.dataset.id);
+  if (!u) { stepFind(1); return; }
+  const k = $$('mark', el).indexOf(cur);
+  const [v, n] = replaceIn(u.text, q, to, k);
+  // 이미 바꿀 말과 같은 곳이면 그대로 두고 다음으로
+  if (!n) { stepFind(1); return; }
+  u.text = tidy(v) || u.text;
+  // 바꾼 말 안에도 찾는 말이 있으면 그만큼 지나서 다음 곳을 고른다
+  S.findIdx += (to.match(findRe(q)) || []).length;
+  persistDoc(d);
+  renderDoc();
+  updateFind(true);
+  if (!$$('#transcript mark').length) toast('모두 바꿨어요');
+}
+
+// 한 회의의 q 를 모두 to 로 — 녹취록 · 요약 · 제목. 되돌리기용으로 바꾸기 전 글을 남긴다
+function replaceAllIn(d, q, to) {
+  const undo = { id: d.id, texts: [] };
+  const r = { u: 0, s: 0, t: 0, undo };
+  for (const x of d.utterances) {
+    const [v, n] = replaceIn(x.text, q, to);
+    const t = tidy(v);
+    // 문장이 통째로 지워지게 바꾸지는 않는다 (문장 지우기는 고치기에서 비우기로)
+    if (!n || !t) continue;
+    undo.texts.push([x.id, x.text, t]);
+    x.text = t;
+    r.u += n;
+  }
+  // 고치는 중인 요약은 입력 칸이 원본이라, 정리하는 중인 요약은 곧 새 요약으로 바뀌어 고친 것이 사라지므로 건드리지 않는다
+  // 바꾼 요약은 직접 고친 요약 — AI 로 다시 요약할 때 묻고 바꾸게 (되돌리면 전 표시로)
+  const busy = S.sumEdit?.doc === d || (S.summarizing && S.sumId === d.id);
+  if (d.summary) {
+    const [v, n] = replaceIn(d.summary, q, to);
+    if (busy) { r.sLeft = n; r.sWhy = S.sumEdit?.doc === d ? '고치는' : '정리하는'; } // 남겨 둔 곳 (알림에 적는다)
+    else if (n) { undo.summary = [d.summary, v, !!d.summaryEdited]; d.summary = v; d.summaryEdited = true; r.s = n; }
+  }
+  // 바꾼 제목은 직접 붙인 제목 — 다음 요약이 자동 제목으로 덮어쓰지 않게 (제목 칸에서 고칠 때와 같이, 되돌리면 전 표시로)
+  if (d.title) {
+    const [v, n] = replaceIn(d.title, q, to);
+    if (n) { undo.title = [d.title, v, !!d.autoTitle]; d.title = v; d.autoTitle = false; r.t = n; }
+  }
+  return r;
+}
+// 바로 저장하고 다시 그린다 (녹취록 · 요약 · 제목 · 찾기 표시)
+function saveReplaced(d) {
+  persistDoc(d);
+  persistDoc.flush();
+  renderDoc();
+}
+// 되돌리기 — 그사이 다시 고친 곳은 그대로 둔다
+function undoReplace(undo) {
+  const d = doc();
+  if (!d || d.id !== undo.id) { toast('다른 회의로 옮겨 가서 되돌리지 않았어요', 'warn'); return; }
+  const byId = new Map(d.utterances.map((x) => [x.id, x]));
+  let n = 0;
+  for (const [id, old, now] of undo.texts) {
+    const x = byId.get(id);
+    if (x && x.text === now) { x.text = old; n++; }
+  }
+  if (undo.summary && d.summary === undo.summary[1]) { d.summary = undo.summary[0]; d.summaryEdited = undo.summary[2]; n++; }
+  if (undo.title && d.title === undo.title[1]) { d.title = undo.title[0]; d.autoTitle = undo.title[2]; n++; }
+  if (!n) return;
+  saveReplaced(d);
+  toast('바꾸기 전으로 되돌렸어요');
+}
+// 요약을 고치거나 정리하는 중이라 남겨 둔 곳
+const sumLeftMsg = (r) => `요약은 ${r.sWhy} 중이라 그대로 뒀어요`;
+function replacedMsg(r, from, to) {
+  const parts = [r.u && `녹취록 ${r.u}곳`, r.s && `요약 ${r.s}곳`, r.t && '제목'].filter(Boolean);
+  return `${parts.join(' · ')}을 바꿨어요 · ${from} → ${to || '(지움)'}${r.sLeft ? ` (${sumLeftMsg(r)})` : ''}`;
+}
+// 모두 바꾼 뒤: 되돌리기 · 바꾼 말을 용어집에
+function replaceAllAndNudge(d, from, to) {
+  const r = replaceAllIn(d, from, to);
+  if (!r.u && !r.s && !r.t) { toast(r.sLeft ? `바꾸지 않았어요 — ${sumLeftMsg(r)}` : '바꿀 곳이 없어요'); return false; }
+  saveReplaced(d);
+  nudge(replacedMsg(r, from, to), [{ label: '되돌리기', fn: () => undoReplace(r.undo) }, ...glossaryAct(to)]);
+  return true;
+}
+function replaceAllFound() {
+  onFindInput.flush();
+  const d = doc(), q = S.findQ, to = $('#rep-input').value;
+  if (!d || !q || editing) return;
+  replaceAllAndNudge(d, q, to);
+}
+
+/* 고친 말 제안: 문장을 고치면 바뀐 말 하나(1~3 낱말)를 찾아
+   - 이 회의에 같은 말이 더 있으면 '모두 바꾸기'
+   - 바꾼 말을 용어집에 넣으면 다음 녹음부터 더 잘 알아듣는다 (용어집은 녹음을 시작할 때 인식 엔진에 들어간다) */
+const PUNCT = '\\s.,!?…·:;"\'“”‘’()[\\]{}<>~\\-';
+const EDGE_RE = new RegExp(`^[${PUNCT}]+|[${PUNCT}]+$`, 'g');
+// 조사 — [조사, 앞 글자 받침: 1 있어야 · 0 없어야 · 'r' 없거나 ㄹ · null 상관없음]
+// 받침을 따지는 까닭: '카카오페이' 의 '이' 처럼 낱말의 일부인 글자를 조사로 떼지 않게 ('페' 는 받침이 없어 조사 '이' 가 붙을 수 없다)
+const JOSA = [
+  ['에서는', null], ['에게서', null], ['입니다', null], ['으로는', 1], ['이라고', 1], ['이에요', 1],
+  ['에서', null], ['에게', null], ['에는', null], ['에도', null], ['까지', null], ['부터', null], ['처럼', null],
+  ['보다', null], ['하고', null], ['께서', null], ['한테', null], ['으로', 1], ['이랑', 1], ['라고', 0], ['예요', 0], ['로는', 'r'],
+  ['은', 1], ['이', 1], ['을', 1], ['과', 1], ['는', 0], ['가', 0], ['를', 0], ['와', 0], ['랑', 0], ['로', 'r'],
+  ['의', null], ['에', null], ['도', null], ['만', null],
+];
+function josaFits(stem, need) {
+  if (need == null) return true;
+  const c = stem.charCodeAt(stem.length - 1);
+  if (!(c >= 0xac00 && c <= 0xd7a3)) return true; // 영문 · 숫자 뒤에는 따지지 않는다
+  const jong = (c - 0xac00) % 28;
+  return need === 1 ? jong !== 0 : need === 0 ? jong === 0 : jong === 0 || jong === 8;
+}
+// 앞뒤 문장부호 · 같은 조사를 뗀다 ('바다수기가.' → '받아쓰기가!' 는 '바다수기' → '받아쓰기')
+// 문장부호는 그 문장에서만 맞는 것이라 같은 말을 찾을 때 넣지 않는다
+function trimPair(from, to) {
+  from = from.replace(EDGE_RE, '');
+  to = to.replace(EDGE_RE, '');
+  for (const [p, need] of JOSA) {
+    if (from.length >= p.length + 2 && to.length > p.length && from.endsWith(p) && to.endsWith(p)) {
+      const f = from.slice(0, -p.length), t = to.slice(0, -p.length);
+      if (josaFits(f, need) && josaFits(t, need)) return [f, t];
+    }
+  }
+  return [from, to];
+}
+// 고치기 전 · 뒤 문장에서 바뀐 말 하나 → { from, to } (여러 곳을 고쳤거나 넣기 · 지우기만 했으면 null)
+function wordChange(before, after) {
+  const A = before.split(/\s+/).filter(Boolean), B = after.split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < A.length && i < B.length && A[i] === B[i]) i++;
+  let j = 0;
+  while (j < A.length - i && j < B.length - i && A[A.length - 1 - j] === B[B.length - 1 - j]) j++;
+  const x = A.slice(i, A.length - j), y = B.slice(i, B.length - j);
+  if (!x.length || !y.length || x.length > 3 || y.length > 3) return null;
+  // (문장부호만 고쳤으면 떼고 나서 같아진다 → 묻지 않는다)
+  const [from, to] = trimPair(x.join(' '), y.join(' '));
+  if (from.length < 2 || !to || from === to || from.length > 30 || to.length > 30) return null;
+  // 조사만 고쳤으면('회의를' → '회의가') 그 문장에만 맞는 고침이라 묻지 않는다
+  let p = 0;
+  while (p < from.length && p < to.length && from[p] === to[p]) p++;
+  const josaOnly = (s) => !s || JOSA.some(([j]) => j === s);
+  if (p > 0 && josaOnly(from.slice(p)) && josaOnly(to.slice(p))) return null;
+  return { from, to };
+}
+// 글자 몇 개를 고쳤나 (짧은 말끼리라 단순하게)
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+const nudged = new Set(); // 한 번 물어본 고침은 다시 묻지 않는다 (앱을 켜 둔 동안)
+function suggestFromEdit(d, id, before, after) {
+  if (S.mini) return;
+  const c = wordChange(before, after);
+  if (!c) return;
+  const key = `${c.from}\n${c.to}`;
+  if (nudged.has(key)) return;
+  let others = 0;
+  for (const x of d.utterances) if (x.id !== id) others += repMatches(x.text, c.from, c.to).filter((m) => !m.skip).length;
+  // 같은 말이 더 없으면, 맞춤법 한두 글자 고친 것까지 묻지 않게 — 두 글자 넘게 바꿨거나 영문 · 숫자가 든 말만 용어집을 권한다
+  const gl = glossaryAct(c.to);
+  const termy = editDistance(c.from, c.to) >= 2 || /[A-Za-z0-9]/.test(c.to);
+  if (!others && !(gl.length && termy)) return;
+  // 되돌려 고치는 것('KIOSK' → '키오스크')도 다시 묻지 않는다
+  nudged.add(key);
+  nudged.add(`${c.to}\n${c.from}`);
+  if (others) {
+    nudge(`같은 말이 ${others}곳 더 있어요 · ${c.from} → ${c.to}`, [
+      { label: '모두 바꾸기', fn: () => { const dd = doc(); if (dd?.id === d.id) replaceAllAndNudge(dd, c.from, c.to); } },
+      ...gl,
+    ]);
+  } else {
+    nudge(`용어집에 넣을까요? · ${c.to} — 다음 녹음부터 더 잘 알아들어요`, gl);
+  }
+}
+
+/* 용어집 (설정 › 녹음) — 쉼표 · 줄바꿈 · 세미콜론으로 나눈 낱말. 앱의 glossary_terms 와 같은 규칙 */
+function glossaryTerms() {
+  return (S.settings?.glossary || '').split(/[,\n;]/).map((t) => t.trim()).filter(Boolean);
+}
+function glossaryAct(term) {
+  const t = (term || '').trim();
+  if (!S.settings || t.length < 2 || t.length > 30 || /[,;\n]/.test(t) || !/[\p{L}\p{N}]/u.test(t)) return [];
+  if (glossaryTerms().some((x) => x.toLowerCase() === t.toLowerCase())) return [];
+  return [{ label: '용어집에 넣기', title: `용어집에 '${t}' — 다음 녹음부터 이 말을 더 잘 알아들어요 (설정 › 녹음에서 고쳐요)`, fn: () => addGlossary(t) }];
+}
+function addGlossary(t) {
+  if (glossaryTerms().some((x) => x.toLowerCase() === t.toLowerCase())) return;
+  const g = (S.settings.glossary || '').replace(/[\s,;]+$/, '');
+  S.settings.glossary = g ? `${g}, ${t}` : t;
+  $('#opt-glossary').value = S.settings.glossary;
+  saveSettings();
+  saveSettings.flush();
+  toast(`용어집에 넣었어요: ${t}\n다음 녹음부터 더 잘 알아들어요`);
+}
+
+/* 제안 막대 — 알림 자리에 단추와 함께. 가만두면 사라지고, 마우스를 올려 두면 기다린다 */
+let nudgeTimer;
+function nudge(msg, acts, ms = 12000) {
+  const el = $('#nudge');
+  $('#nudge-msg').textContent = msg;
+  $('#nudge-msg').title = msg;
+  $('#nudge-acts').replaceChildren(...acts.map((a, i) => {
+    const b = document.createElement('button');
+    b.className = `chip-btn${i === 0 ? ' primary' : ''}`;
+    b.textContent = a.label;
+    if (a.title) b.title = a.title;
+    b.addEventListener('click', () => { hideNudge(); a.fn(); });
+    return b;
+  }));
+  $('#toast').hidden = true;
+  el.hidden = false;
+  el.dataset.ms = ms;
+  armNudge(ms);
+}
+function armNudge(ms) { clearTimeout(nudgeTimer); nudgeTimer = setTimeout(hideNudge, ms); }
+function hideNudge() { clearTimeout(nudgeTimer); $('#nudge').hidden = true; }
+$('#nudge-close').addEventListener('click', hideNudge);
+$('#nudge').addEventListener('mouseenter', () => clearTimeout(nudgeTimer));
+$('#nudge').addEventListener('mouseleave', () => armNudge(5000));
 
 /* ───────────── 글자 크기 (Ctrl +/-/0, Ctrl+휠) ───────────── */
 let fontPx = 15;
@@ -2919,7 +3240,7 @@ function setMini(on) {
     const el = $(sel);
     if (el) on ? el.setAttribute('data-tauri-drag-region', '') : el.removeAttribute('data-tauri-drag-region');
   }
-  if (on) { closePanels(); hidePopovers(); $('#findbar').hidden = true; S.findQ = ''; }
+  if (on) { closePanels(); hidePopovers(); hideNudge(); $('#findbar').hidden = true; S.findQ = ''; }
   renderDock();
   scheduleRender();
 }
