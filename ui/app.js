@@ -6,9 +6,9 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const T = window.__TAURI__;
 // 기록을 읽고 쓰는 명령은 앱이 작업 스레드에서 처리한다 — 보낸 순서대로 끝나도록 하나씩 보낸다
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
-const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio']);
-// 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약은 몇 분 걸릴 수 있다)
-const AFTER_CMDS = new Set(['summarize']);
+const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa']);
+// 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
+const AFTER_CMDS = new Set(['summarize', 'ask_meeting']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
   if (AFTER_CMDS.has(cmd)) return orderedChain.then(() => T.core.invoke(cmd, args));
@@ -409,6 +409,7 @@ function updateActions() {
   $('#btn-copy').disabled = !has;
   $('#btn-save').disabled = !has;
   $('#btn-summary').disabled = !has || S.summarizing;
+  $('#btn-ask').disabled = !canAsk(d);
   renderBanners(has);
 }
 
@@ -1143,7 +1144,7 @@ function commentHtml(cs) {
 
 // 노트를 펼칠지: 넓은 창은 처음부터 펼쳐 두고, 좁은 창은 눌러서 연다 (각각 마지막으로 고른 대로)
 const wideMq = matchMedia('(min-width: 760px)');
-const NTABS = ['memo', 'summary', 'comments'];
+const NTABS = ['memo', 'summary', 'ask', 'comments'];
 const notesPref = { wide: null, narrow: null };
 let notesW = 0; // 0: 창 크기에 맞춰 (CSS) · 끌어서 정하면 그 너비
 try {
@@ -1201,6 +1202,7 @@ function renderNotes() {
     memoFor = d.id;
   }
   renderCommentList(d);
+  renderAsk();
 }
 // 요약 카드: 노트가 열려 있으면 노트의 요약 탭으로, 닫혀 있으면 녹취록 위로
 function placeSummary(inNotes) {
@@ -1755,6 +1757,234 @@ $('#summary-card').addEventListener('click', (e) => {
   S.sumCancelling = true;
   renderSummary();
   api.invoke('cancel_summary', { token: S.sumToken }).catch(() => {});
+});
+
+/* ───────────── 회의에 묻기 ───────────── */
+// 요약에 쓰는 AI(설정 › 요약)로 이 회의에 묻는다. 묻고 받은 답은 앱이 기록에 남기고(화면은 고치지 않는다)
+// Markdown 회의록에도 들어간다. 답의 [12:34] 는 눌러서 녹취록 그 문장으로 간다.
+// S.ask: 지금 받는 답 { id, doc, token, q, text, waitSecs, restarted, started, cancelling, shown }
+const askList = $('#ask-list');
+const askInput = $('#ask-input');
+const ASK_CANCELLED = '답을 멈췄어요';
+let askShown = '';
+const TS_RE = /\[(?:(\d{1,3}):)?(\d{1,3}):(\d{2})\]/g;
+// 답 → HTML (목록 · 굵게). 녹취록 시각은 누를 수 있게
+function askHtml(text) {
+  return md(text).replace(TS_RE, (m, h, mi, s) => {
+    if (+s >= 60 || (h != null && +mi >= 60)) return m;
+    const ms = ((+h || 0) * 3600 + +mi * 60 + +s) * 1000;
+    return `<button class="ts" data-ms="${ms}" title="녹취록에서 이 문장 보기">${fmt(ms)}</button>`;
+  });
+}
+// 물어볼 만한 것 — 화자 이름을 붙였으면 그 사람 의견도
+function askSuggestions(d) {
+  const out = ['결정된 것만 정리해 줘', '할 일과 담당자 · 기한은?', '숫자나 금액이 나온 곳은?', '의견이 갈린 부분은?'];
+  const spk = d.utterances.map((u) => resolveSpk(d, u.speaker)).find((s) => s != null && d.speakers?.[s]);
+  if (spk != null) out.splice(2, 0, `${speakerName(d, spk)} 의견만 정리해 줘`);
+  return out;
+}
+const canAsk = (d) => !!(d && (d.utterances.length || (d.summary || '').trim() || (d.notes || '').trim()));
+// 같은 질문 · 답 (앱이 다시 읽어 준 사본은 객체가 달라 내용으로 본다)
+const sameQa = (x, y) => x.q === y.q && x.at === y.at && x.a === y.a;
+// 화면이 들고 있는 그 회의의 사본들 — 녹음 중인 회의 · 보던 회의 · 묻거나 지울 때 쥐고 있던 것.
+// 앱이 다시 읽어 준 사본으로 바뀌었거나 그 사이 다른 회의로 옮겨 갔어도, 돌아왔을 때 맞게 보이도록 모두 고친다
+function copiesOf(id, ...held) {
+  return [...new Set([...held, S.liveDoc, S.viewDoc].filter((x) => x && x.id === id))];
+}
+function qaHtml(x, i) {
+  const meta = [String(x.at || '').slice(11, 16), x.model].filter(Boolean).join(' · ');
+  return `<div class="qa" data-i="${i}"><div class="qa-q">${esc(x.q)}</div><div class="qa-a md">${askHtml(x.a)}</div>`
+    + (x.partial ? '<div class="qa-part">회의가 길어 질문과 관련 있어 보이는 구간 위주로 보고 답했어요</div>' : '')
+    + `<div class="qa-meta"><span title="${esc(meta)}">${esc(meta)}</span>`
+    + '<button data-qa="memo" title="질문과 답을 메모 끝에 붙여요">메모에 넣기</button><button data-qa="copy">복사</button>'
+    + '<button data-qa="del" title="이 질문과 답 지우기">지우기</button></div></div>';
+}
+function renderAsk() {
+  const d = doc();
+  if (!d || curTab() !== 'ask' || !notesShown()) return;
+  const pend = S.ask && S.ask.id === d.id ? S.ask : null;
+  const items = d.qa || [];
+  let html;
+  if (!items.length && !pend) {
+    html = '<div class="n-empty"><svg><use href="#i-ask"/></svg><b>이 회의에 물어보세요</b>'
+      + (canAsk(d)
+        ? '<p>요약에 쓰는 AI 가 녹취록 · 요약 · 메모를 보고 답해요.<br>답에 붙은 시각을 누르면 녹취록 그 문장으로 가요.</p>'
+          + `<div class="ask-sugs">${askSuggestions(d).map((s) => `<button class="chip-btn" data-sug="${esc(s)}">${esc(s)}</button>`).join('')}</div>`
+        : '<p>받아 적은 내용이 생기면 물어볼 수 있어요.</p>')
+      + '</div>';
+  } else {
+    html = items.map(qaHtml).join('')
+      + (pend ? `<div class="qa" id="qa-pending" data-token="${pend.token}"></div>` : '')
+      + (items.length && !pend ? '<div class="qa-tail"><button class="link" data-qa="clear">묻고 답한 것 모두 지우기</button></div>' : '');
+  }
+  if (html !== askShown) {
+    const atEnd = askList.scrollHeight - askList.scrollTop - askList.clientHeight < 60;
+    const grew = askShown && html.length > askShown.length;
+    askList.innerHTML = html;
+    askShown = html;
+    if (atEnd || grew || pend) askList.scrollTop = askList.scrollHeight;
+  }
+  if (pend) renderAskPending();
+  renderAskSend();
+  fitAsk();
+}
+// 보내기 단추: 답을 받는 동안은 멈추기
+function renderAskSend() {
+  const d = doc();
+  const pend = S.ask && d && S.ask.id === d.id ? S.ask : null;
+  const send = $('#ask-send');
+  send.classList.toggle('stop', !!pend);
+  send.title = pend ? (pend.cancelling ? '멈추는 중…' : '답 멈추기') : '보내기 (Enter · 줄바꿈은 Shift+Enter)';
+  send.disabled = pend ? !!pend.cancelling : (!!S.ask || !canAsk(d) || !askInput.value.trim());
+  askInput.disabled = !canAsk(d);
+  $$('#ask-list [data-sug]').forEach((b) => (b.disabled = !!S.ask));
+}
+// 받는 중인 답 — 글이 올 때마다 그 칸만 다시 그린다
+let askFrame = 0;
+function renderAskPending() {
+  askFrame = 0;
+  const p = S.ask;
+  const el = $('#qa-pending');
+  if (!p || !el || +el.dataset.token !== p.token) return;
+  const atEnd = askList.scrollHeight - askList.scrollTop - askList.clientHeight < 60;
+  if (!el.firstChild) {
+    el.innerHTML = `<div class="qa-q">${esc(p.q)}</div><div class="qa-a md"></div><div class="qa-meta"><span class="qa-status"></span></div>`;
+    p.shown = null;
+  }
+  if (p.shown !== p.text) {
+    $('.qa-a', el).innerHTML = p.text ? askHtml(p.text) : '<div class="qa-dots"><i></i><i></i><i></i></div>';
+    p.shown = p.text;
+  }
+  let status;
+  if (p.cancelling) status = '멈추는 중…';
+  else if (p.waitSecs > 0) status = `요청 한도 때문에 ${p.waitSecs}초 기다렸다가 다시 물어요…`;
+  else if (!p.text) status = p.restarted ? '회의 기록을 줄여서 다시 묻는 중…' : '회의 기록을 읽는 중…';
+  else status = '답을 쓰는 중…';
+  $('.qa-status', el).textContent = `${status} ${fmt(Date.now() - p.started)}`;
+  if (atEnd) askList.scrollTop = askList.scrollHeight;
+}
+// 입력 칸을 글 길이에 맞게 (최대 다섯 줄쯤). 칸이 안 보이거나 아주 좁을 때 재면 높게 굳으므로 그때는 건너뛴다
+function fitAsk() {
+  if (askInput.offsetWidth < 80) return;
+  askInput.style.height = '';
+  if (askInput.scrollHeight > askInput.clientHeight) askInput.style.height = `${Math.min(askInput.scrollHeight + 2, 132)}px`;
+}
+async function askMeeting(question) {
+  const d = doc();
+  const q = String(question || '').trim();
+  if (!d || !q || !canAsk(d)) return;
+  if (S.ask) { toast('앞 질문의 답을 받는 중이에요'); return; }
+  // 방금 고친 문장 · 메모가 들어가게 기다리던 저장을 먼저 보낸다
+  flushSaves();
+  const my = { id: d.id, doc: d, token: Date.now(), q, text: '', waitSecs: 0, restarted: false, started: Date.now(), cancelling: false, shown: null };
+  S.ask = my;
+  if (askInput.value.trim() === q) { askInput.value = ''; fitAsk(); }
+  clearInterval(S.askTimer);
+  S.askTimer = setInterval(renderAskPending, 1000);
+  renderAsk();
+  try {
+    const item = await api.invoke('ask_meeting', { id: d.id, question: q, token: my.token });
+    // 그 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었을 수 있다 → 그 회의의 사본마다, 이미 있으면 그대로
+    for (const t of copiesOf(my.id, my.doc)) {
+      if (!(t.qa || []).some((y) => sameQa(y, item))) t.qa = [...(t.qa || []), item];
+    }
+  } catch (e) {
+    const msg = String(e);
+    if (msg !== ASK_CANCELLED) toast(msg, 'error');
+    // 다시 물을 수 있게 질문을 입력 칸에 돌려놓는다 (그 사이 새로 친 글이 없으면)
+    if (!askInput.value.trim() && doc()?.id === my.id) { askInput.value = q; fitAsk(); }
+  } finally {
+    if (S.ask === my) S.ask = null;
+    clearInterval(S.askTimer);
+    if (askFrame) { cancelAnimationFrame(askFrame); askFrame = 0; }
+    renderAsk();
+  }
+}
+function cancelAsk() {
+  const a = S.ask;
+  if (!a || a.cancelling) return;
+  a.cancelling = true;
+  renderAskPending();
+  renderAskSend();
+  api.invoke('cancel_ask', { token: a.token }).catch(() => {});
+}
+function openAsk() {
+  if (!doc() || S.mini) return;
+  if (!notesShown()) { setNotesWanted(true); renderNotes(); renderSummary(); }
+  showNotesTab('ask');
+  if (!askInput.disabled) askInput.focus();
+}
+// 녹취록 시각 → 그 시각에 말하던 문장 (말 사이면 가까운 문장)
+function gotoMs(ms) {
+  const d = doc();
+  if (!d?.utterances.length) return;
+  const sorted = [...d.utterances].sort((a, b) => a.startMs - b.startMs || a.id - b.id);
+  const u = anchorOf(sorted, ms);
+  if (u) gotoUtterance(u.id);
+}
+$('#btn-ask').addEventListener('click', openAsk);
+$('#ask-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (S.ask && S.ask.id === doc()?.id) cancelAsk();
+  else askMeeting(askInput.value);
+});
+askInput.addEventListener('keydown', (e) => {
+  // 한글 조합 중 Enter 는 글자를 끝내는 것 — 보내지 않는다
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  if (!S.ask) askMeeting(askInput.value);
+});
+askInput.addEventListener('input', () => { fitAsk(); renderAskSend(); });
+// 지우는 중에는 다시 지우지 않는다 (앱은 번호가 아니라 그 질문 · 답 내용으로 찾아 지운다)
+let qaDeleting = false;
+async function deleteQa(d, item) {
+  if (qaDeleting) return;
+  qaDeleting = true;
+  try {
+    await api.invoke('delete_qa', { id: d.id, item });
+    // 지우는 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었을 수 있다 → 그 회의의 사본마다 내용으로 찾는다
+    for (const t of copiesOf(d.id, d)) {
+      if (!item) { t.qa = []; continue; }
+      const k = (t.qa || []).findIndex((y) => sameQa(y, item));
+      if (k >= 0) t.qa.splice(k, 1);
+    }
+  } catch (err) {
+    toast(String(err), 'error');
+  } finally {
+    qaDeleting = false;
+    renderAsk();
+  }
+}
+askList.addEventListener('click', async (e) => {
+  const ts = e.target.closest('.ts');
+  if (ts) { gotoMs(+ts.dataset.ms); return; }
+  const sug = e.target.closest('[data-sug]');
+  if (sug) { askMeeting(sug.dataset.sug); return; }
+  const b = e.target.closest('[data-qa]');
+  const d = doc();
+  if (!b || !d) return;
+  const act = b.dataset.qa;
+  if (act === 'clear') {
+    if (qaDeleting || !(await api.ask('이 회의에 묻고 답한 것을 모두 지울까요?', { title: '받아쓰기', kind: 'warning' }))) return;
+    deleteQa(d, null);
+    return;
+  }
+  const i = +b.closest('.qa')?.dataset.i;
+  const x = d.qa?.[i];
+  if (!x) return;
+  if (act === 'copy') {
+    await navigator.clipboard.writeText(`Q. ${x.q}\n${x.a}`);
+    toast('질문과 답을 복사했어요');
+  } else if (act === 'memo') {
+    const cur = (d.notes || '').replace(/\s+$/, '');
+    d.notes = `${cur ? `${cur}\n\n` : ''}Q. ${x.q}\n${x.a.trim()}`;
+    syncMemoBox(d);
+    persistDoc(d);
+    scheduleRender();
+    toast('메모 끝에 질문과 답을 넣었어요');
+  } else if (act === 'del') {
+    deleteQa(d, x);
+  }
 });
 
 /* ───────────── 패널 ───────────── */
@@ -2533,7 +2763,7 @@ function tallyLines(t, c) {
     else if (c?.unpriced?.length) out.push('<span class="usage-amt"><b>금액 모름</b></span>');
   }
   if (t?.sttRequests) out.push(esc(`음성 인식 ${minutes(t.sttSecs)} · ${n0(t.sttRequests)}회${t.sttFailures ? ` (실패 ${n0(t.sttFailures)})` : ''}`) + part(c?.sttUsd || 0));
-  if (t?.sumRequests) out.push(esc(`요약 ${n0(t.sumRequests)}회 · 토큰 입력 ${n0(t.sumInTokens)} · 출력 ${n0(t.sumOutTokens)}`) + part(c?.sumUsd || 0));
+  if (t?.sumRequests) out.push(esc(`요약 · 묻기 ${n0(t.sumRequests)}회 · 토큰 입력 ${n0(t.sumInTokens)} · 출력 ${n0(t.sumOutTokens)}`) + part(c?.sumUsd || 0));
   return out.length ? out : ['없음'];
 }
 // 카드 아래 덧붙임 — 이번 달 기준 (오늘은 이번 달에 들어 있다)
@@ -2851,6 +3081,15 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
     S.sumProgress = e.payload;
     renderSummary();
   });
+  await api.listen('bd://ask-progress', (e) => {
+    // 멈춘 앞 질문이 끝까지 받는 답은 버린다
+    const p = e.payload, a = S.ask;
+    if (!a || p?.token !== a.token || a.cancelling) return;
+    if (p.restart) { a.text = ''; a.restarted = true; }
+    if (p.delta) { a.text += p.delta; a.waitSecs = 0; }
+    if (p.waitSecs != null) a.waitSecs = p.waitSecs;
+    if (!askFrame) askFrame = requestAnimationFrame(renderAskPending);
+  });
   await api.listen('bd://mini', (e) => setMini(!!e.payload));
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await refreshState();
@@ -2957,6 +3196,26 @@ function createMock() {
     for (const [section, frac] of steps) { send({ writing: true, section, frac }); await wait(450); check(); }
     return { text: '### 한 줄 요약\n15일 출시를 확정했다.\n\n### 주요 논의\n- 김 팀장: 출시 일정 확인\n\n### 결정 사항\n- 15일 출시\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일\n\n### 남은 질문\n- 없음', title: null };
   }
+  // 브라우저 미리보기: 읽는 척 잠깐 쉬었다가 답을 조금씩 보낸다 (?askslow 면 느리게 · ?askfail 이면 오류)
+  const mockQa = {};
+  let mockAskCancel = null;
+  async function mockAsk({ id, question, token }) {
+    const q = new URLSearchParams(location.search);
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms * (q.has('askslow') ? 4 : 1)));
+    const send = (p) => handlers['bd://ask-progress'] && handlers['bd://ask-progress']({ payload: { id, token, ...p } });
+    const check = () => { if (mockAskCancel === token) throw '답을 멈췄어요'; };
+    await wait(1200); check();
+    if (q.has('askfail')) throw 'AI API 오류 429: Rate limit reached (요청 한도를 넘었어요. 잠시 뒤 다시 시도해 주세요)';
+    const answer = /할 일|담당/.test(question)
+      ? '- **결제 모듈 배포** — 이 개발, 금요일까지 [00:07]\n- **온보딩 시안 2종** — 박 디자인, 수요일까지 [00:17]\n- **매장 피드백 정리 · 공유** — 박 디자인, 금요일까지 [00:46] [00:52]'
+      : '출시일은 **15일**로 정했고, 목요일에 한 번 더 점검하기로 했어요 [00:25]. 그 전에 키오스크 응답 속도는 인덱스를 추가해 평균 2초에서 0.4초로 줄였다고 이 개발이 말했어요 [00:34].';
+    for (const piece of answer.match(/[\s\S]{1,9}/g)) { send({ delta: piece }); await wait(60); check(); }
+    const p = (n) => String(n).padStart(2, '0');
+    const now = new Date();
+    const item = { q: question.trim(), a: answer, at: `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`, model: 'claude-opus-5-5' };
+    (mockQa[id] ||= []).push(item);
+    return item;
+  }
   const st = {
     settings: {
       engine: 'local', localModel: 'large-v3-turbo-q5_0', beamSize: 1, threads: 0,
@@ -3020,13 +3279,22 @@ function createMock() {
       if (cmd === 'list_sessions') return mockSessions();
       if (cmd === 'load_session' || cmd === 'undo_refinement') {
         const m = mockSessions().find((x) => x.id === args.id);
-        const d = { ...demoDoc(), ...(m && { id: m.id, title: m.title, startedAt: m.startedAt }) };
+        const d = { ...demoDoc(), ...(m && { id: m.id, title: m.title, startedAt: m.startedAt }), qa: [...(mockQa[args.id] || [])] };
         if (cmd === 'undo_refinement') { delete d.beforeRefine; d.speakers = { 0: '김 팀장', 1: '이 개발', 2: '박 디자인', 3: '최 기획' }; d.utterances[3].speaker = 3; }
         return d;
       }
       if (cmd === 'session_text') return '데모';
       if (cmd === 'summarize') return mockSummarize(args);
       if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
+      if (cmd === 'ask_meeting') return mockAsk(args);
+      if (cmd === 'cancel_ask') { mockAskCancel = args.token; return; }
+      if (cmd === 'delete_qa') {
+        await new Promise((r) => setTimeout(r, 300)); // 앱처럼 잠깐 걸린다 (두 번 눌러 보기)
+        const l = mockQa[args.id] || [];
+        if (!args.item) l.length = 0;
+        else { const k = l.findIndex((y) => y.q === args.item.q && y.at === args.item.at && y.a === args.item.a); if (k >= 0) l.splice(k, 1); }
+        return;
+      }
       if (cmd === 'toggle_recording') { const h = handlers['bd://rec']; st.rec = st.rec === 'idle' ? 'recording' : 'idle'; h && h({ payload: st.rec }); return; }
       return null;
     },

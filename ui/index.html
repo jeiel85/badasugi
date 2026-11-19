@@ -128,6 +128,7 @@
         <nav class="notes-tabs" id="notes-tabs" role="tablist" aria-label="노트">
           <button role="tab" data-ntab="memo"><svg><use href="#i-notes"/></svg>메모</button>
           <button role="tab" data-ntab="summary"><svg><use href="#i-sparkles"/></svg>요약</button>
+          <button role="tab" data-ntab="ask"><svg><use href="#i-ask"/></svg>묻기</button>
           <button role="tab" data-ntab="comments"><svg><use href="#i-comment"/></svg>코멘트<span class="n-count" id="cmt-count"></span></button>
         </nav>
         <button class="icon-btn sm" id="btn-notes-close" title="노트 닫기 (Ctrl+M)"><svg><use href="#i-x"/></svg></button>
@@ -149,6 +150,13 @@
             <div class="n-actions"><button class="btn sm" id="btn-summary-ai">AI 로 요약</button><button class="btn ghost sm" id="btn-summary-write">직접 쓰기</button></div>
           </div>
         </div>
+      </div>
+      <div class="notes-page ask-page" data-npage="ask" role="tabpanel" hidden>
+        <div class="notes-scroll ask-list" id="ask-list" aria-live="polite"></div>
+        <form class="ask-foot" id="ask-form">
+          <textarea id="ask-input" rows="1" spellcheck="false" aria-label="회의에 물어볼 내용" placeholder="이 회의에 대해 물어보세요"></textarea>
+          <button class="ask-send" id="ask-send" type="submit" title="보내기 (Enter)"><svg><use href="#i-send"/></svg></button>
+        </form>
       </div>
       <div class="notes-page" data-npage="comments" role="tabpanel" hidden>
         <div class="notes-scroll cmt-list" id="cmt-list"></div>
@@ -178,6 +186,7 @@
         <button class="icon-btn" id="btn-pause" title="일시정지 · 이어서" hidden><svg><use href="#i-pause"/></svg></button>
         <button class="icon-btn" id="btn-copy" title="전체 복사"><svg><use href="#i-copy"/></svg></button>
         <button class="icon-btn" id="btn-save" title="파일로 저장"><svg><use href="#i-download"/></svg></button>
+        <button class="icon-btn" id="btn-ask" title="회의에 묻기 — AI 에게 이 회의 내용을 물어봐요"><svg><use href="#i-ask"/></svg></button>
         <button class="icon-btn accent" id="btn-summary" title="AI 회의 요약"><svg><use href="#i-sparkles"/></svg></button>
         <button class="icon-btn mini-only" id="btn-expand" title="창 위치 복구 — 원래 크기·자리로 (더블클릭해도 돼요)"><svg><use href="#i-expand"/></svg></button>
         <button class="icon-btn mini-only" id="btn-mini-min" title="최소화 (작업 표시줄로)"><svg><use href="#i-minus"/></svg></button>
@@ -509,6 +518,8 @@
       <symbol id="i-comment" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
       <symbol id="i-notes" viewBox="0 0 24 24"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.4 5.6a2.1 2.1 0 1 0-3-3l-5 5a2 2 0 0 0-.5.9l-.8 2.8a.5.5 0 0 0 .6.6l2.9-.8a2 2 0 0 0 .9-.5z"/></symbol>
       <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+      <symbol id="i-ask" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M14.5 21.7a.5.5 0 0 0 .9-.1l6.5-19a.5.5 0 0 0-.6-.6l-19 6.5a.5.5 0 0 0-.1.9l7.9 3.2a2 2 0 0 1 1.1 1.1z"/><path d="m21.9 2.1-10.9 10.9"/></symbol>
       <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8l-1.3 4.4a.5.5 0 0 0 .6.6l4.4-1.3a2 2 0 0 0 .8-.5z"/></symbol>
     </defs>
   </svg>
