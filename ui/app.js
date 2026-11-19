@@ -1936,10 +1936,13 @@ async function deleteQa(d, item) {
   qaDeleting = true;
   try {
     await api.invoke('delete_qa', { id: d.id, item });
-    if (item) {
-      const k = (d.qa || []).indexOf(item);
-      if (k >= 0) d.qa.splice(k, 1);
-    } else d.qa = [];
+    // 지우는 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었을 수 있다 → 지금 화면의 그 회의 사본에서 내용으로 찾는다
+    const cur = doc();
+    for (const t of new Set([d, cur && cur.id === d.id ? cur : null].filter(Boolean))) {
+      if (!item) { t.qa = []; continue; }
+      const k = (t.qa || []).findIndex((y) => y.q === item.q && y.at === item.at && y.a === item.a);
+      if (k >= 0) t.qa.splice(k, 1);
+    }
   } catch (err) {
     toast(String(err), 'error');
   } finally {
