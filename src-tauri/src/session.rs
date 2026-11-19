@@ -63,6 +63,24 @@ pub struct SessionDoc {
     /// 회의 후 화자 다시 정리 전(녹음 중에 정해진) 화자 배정 · 이름 — 정리가 마음에 들지 않으면 되돌린다
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before_refine: Option<SpeakerSnapshot>,
+    /// 회의에 묻고 받은 답 (오래된 것부터). 앱만 고친다 — 화면 사본을 저장할 때는 저장된 것을 지킨다
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub qa: Vec<QaItem>,
+}
+
+/// 회의에 묻고 받은 답 하나
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct QaItem {
+    pub q: String,
+    pub a: String,
+    /// 물은 때 "2026-11-19 14:30"
+    pub at: String,
+    /// 답한 모델
+    pub model: String,
+    /// 회의가 길어 녹취록 일부만 보고 답했다
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// 한 시점의 화자 배정 · 이름
@@ -495,6 +513,16 @@ impl SessionDoc {
         }
     }
 
+    /// 말한 화자 이름 (처음 말한 차례로)
+    pub fn speaker_names(&self) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        self.utterances
+            .iter()
+            .filter(|u| u.speaker.is_some() && seen.insert(u.speaker))
+            .map(|u| self.speaker_name(u.speaker))
+            .collect()
+    }
+
     fn speaker_count(&self) -> usize {
         let mut v: Vec<u32> = self.utterances.iter().filter_map(|u| u.speaker).collect();
         v.sort_unstable();
@@ -604,6 +632,13 @@ impl SessionDoc {
             s.push_str("## 메모\n\n");
             s.push_str(memo.trim());
             s.push_str("\n\n");
+        }
+        if !self.qa.is_empty() {
+            s.push_str("## 묻고 답하기\n\n");
+            for x in &self.qa {
+                let q = x.q.split_whitespace().collect::<Vec<_>>().join(" ");
+                s.push_str(&format!("**Q. {q}**\n\n{}\n\n", x.a.trim()));
+            }
         }
         s.push_str("## 녹취록\n\n");
         for (spk, start, _, text, ids) in self.paragraphs() {
@@ -855,6 +890,8 @@ impl SessionStore {
             return Err(anyhow!("지운 기록이에요"));
         };
         let mut doc = doc;
+        // 묻고 답한 것은 앱만 고친다 — 묻는 동안 늦게 도착한 화면 사본이 새 답을 지우지 않게
+        doc.qa = old.qa.clone();
         if doc.speaker_rev < old.speaker_rev {
             // 화자 다시 정리 전에 만든 화면 사본이 늦게 저장됨: 화자 배정 · 이름은 저장된(정리된) 것을 지키고
             // 제목 · 글자 · 삭제만 반영한다
@@ -886,6 +923,22 @@ impl SessionStore {
         }
         write_doc(&self.dir, &doc)?;
         Ok(doc)
+    }
+
+    /// 묻고 답한 목록을 고쳐 저장한다 (녹음 중인 기록이면 그 기록에)
+    pub fn update_qa(&mut self, id: &str, f: impl FnOnce(&mut Vec<QaItem>)) -> Result<()> {
+        if let Some(cur) = self.current.as_mut().filter(|c| c.id == id) {
+            f(&mut cur.qa);
+            self.dirty = true;
+            return self.flush_any();
+        }
+        let path = self.json_path(safe_id(id)?);
+        let mut doc: SessionDoc = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .ok_or_else(|| anyhow!("지운 기록이에요"))?;
+        f(&mut doc.qa);
+        write_doc(&self.dir, &doc)
     }
 
     /// 발화를 모두 지운 경우에도 저장 (flush 는 빈 기록을 건너뛴다)
@@ -941,6 +994,16 @@ impl SessionStore {
                     hits += 1;
                     if snippet.is_empty() {
                         snippet = format!("메모 · {}", around(&d.notes, &q, 60));
+                    }
+                }
+                for x in &d.qa {
+                    for t in [&x.q, &x.a] {
+                        if t.to_lowercase().contains(&q) {
+                            hits += 1;
+                            if snippet.is_empty() {
+                                snippet = format!("묻기 · {}", around(t, &q, 60));
+                            }
+                        }
                     }
                 }
                 if !in_title && hits == 0 {
@@ -1259,6 +1322,34 @@ mod tests {
         // 지운 문장의 목소리는 빠진다
         d.utterances.retain(|u| u.id != 1);
         assert!(d.named_voices(&voices).iter().all(|x| x.0 != "박 대리"));
+    }
+
+    /// 묻고 답한 것은 앱만 고친다 — 묻기 전에 만든 화면 사본이 늦게 저장돼도 새 답이 남는다
+    #[test]
+    fn answers_survive_stale_screen_copies() {
+        let dir = std::env::temp_dir().join(format!("bd-qa-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-19_100000".into();
+        d.utterances = vec![u(0, 0, 0)];
+        write_doc(&dir, &d).unwrap();
+        let mut store = SessionStore::new(dir.clone());
+        let screen = store.load(&d.id).unwrap();
+        let item = QaItem { q: "VPN 비용은?".into(), a: "월 12만 원이에요 [00:00]".into(), at: "2026-11-19 10:05".into(), model: "m".into(), partial: true };
+        store.update_qa(&d.id, |qa| qa.push(item.clone())).unwrap();
+        // 화면 사본(답이 없는)으로 메모를 저장
+        let mut late = screen;
+        late.notes = "메모".into();
+        store.save_doc(late).unwrap();
+        let saved = store.load(&d.id).unwrap();
+        assert_eq!((saved.notes.as_str(), saved.qa.clone()), ("메모", vec![item.clone()]));
+        let md = saved.to_markdown();
+        assert!(md.contains("## 묻고 답하기\n\n**Q. VPN 비용은?**\n\n월 12만 원이에요 [00:00]"), "{md}");
+        let hit = &store.search("12만")[0];
+        assert!(hit.snippet.starts_with("묻기 · "), "{}", hit.snippet);
+        store.update_qa(&d.id, Vec::clear).unwrap();
+        assert!(store.load(&d.id).unwrap().qa.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

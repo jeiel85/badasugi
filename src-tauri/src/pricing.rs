@@ -1,8 +1,10 @@
 //! API 단가 — 설정 › 사용량에서 쓴 양을 금액(달러)으로 바꾸는 데 쓴다
 //!
-//! 각 공급자의 공식 단가표(2026-11-16 확인, 일반 등급 · 캐시 · 배치 할인 없음)를 옮겨 둔 것이라
+//! 각 공급자의 공식 단가표(2026-11-16 확인, 일반 등급 · 배치 할인 없음)를 옮겨 둔 것이라
 //! 실제 청구액과 조금 다를 수 있다. 단가가 바뀌면 이 표만 고치면 되고, 지난 사용량도 새 단가로 다시 셈한다.
 //! 표에 없는 모델(사용자 지정 서버 · 단가가 공개되지 않은 모델)은 금액을 셈하지 않는다.
+//! 프롬프트 캐시는 Claude(묻기)만 따로 셈한다 — 쓰기는 입력 단가의 1.25배, 읽기는 [`cache_read_price`].
+//! (OpenAI · Gemini 가 알아서 하는 캐시 할인은 응답에서 따로 읽지 않아 일반 입력 단가로 셈한다)
 //!
 //! - Claude: <https://platform.claude.com/docs/en/about-claude/pricing>
 //! - Groq: <https://console.groq.com/docs/models> — 음성 인식은 요청마다 최소 10초로 매긴다
@@ -77,6 +79,20 @@ pub fn token_price(provider: &str, model: &str) -> Option<(f64, f64)> {
         _ => return None,
     };
     Some(p)
+}
+
+/// 프롬프트 캐시에 쓰는 입력은 일반 입력 단가의 이 배수 (Claude, 5분 캐시)
+pub const CACHE_WRITE_RATE: f64 = 1.25;
+
+/// 프롬프트 캐시에서 읽는 입력 단가 — USD / 100만 토큰. 표에 없으면 None (그때는 입력 단가의 0.1배로 셈)
+pub fn cache_read_price(provider: &str, model: &str) -> Option<f64> {
+    let m = normalize(model);
+    Some(match (provider, m.as_str()) {
+        ("anthropic", "claude-fable-5-2" | "claude-mythos-5-2" | "claude-opus-5-5") => 0.20,
+        ("anthropic", "claude-fable-5-1" | "claude-mythos-5-1") => 0.25,
+        ("anthropic", "claude-sonnet-5-5") => 0.10,
+        _ => return None,
+    })
 }
 
 /// 음성 인식 단가 — USD / 1시간. 모르는 모델이면 None

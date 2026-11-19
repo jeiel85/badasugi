@@ -1,7 +1,7 @@
 //! 이 앱으로 쓴 API 사용량 — 제공자별 · 날짜별로 세어 `usage.json` 에 둔다 (설정 › 사용량)
 //!
 //! - 음성 인식: API 로 보낸 녹음 길이 · 요청 수 · 실패 수
-//! - 요약: 요청 수 · 입력/출력 토큰 (응답에 담겨 온 값)
+//! - 요약 · 묻기: 요청 수 · 입력/출력 토큰 (응답에 담겨 온 값). 입력 합계에는 Claude 프롬프트 캐시로 읽고 쓴 토큰도 넣는다
 //! - 모델별로도 따로 세어 두고, 볼 때 단가표(`pricing`)로 금액을 셈한다
 //! - 로컬 엔진 · Ollama 는 비용이 없으므로 세지 않는다
 
@@ -34,8 +34,13 @@ pub struct ModelTally {
     /// 공급자가 요금을 매기는 녹음 길이 (Groq 는 요청마다 최소 10초)
     pub stt_billed_secs: f64,
     pub stt_requests: u64,
+    /// 캐시를 거치지 않은 입력 토큰
     pub in_tokens: u64,
     pub out_tokens: u64,
+    /// Claude 프롬프트 캐시에 쓴 입력 토큰 (입력 단가의 1.25배)
+    pub cache_write_tokens: u64,
+    /// Claude 프롬프트 캐시에서 읽은 입력 토큰 (입력 단가보다 훨씬 싸다)
+    pub cache_read_tokens: u64,
 }
 
 impl ModelTally {
@@ -45,6 +50,13 @@ impl ModelTally {
         self.stt_requests += o.stt_requests;
         self.in_tokens += o.in_tokens;
         self.out_tokens += o.out_tokens;
+        self.cache_write_tokens += o.cache_write_tokens;
+        self.cache_read_tokens += o.cache_read_tokens;
+    }
+
+    /// 보낸 입력 전체 (캐시로 읽고 쓴 것까지)
+    fn prompt_tokens(&self) -> u64 {
+        self.in_tokens + self.cache_write_tokens + self.cache_read_tokens
     }
 }
 
@@ -108,9 +120,16 @@ impl Cost {
                 None => self.unpriced(model),
             }
         }
-        if t.in_tokens > 0 || t.out_tokens > 0 {
+        if t.prompt_tokens() > 0 || t.out_tokens > 0 {
             match pricing::token_price(provider, model) {
-                Some((i, o)) => self.sum_usd += (t.in_tokens as f64 * i + t.out_tokens as f64 * o) / 1e6,
+                Some((i, o)) => {
+                    let read = pricing::cache_read_price(provider, model).unwrap_or(i * 0.1);
+                    self.sum_usd += (t.in_tokens as f64 * i
+                        + t.cache_write_tokens as f64 * i * pricing::CACHE_WRITE_RATE
+                        + t.cache_read_tokens as f64 * read
+                        + t.out_tokens as f64 * o)
+                        / 1e6;
+                }
                 None => self.unpriced(model),
             }
         }
@@ -146,7 +165,7 @@ impl Cost {
             }
         }
         let rest = ModelTally {
-            in_tokens: t.sum_in_tokens.saturating_sub(known.in_tokens),
+            in_tokens: t.sum_in_tokens.saturating_sub(known.prompt_tokens()),
             out_tokens: t.sum_out_tokens.saturating_sub(known.out_tokens),
             ..Default::default()
         };
@@ -223,14 +242,17 @@ impl UsageBook {
         });
     }
 
-    pub fn summary(&self, provider: &str, model: &str, in_tokens: u64, out_tokens: u64) {
+    /// 요약 · 묻기 요청 하나 (`cache_write` · `cache_read`: Claude 프롬프트 캐시로 쓰고 읽은 입력 토큰)
+    pub fn summary(&self, provider: &str, model: &str, in_tokens: u64, out_tokens: u64, cache_write: u64, cache_read: u64) {
         self.with(provider, |t| {
             t.sum_requests += 1;
-            t.sum_in_tokens += in_tokens;
+            t.sum_in_tokens += in_tokens + cache_write + cache_read;
             t.sum_out_tokens += out_tokens;
             let m = t.model(model);
             m.in_tokens += in_tokens;
             m.out_tokens += out_tokens;
+            m.cache_write_tokens += cache_write;
+            m.cache_read_tokens += cache_read;
         });
     }
 
@@ -294,8 +316,8 @@ mod tests {
         book.stt("groq", "whisper-large-v3-turbo", 3.5);
         book.stt("groq", "whisper-large-v3-turbo", 2.0);
         book.stt_failed("groq");
-        book.summary("gemini", "gemini-2.5-flash-lite", 1200, 300);
-        book.summary("ollama", "exaone3.5:7.8b", 999, 999); // 로컬은 세지 않음
+        book.summary("gemini", "gemini-2.5-flash-lite", 1200, 300, 0, 0);
+        book.summary("ollama", "exaone3.5:7.8b", 999, 999, 0, 0); // 로컬은 세지 않음
         book.save();
         let again = UsageBook::load(path);
         let r = again.report(&no_legacy);
@@ -323,6 +345,17 @@ mod tests {
         let c = Cost::of("anthropic", &t, &|_| None);
         assert!((c.sum_usd - (51_788.0 * 4.0 + 11_674.0 * 20.0) / 1e6).abs() < 1e-9);
         assert!(!c.estimated && c.unpriced.is_empty());
+
+        // 묻기: 회의 기록을 캐시에 쓰고(1.25배) 다음 질문에서 읽는다(Opus 5.5 는 $0.20)
+        let book = UsageBook::load(std::env::temp_dir().join("bd-usage-nofile-cache/usage.json"));
+        book.summary("anthropic", "claude-opus-5-5", 100, 50, 20_000, 0);
+        book.summary("anthropic", "claude-opus-5-5", 120, 60, 0, 20_000);
+        let r = book.report(&no_legacy);
+        assert_eq!(r.today["anthropic"].sum_in_tokens, 40_220, "입력 합계에는 캐시로 읽고 쓴 것까지");
+        let c = &r.today_cost["anthropic"];
+        let want = (220.0 * 4.0 + 20_000.0 * 4.0 * 1.25 + 20_000.0 * 0.20 + 110.0 * 20.0) / 1e6;
+        assert!((c.sum_usd - want).abs() < 1e-9, "{} != {want}", c.sum_usd);
+        assert!(!c.estimated, "캐시 토큰을 모델 기록 전 사용분으로 잘못 보지 않는다");
 
         // Groq 음성 인식: 3초짜리 요청도 10초로 매긴다
         let book = UsageBook::load(std::env::temp_dir().join("bd-usage-nofile/usage.json"));

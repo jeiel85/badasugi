@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ant;
+mod ask;
 mod logging;
 mod power;
 mod session;
@@ -1206,7 +1207,7 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     // 요청이 성공할 때마다 바로 사용량에 센다 — 긴 회의 중간에 실패해도 이미 쓴 만큼은 남게
     let app3 = app.clone();
     let on_usage = move |provider: &str, r: &summary::Reply| {
-        app3.state::<usage_book::UsageBook>().summary(provider, &r.model, r.in_tokens, r.out_tokens);
+        app3.state::<usage_book::UsageBook>().summary(provider, &r.model, r.in_tokens, r.out_tokens, r.cache_write, r.cache_read);
     };
     // 요약은 따로 돌리고, 멈추면 보내 둔 요청(로컬 LLM 은 몇 분)을 기다리지 않고 화면을 먼저 돌려보낸다.
     // 따로 도는 쪽은 다음 요청부터 보내지 않고 끝난다.
@@ -1252,11 +1253,107 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
 #[tauri::command]
 fn cancel_summary(app: AppHandle, token: u64) {
     log::info!("요약 멈춤");
+    cancel_token(&app, token);
+}
+
+/// 요약 · 묻기 번호에 멈춤 신호를 꽂는다
+fn cancel_token(app: &AppHandle, token: u64) {
     let st = app.state::<AppState>();
     let mut map = st.summary_cancel.lock();
     // 이미 끝난 요약을 멈춰 남은 신호는 치운다 — 돌고 있는 요약이 쥐고 있는 신호(복제본이 있는 것)는 남긴다
     map.retain(|&t, flag| t == token || Arc::strong_count(flag) > 1);
     map.entry(token).or_default().store(true, Ordering::SeqCst);
+}
+
+/// 회의에 묻는다 → 받은 답 (기록의 묻고 답하기 목록 끝에 저장한 것).
+/// 답은 받는 대로 `bd://ask-progress` 로 알린다: { id, token, delta | restart | waitSecs }
+#[tauri::command]
+async fn ask_meeting(app: AppHandle, id: String, question: String, token: u64) -> CmdResult<session::QaItem> {
+    let st = app.state::<AppState>();
+    st.busy_ops.fetch_add(1, Ordering::SeqCst);
+    let _busy = BusyGuard(&st.busy_ops);
+    let (cfg, doc) = {
+        let cfg = st.settings.lock().summary.clone();
+        let doc = st.store.lock().load(&id).map_err(err)?;
+        (cfg, doc)
+    };
+    let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
+    let (app2, id2, cancel2) = (app.clone(), id.clone(), cancel.clone());
+    let mut on_event = move |e: ask::Event| {
+        if cancel2.load(Ordering::SeqCst) {
+            return;
+        }
+        let payload = match e {
+            ask::Event::Text(t) => serde_json::json!({ "id": id2, "token": token, "delta": t }),
+            ask::Event::Restart => serde_json::json!({ "id": id2, "token": token, "restart": true }),
+            ask::Event::Wait(w) => serde_json::json!({ "id": id2, "token": token, "waitSecs": w }),
+        };
+        let _ = app2.emit("bd://ask-progress", payload);
+    };
+    let app3 = app.clone();
+    let on_usage = move |provider: &str, r: &summary::Reply| {
+        app3.state::<usage_book::UsageBook>().summary(provider, &r.model, r.in_tokens, r.out_tokens, r.cache_write, r.cache_read);
+    };
+    // 요약처럼 따로 돌리고, 멈추면 보내 둔 요청을 기다리지 않고 화면을 먼저 돌려보낸다
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let cancel = cancel.clone();
+        let question = question.clone();
+        let _ = std::thread::Builder::new().name("bd-ask".into()).spawn(move || {
+            let _ = tx.send(ask::ask(&cfg, &doc, &question, &mut on_event, &on_usage, &cancel));
+        });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(r) => return r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::SeqCst) => {
+                return Err(anyhow::Error::new(summary::AskCancelled))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow::anyhow!("답을 받다가 문제가 생겼어요"))
+            }
+        }
+    })
+    .await;
+    st.summary_cancel.lock().remove(&token);
+    app.state::<usage_book::UsageBook>().save();
+    let a = res.map_err(err)?.map_err(err)?;
+    let item = session::QaItem {
+        q: question.trim().to_string(),
+        a: a.text,
+        at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        model: a.model,
+        partial: a.partial,
+    };
+    let (it, app4) = (item.clone(), app.clone());
+    off_main(move || app4.state::<AppState>().store.lock().update_qa(&id, |qa| qa.push(it)).map_err(err)).await?;
+    Ok(item)
+}
+
+#[tauri::command]
+fn cancel_ask(app: AppHandle, token: u64) {
+    log::info!("묻기 멈춤");
+    cancel_token(&app, token);
+}
+
+/// 묻고 답한 것 지우기 — `index` 가 없으면 모두
+#[tauri::command]
+async fn delete_qa(app: AppHandle, id: String, index: Option<usize>) -> CmdResult<()> {
+    off_main(move || {
+        app.state::<AppState>()
+            .store
+            .lock()
+            .update_qa(&id, |qa| match index {
+                Some(i) if i < qa.len() => {
+                    qa.remove(i);
+                }
+                Some(_) => {}
+                None => qa.clear(),
+            })
+            .map_err(err)
+    })
+    .await
 }
 
 /// 요약 제공자 연결 확인 + 모델 목록
@@ -1881,6 +1978,9 @@ fn main() {
             session_text,
             summarize,
             cancel_summary,
+            ask_meeting,
+            cancel_ask,
+            delete_qa,
             list_llm_models,
             check_update,
             install_update,

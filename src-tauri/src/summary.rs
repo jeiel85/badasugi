@@ -70,7 +70,7 @@ const PART_SYSTEM: &str = concat!(
 const DROP_RESOLVED: &str = "어느 구간 메모의 남은 질문이든 다른 구간에서 답이 나왔거나 방향이 정해졌으면(결정 사항 · 할 일에 담겼으면) 남은 질문에서 빼세요.";
 
 /// 한 번에 보낼 녹취록 글자 수 (제공자별). 넘으면 구간으로 나눠 메모한 뒤 합친다
-fn chunk_budget(provider: &str) -> usize {
+pub(crate) fn chunk_budget(provider: &str) -> usize {
     match provider {
         // 무료 등급의 분당 토큰 한도(TPM)가 작아, 한 요청이 그보다 크면 바로 거절된다
         "groq" => 4_000,
@@ -82,7 +82,7 @@ fn chunk_budget(provider: &str) -> usize {
 }
 
 /// 이보다 오래 기다리라는 한도 초과(하루 한도 등)는 기다리지 않고 알린다
-const MAX_WAIT_SECS: u64 = 75;
+pub(crate) const MAX_WAIT_SECS: u64 = 75;
 /// 너무 크다고 거절돼도 이보다 잘게는 나누지 않는다
 const MIN_CHUNK: usize = 600;
 
@@ -213,11 +213,16 @@ pub struct Reply {
     pub text: String,
     /// 실제로 답한 모델 (응답에 없으면 요청한 모델) — 사용량 금액 셈용
     pub model: String,
+    /// 캐시에 넣지 않고 읽은 입력 토큰
     pub in_tokens: u64,
     pub out_tokens: u64,
+    /// Claude 프롬프트 캐시에 새로 쓴 입력 토큰 (일반 입력의 1.25배 단가)
+    pub cache_write: u64,
+    /// Claude 프롬프트 캐시에서 읽은 입력 토큰 (일반 입력보다 훨씬 싸다)
+    pub cache_read: u64,
 }
 
-/// 요약 API 오류 — 상태 코드와 다시 시도까지 기다릴 시간을 들고 다닌다 (나눠 보내기 · 기다리기 판단용)
+/// LLM API 오류 — 상태 코드와 다시 시도까지 기다릴 시간을 들고 다닌다 (나눠 보내기 · 기다리기 판단용)
 #[derive(Debug)]
 pub struct ApiError {
     pub status: u16,
@@ -233,7 +238,7 @@ impl std::fmt::Display for ApiError {
             429 => " (요청 한도를 넘었어요. 잠시 뒤 다시 시도해 주세요)",
             _ => "",
         };
-        write!(f, "요약 API 오류 {}: {}{}", self.status, self.msg, hint)
+        write!(f, "AI API 오류 {}: {}{}", self.status, self.msg, hint)
     }
 }
 
@@ -254,6 +259,20 @@ impl ApiError {
 #[derive(Debug)]
 pub struct Cancelled;
 
+/// 사용자가 묻기를 멈춤 (요약과 문구만 다르다)
+#[derive(Debug)]
+pub struct AskCancelled;
+
+impl std::fmt::Display for AskCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(ASK_CANCELLED_MSG)
+    }
+}
+
+impl std::error::Error for AskCancelled {}
+
+pub const ASK_CANCELLED_MSG: &str = "답을 멈췄어요";
+
 impl std::fmt::Display for Cancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(CANCELLED_MSG)
@@ -269,12 +288,12 @@ fn net(e: reqwest::Error) -> anyhow::Error {
     anyhow!(badasugi_core::asr::openai::describe_http_error(&e))
 }
 
-fn too_large(e: &anyhow::Error) -> bool {
+pub(crate) fn too_large(e: &anyhow::Error) -> bool {
     e.downcast_ref::<ApiError>().is_some_and(ApiError::too_large)
 }
 
 /// 한도 초과(429)라 기다렸다 다시 보내면 되는 경우 그 시간(초)
-fn wait_for(e: &anyhow::Error) -> Option<u64> {
+pub(crate) fn wait_for(e: &anyhow::Error) -> Option<u64> {
     let a = e.downcast_ref::<ApiError>()?;
     (a.status == 429 && !a.too_large()).then(|| a.retry_after.unwrap_or(20))
 }
@@ -606,7 +625,90 @@ fn openai_like(cfg: &SummarySettings) -> Result<Option<(String, Option<String>, 
     })
 }
 
-type Caller = Box<Ask<'static>>;
+/// 대화 한 마디 — 묻기에서 회의 기록 · 앞선 질문과 답을 이어 보낼 때
+#[derive(Debug, Clone, Copy)]
+pub struct Turn<'a> {
+    /// 사람(질문 · 자료)이면 true, 모델의 답이면 false
+    pub user: bool,
+    pub text: &'a str,
+    /// Claude: 여기까지를 프롬프트 캐시에 둔다 (같은 회의에 다시 물으면 녹취록을 싸게 다시 읽는다)
+    pub cache: bool,
+}
+
+impl<'a> Turn<'a> {
+    pub fn user(text: &'a str) -> Self {
+        Turn { user: true, text, cache: false }
+    }
+}
+
+/// 같은 쪽이 이어 말한 마디는 한 메시지로 (제공자마다 사람 · 모델이 번갈아 말해야 하는 곳이 있다)
+fn merge_turns<'a>(turns: &[Turn<'a>]) -> Vec<(bool, Vec<Turn<'a>>)> {
+    let mut out: Vec<(bool, Vec<Turn>)> = Vec::new();
+    for t in turns.iter().filter(|t| !t.text.trim().is_empty()) {
+        match out.last_mut() {
+            Some((user, ts)) if *user == t.user => ts.push(*t),
+            _ => out.push((t.user, vec![*t])),
+        }
+    }
+    out
+}
+
+/// OpenAI 호환 · Ollama 메시지 (지시 + 대화, 이어 말한 마디는 빈 줄로 잇는다)
+fn plain_messages(system: &str, turns: &[Turn]) -> Value {
+    let mut msgs = vec![json!({ "role": "system", "content": system })];
+    for (user, ts) in merge_turns(turns) {
+        let text = ts.iter().map(|t| t.text).collect::<Vec<_>>().join("\n\n");
+        msgs.push(json!({ "role": if user { "user" } else { "assistant" }, "content": text }));
+    }
+    Value::Array(msgs)
+}
+
+/// Claude 메시지 — 마디마다 글 블록 하나, 캐시할 마디에는 cache_control
+fn anthropic_messages(turns: &[Turn]) -> Value {
+    let msgs: Vec<Value> = merge_turns(turns)
+        .into_iter()
+        .map(|(user, ts)| {
+            let blocks: Vec<Value> = ts
+                .iter()
+                .map(|t| {
+                    let mut b = json!({ "type": "text", "text": t.text });
+                    if t.cache {
+                        b["cache_control"] = json!({ "type": "ephemeral" });
+                    }
+                    b
+                })
+                .collect();
+            json!({ "role": if user { "user" } else { "assistant" }, "content": blocks })
+        })
+        .collect();
+    Value::Array(msgs)
+}
+
+/// 요청 하나: (지시, 대화, 받는 대로 글 조각을 넘길 곳) → 답
+pub type Chat = Box<dyn FnMut(&str, &[Turn], &mut dyn FnMut(&str)) -> Result<Reply> + Send>;
+
+/// 설정에서 고른 제공자로 보내는 함수 → (사용량에 쓸 제공자 이름, 함수)
+pub fn chat_caller(cfg: &SummarySettings) -> Result<(String, Chat)> {
+    Ok(match cfg.provider.as_str() {
+        "ollama" => {
+            let c = cfg.clone();
+            ("ollama".into(), Box::new(move |s: &str, m: &[Turn], t: &mut dyn FnMut(&str)| ollama_chat(&c, s, m, t)))
+        }
+        "anthropic" => {
+            let c = cfg.clone();
+            ("anthropic".into(), Box::new(move |s: &str, m: &[Turn], t: &mut dyn FnMut(&str)| anthropic_chat(&c, s, m, t)))
+        }
+        _ => match openai_like(cfg)? {
+            Some((base, key, model)) => (
+                badasugi_core::usage::provider_of(&base).to_string(),
+                Box::new(move |s: &str, m: &[Turn], t: &mut dyn FnMut(&str)| {
+                    openai_chat(&base, key.as_deref(), &model, s, m, t)
+                }),
+            ),
+            None => bail!("알 수 없는 요약 제공자: {}", cfg.provider),
+        },
+    })
+}
 
 /// 회의록을 요약한다. 답은 받는 대로 읽어 `progress` 로 진행(긴 회의는 구간까지)을,
 /// `on_usage(제공자, 응답)` 로 요청마다 사용량을 알린다 (중간에 실패해도 이미 쓴 만큼은 셀 수 있게)
@@ -620,25 +722,8 @@ pub fn summarize(
     if doc.utterances.is_empty() {
         bail!("요약할 내용이 없습니다");
     }
-    let (provider, mut call): (String, Caller) = match cfg.provider.as_str() {
-        "ollama" => {
-            let c = cfg.clone();
-            ("ollama".into(), Box::new(move |s: &str, u: &str, t: &mut dyn FnMut(&str)| ollama(&c, s, u, t)))
-        }
-        "anthropic" => {
-            let c = cfg.clone();
-            ("anthropic".into(), Box::new(move |s: &str, u: &str, t: &mut dyn FnMut(&str)| anthropic(&c, s, u, t)))
-        }
-        _ => match openai_like(cfg)? {
-            Some((base, key, model)) => (
-                badasugi_core::usage::provider_of(&base).to_string(),
-                Box::new(move |s: &str, u: &str, t: &mut dyn FnMut(&str)| {
-                    openai_compat(&base, key.as_deref(), &model, s, u, t)
-                }),
-            ),
-            None => bail!("알 수 없는 요약 제공자: {}", cfg.provider),
-        },
-    };
+    let (provider, mut chat) = chat_caller(cfg)?;
+    let mut call = |s: &str, u: &str, t: &mut dyn FnMut(&str)| chat(s, &[Turn::user(u)], t);
     let head = format!("회의 제목: {}\n일시: {}\n\n", doc.title, doc.started_at);
     let on_reply = |r: &Reply| on_usage(&provider, r);
     // 멈추면 다음 요청부터 보내지 않는다 (보내 둔 요청은 끝날 때까지 기다릴 수밖에 없어 화면은 먼저 돌려보낸다)
@@ -713,20 +798,20 @@ fn read_error(e: std::io::Error) -> anyhow::Error {
     // reqwest 오류가 io 오류에 싸여 온다
     match e.get_ref().and_then(|i| i.downcast_ref::<reqwest::Error>()) {
         Some(re) if re.is_timeout() => anyhow::Error::new(StreamStalled(format!(
-            "요약 답을 받다가 서버가 멈췄어요 ({})",
+            "AI 답을 받다가 서버가 멈췄어요 ({})",
             badasugi_core::asr::openai::describe_http_error(re)
         ))),
-        Some(re) => anyhow!("요약 답을 받다가 끊겼어요 ({})", badasugi_core::asr::openai::describe_http_error(re)),
+        Some(re) => anyhow!("AI 답을 받다가 끊겼어요 ({})", badasugi_core::asr::openai::describe_http_error(re)),
         None if e.kind() == std::io::ErrorKind::TimedOut => {
-            anyhow::Error::new(StreamStalled(format!("요약 답을 받다가 서버가 멈췄어요 ({e})")))
+            anyhow::Error::new(StreamStalled(format!("AI 답을 받다가 서버가 멈췄어요 ({e})")))
         }
-        None => anyhow!("요약 답을 받다가 끊겼어요 ({e})"),
+        None => anyhow!("AI 답을 받다가 끊겼어요 ({e})"),
     }
 }
 
 /// 끝 신호 없이 연결이 닫힘 (서버 · 프록시가 도중에 정상 종료) — 받은 데까지를 쓰면 잘린 회의록이 저장된다
 fn cut_short() -> anyhow::Error {
-    anyhow!("요약 답이 끝나기 전에 연결이 닫혔어요 (서버가 답을 끝까지 보내지 않음). 다시 요약해 주세요")
+    anyhow!("AI 답이 끝나기 전에 연결이 닫혔어요 (서버가 답을 끝까지 보내지 않음). 다시 시도해 주세요")
 }
 
 /// 스트리밍 답을 한 줄씩 (SSE 의 "data: …" 줄 · Ollama 의 JSON 줄). `f` 가 false 를 주면 그만 읽는다.
@@ -807,7 +892,7 @@ fn read_ollama_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> R
 
 const OLLAMA_SLOW: &str = "Ollama 가 15분 넘게 답하지 못했어요. 더 가벼운 모델을 고르거나 Groq·Gemini 같은 API 를 써 보세요.";
 
-fn ollama(cfg: &SummarySettings, system: &str, user: &str, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
+fn ollama_chat(cfg: &SummarySettings, system: &str, turns: &[Turn], on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     let url = format!("{}/api/chat", cfg.ollama_url.trim().trim_end_matches('/'));
     let body = json!({
         "model": cfg.ollama_model,
@@ -815,10 +900,7 @@ fn ollama(cfg: &SummarySettings, system: &str, user: &str, on_text: &mut dyn FnM
         "stream": true,
         // 기본 컨텍스트(2~4K)로는 긴 회의가 잘리므로 넉넉히
         "options": { "num_ctx": 32768, "temperature": 0.2 },
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user }
-        ]
+        "messages": plain_messages(system, turns)
     });
     // 시간 제한은 읽기 한 번마다 — 녹취록을 읽는 동안(첫 글자 전) · 쓰다 멈춘 동안 15분
     let resp = client(900)?.post(&url).json(&body).send().map_err(|e| {
@@ -872,7 +954,7 @@ fn mentions_stream(body: &str) -> bool {
 /// OpenAI 호환 한 번에 받은 답
 fn openai_reply(v: &Value) -> Result<Reply> {
     if v["choices"][0]["finish_reason"].as_str() == Some("content_filter") {
-        bail!("모델이 요약을 거절했습니다 (콘텐츠 필터)");
+        bail!("모델이 답을 거절했어요 (콘텐츠 필터)");
     }
     let usage = &v["usage"];
     Ok(Reply {
@@ -880,6 +962,7 @@ fn openai_reply(v: &Value) -> Result<Reply> {
         model: v["model"].as_str().unwrap_or_default().to_string(),
         in_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
         out_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+        ..Default::default()
     })
 }
 
@@ -918,7 +1001,7 @@ fn read_openai_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> R
         Ok(true)
     })?;
     if filtered {
-        bail!("모델이 요약을 거절했습니다 (콘텐츠 필터)");
+        bail!("모델이 답을 거절했어요 (콘텐츠 필터)");
     }
     if !complete {
         return Err(cut_short());
@@ -927,12 +1010,24 @@ fn read_openai_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -> R
     Ok(out)
 }
 
+#[cfg(test)]
 fn openai_compat(
     base: &str,
     key: Option<&str>,
     model: &str,
     system: &str,
     user: &str,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<Reply> {
+    openai_chat(base, key, model, system, &[Turn::user(user)], on_text)
+}
+
+fn openai_chat(
+    base: &str,
+    key: Option<&str>,
+    model: &str,
+    system: &str,
+    turns: &[Turn],
     on_text: &mut dyn FnMut(&str),
 ) -> Result<Reply> {
     if base.trim().is_empty() {
@@ -945,10 +1040,7 @@ fn openai_compat(
     for mode in [Streaming::WithUsage, Streaming::Plain, Streaming::Off] {
         let mut body = json!({
             "model": model.trim(),
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": user }
-            ]
+            "messages": plain_messages(system, turns)
         });
         if mode != Streaming::Off {
             body["stream"] = json!(true);
@@ -1086,6 +1178,8 @@ fn read_anthropic_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -
                 out.model = m["model"].as_str().unwrap_or_default().to_string();
                 out.in_tokens = m["usage"]["input_tokens"].as_u64().unwrap_or(0);
                 out.out_tokens = m["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                out.cache_write = m["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                out.cache_read = m["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
             }
             // 쓰다가 거절해 다른 모델이 이어 쓰면 그 경계에 fallback 블록이 온다
             "content_block_start" if v["content_block"]["type"].as_str() == Some("fallback") => {
@@ -1110,18 +1204,20 @@ fn read_anthropic_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -
                 let u = &v["usage"];
                 out.in_tokens = u["input_tokens"].as_u64().unwrap_or(out.in_tokens);
                 out.out_tokens = u["output_tokens"].as_u64().unwrap_or(out.out_tokens);
+                out.cache_write = u["cache_creation_input_tokens"].as_u64().unwrap_or(out.cache_write);
+                out.cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(out.cache_read);
             }
             "message_stop" => {
                 complete = true;
                 return Ok(false);
             }
-            "error" => return Err(stream_error(&v).unwrap_or_else(|| anyhow!("요약 API 오류"))),
+            "error" => return Err(stream_error(&v).unwrap_or_else(|| anyhow!("AI API 오류"))),
             _ => {}
         }
         Ok(true)
     })?;
     if stop == "refusal" {
-        bail!("모델이 요약을 거절했습니다. {why}");
+        bail!("모델이 답을 거절했어요. {why}");
     }
     // 끝 신호는 message_stop (그 전에 stop_reason 까지 왔으면 답은 다 받은 것)
     if !complete && stop.is_empty() {
@@ -1131,7 +1227,7 @@ fn read_anthropic_stream(r: impl std::io::Read, on_text: &mut dyn FnMut(&str)) -
     Ok(out)
 }
 
-fn anthropic(cfg: &SummarySettings, system: &str, user: &str, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
+fn anthropic_chat(cfg: &SummarySettings, system: &str, turns: &[Turn], on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     // 로그인 토큰은 짧게 유효하니 요청마다 받는다 (긴 회의는 요약에 수십 분 걸리기도 한다)
     let auth = ClaudeAuth::get()?;
     let model = if cfg.anthropic_model.trim().is_empty() {
@@ -1145,7 +1241,7 @@ fn anthropic(cfg: &SummarySettings, system: &str, user: &str, on_text: &mut dyn 
         // 받는 대로 읽어 진행을 보여 준다 (시간 제한도 읽기 한 번마다라 긴 답이 끊기지 않는다)
         "stream": true,
         "system": system,
-        "messages": [ { "role": "user", "content": user } ]
+        "messages": anthropic_messages(turns)
     });
     if supports_effort(model) {
         body["output_config"] = json!({ "effort": "medium" });
@@ -1599,6 +1695,40 @@ mod tests {
         // [DONE] 을 안 보내는 서버라도 finish_reason 까지 왔으면 다 받은 것
         let r = read_openai_stream("data: {\"choices\":[{\"delta\":{\"content\":\"끝\"},\"finish_reason\":\"stop\"}]}\n\n".as_bytes(), &mut |_| {});
         assert_eq!(r.unwrap().text, "끝");
+    }
+
+    /// 묻기 대화: 이어 말한 마디는 한 메시지로, 회의 기록 마디만 Claude 캐시에
+    #[test]
+    fn chat_turns_become_provider_messages() {
+        let turns = [
+            Turn { user: true, text: "회의 기록", cache: true },
+            Turn::user("첫 질문"),
+            Turn { user: false, text: "첫 답", cache: false },
+            Turn::user("   "),
+            Turn::user("새 질문"),
+        ];
+        let a = anthropic_messages(&turns);
+        assert_eq!(a.as_array().unwrap().len(), 3);
+        assert_eq!(a[0]["role"], "user");
+        assert_eq!(a[0]["content"][0]["cache_control"], json!({ "type": "ephemeral" }));
+        assert_eq!(a[0]["content"][1], json!({ "type": "text", "text": "첫 질문" }));
+        assert_eq!((&a[1]["role"], &a[1]["content"][0]["text"]), (&json!("assistant"), &json!("첫 답")));
+        assert_eq!(a[2]["content"], json!([{ "type": "text", "text": "새 질문" }]));
+        let p = plain_messages("지시", &turns);
+        assert_eq!(p.as_array().unwrap().len(), 4);
+        assert_eq!(p[0], json!({ "role": "system", "content": "지시" }));
+        assert_eq!(p[1]["content"], "회의 기록\n\n첫 질문");
+        assert_eq!(p[3], json!({ "role": "user", "content": "새 질문" }));
+    }
+
+    #[test]
+    fn claude_cache_tokens_are_read() {
+        let s = "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":30,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":18000,\"output_tokens\":1}}}\n\n\
+                 data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"월 12만 원\"}}\n\n\
+                 data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":40}}\n\n\
+                 data: {\"type\":\"message_stop\"}\n\n";
+        let r = read_anthropic_stream(s.as_bytes(), &mut |_| {}).unwrap();
+        assert_eq!((r.in_tokens, r.cache_write, r.cache_read, r.out_tokens), (30, 0, 18000, 40));
     }
 
     #[test]
