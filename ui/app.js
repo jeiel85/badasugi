@@ -1928,6 +1928,24 @@ askInput.addEventListener('keydown', (e) => {
   if (!S.ask) askMeeting(askInput.value);
 });
 askInput.addEventListener('input', () => { fitAsk(); renderAskSend(); });
+// 지우는 중에는 다시 지우지 않는다 (앱은 번호가 아니라 그 질문 · 답 내용으로 찾아 지운다)
+let qaDeleting = false;
+async function deleteQa(d, item) {
+  if (qaDeleting) return;
+  qaDeleting = true;
+  try {
+    await api.invoke('delete_qa', { id: d.id, item });
+    if (item) {
+      const k = (d.qa || []).indexOf(item);
+      if (k >= 0) d.qa.splice(k, 1);
+    } else d.qa = [];
+  } catch (err) {
+    toast(String(err), 'error');
+  } finally {
+    qaDeleting = false;
+    renderAsk();
+  }
+}
 askList.addEventListener('click', async (e) => {
   const ts = e.target.closest('.ts');
   if (ts) { gotoMs(+ts.dataset.ms); return; }
@@ -1938,12 +1956,8 @@ askList.addEventListener('click', async (e) => {
   if (!b || !d) return;
   const act = b.dataset.qa;
   if (act === 'clear') {
-    if (!(await api.ask('이 회의에 묻고 답한 것을 모두 지울까요?', { title: '받아쓰기', kind: 'warning' }))) return;
-    try {
-      await api.invoke('delete_qa', { id: d.id, index: null });
-      d.qa = [];
-      renderAsk();
-    } catch (err) { toast(String(err), 'error'); }
+    if (qaDeleting || !(await api.ask('이 회의에 묻고 답한 것을 모두 지울까요?', { title: '받아쓰기', kind: 'warning' }))) return;
+    deleteQa(d, null);
     return;
   }
   const i = +b.closest('.qa')?.dataset.i;
@@ -1960,11 +1974,7 @@ askList.addEventListener('click', async (e) => {
     scheduleRender();
     toast('메모 끝에 질문과 답을 넣었어요');
   } else if (act === 'del') {
-    try {
-      await api.invoke('delete_qa', { id: d.id, index: i });
-      if (d.qa[i] === x) d.qa.splice(i, 1);
-      renderAsk();
-    } catch (err) { toast(String(err), 'error'); }
+    deleteQa(d, x);
   }
 });
 
@@ -3269,7 +3279,13 @@ function createMock() {
       if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
       if (cmd === 'ask_meeting') return mockAsk(args);
       if (cmd === 'cancel_ask') { mockAskCancel = args.token; return; }
-      if (cmd === 'delete_qa') { const l = mockQa[args.id] || []; if (args.index == null) l.length = 0; else l.splice(args.index, 1); return; }
+      if (cmd === 'delete_qa') {
+        await new Promise((r) => setTimeout(r, 300)); // 앱처럼 잠깐 걸린다 (두 번 눌러 보기)
+        const l = mockQa[args.id] || [];
+        if (!args.item) l.length = 0;
+        else { const k = l.findIndex((y) => y.q === args.item.q && y.at === args.item.at && y.a === args.item.a); if (k >= 0) l.splice(k, 1); }
+        return;
+      }
       if (cmd === 'toggle_recording') { const h = handlers['bd://rec']; st.rec = st.rec === 'idle' ? 'recording' : 'idle'; h && h({ payload: st.rec }); return; }
       return null;
     },

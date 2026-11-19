@@ -1337,20 +1337,15 @@ fn cancel_ask(app: AppHandle, token: u64) {
     cancel_token(&app, token);
 }
 
-/// 묻고 답한 것 지우기 — `index` 가 없으면 모두
+/// 묻고 답한 것 지우기 — 화면이 보여 준 그 질문 · 답(번호가 아니라 내용으로 찾는다: 지우기를 두 번 눌러도
+/// 다음 답이 지워지지 않게). `item` 이 없으면 모두
 #[tauri::command]
-async fn delete_qa(app: AppHandle, id: String, index: Option<usize>) -> CmdResult<()> {
+async fn delete_qa(app: AppHandle, id: String, item: Option<session::QaItem>) -> CmdResult<()> {
     off_main(move || {
         app.state::<AppState>()
             .store
             .lock()
-            .update_qa(&id, |qa| match index {
-                Some(i) if i < qa.len() => {
-                    qa.remove(i);
-                }
-                Some(_) => {}
-                None => qa.clear(),
-            })
+            .update_qa(&id, |qa| session::remove_qa(qa, item.as_ref()))
             .map_err(err)
     })
     .await

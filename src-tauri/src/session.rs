@@ -68,6 +68,18 @@ pub struct SessionDoc {
     pub qa: Vec<QaItem>,
 }
 
+/// 묻고 답한 것 하나를 내용으로 찾아 지운다 (없으면 그대로). `item` 이 없으면 모두
+pub fn remove_qa(qa: &mut Vec<QaItem>, item: Option<&QaItem>) {
+    match item {
+        Some(x) => {
+            if let Some(i) = qa.iter().position(|y| y == x) {
+                qa.remove(i);
+            }
+        }
+        None => qa.clear(),
+    }
+}
+
 /// 회의에 묻고 받은 답 하나
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -1347,7 +1359,13 @@ mod tests {
         assert!(md.contains("## 묻고 답하기\n\n**Q. VPN 비용은?**\n\n월 12만 원이에요 [00:00]"), "{md}");
         let hit = &store.search("12만")[0];
         assert!(hit.snippet.starts_with("묻기 · "), "{}", hit.snippet);
-        store.update_qa(&d.id, Vec::clear).unwrap();
+        // 같은 답을 두 번 지워도(지우기를 빠르게 두 번) 다음 답은 남는다
+        let next = QaItem { q: "다음 질문".into(), ..Default::default() };
+        store.update_qa(&d.id, |qa| qa.push(next.clone())).unwrap();
+        store.update_qa(&d.id, |qa| remove_qa(qa, Some(&item))).unwrap();
+        store.update_qa(&d.id, |qa| remove_qa(qa, Some(&item))).unwrap();
+        assert_eq!(store.load(&d.id).unwrap().qa, vec![next]);
+        store.update_qa(&d.id, |qa| remove_qa(qa, None)).unwrap();
         assert!(store.load(&d.id).unwrap().qa.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

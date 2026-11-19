@@ -130,6 +130,26 @@ fn pick(lines: &[&str], query: &str, budget: usize) -> Vec<usize> {
     (0..n).filter(|&i| chosen[i]).collect()
 }
 
+/// 골라 실을 녹취록 조각 하나는 아무리 작아도 이만큼(글자)까지는 담는다
+const MIN_UNIT: usize = 200;
+
+/// 골라 실을 녹취록 조각: 문장(발화)마다 "[시각] 화자: 글" 한 줄, `cap` 글자를 넘으면 잘라서 (자른 조각에도 같은 시각 · 화자)
+fn units(doc: &SessionDoc, cap: usize) -> Vec<String> {
+    let mut us: Vec<_> = doc.utterances.iter().filter(|u| !u.text.trim().is_empty()).collect();
+    us.sort_by_key(|u| (u.start_ms, u.id));
+    let mut out = Vec::new();
+    for u in us {
+        let head = format!("[{}] {}: ", fmt_time(u.start_ms), doc.speaker_name(u.speaker));
+        let room = cap.saturating_sub(head.chars().count()).max(MIN_UNIT / 2);
+        let chars: Vec<char> = u.text.trim().chars().collect();
+        for (k, piece) in chars.chunks(room).enumerate() {
+            let piece: String = piece.iter().collect();
+            out.push(if k == 0 { format!("{head}{piece}") } else { format!("{head}(이어서) {piece}") });
+        }
+    }
+    out
+}
+
 /// 회의 기록 덩어리. 다 실으면 `budget` 글자를 넘을 때 녹취록은 골라 싣는다
 fn context(doc: &SessionDoc, query: &str, budget: usize) -> Context {
     let mut head = format!("회의 제목: {}\n일시: {}", doc.title, doc.started_at);
@@ -161,7 +181,10 @@ fn context(doc: &SessionDoc, query: &str, budget: usize) -> Context {
     }
     // 요약 · 메모가 아주 길어도 녹취록 자리는 절반은 남긴다
     let room = budget.saturating_sub(head_len).max(budget / 2);
-    let lines: Vec<&str> = transcript.lines().filter(|l| !l.trim().is_empty()).collect();
+    // 고를 때는 문단이 아니라 문장(발화) 단위로, 그래도 긴 것은 잘라서 — 한 사람이 길게 이어 말한 문단이
+    // 자리보다 크면 통째로 빠져 녹취록이 하나도 실리지 않는다
+    let owned = units(doc, (room / 4).max(MIN_UNIT));
+    let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
     let keep = pick(&lines, query, room);
     let mut body = String::new();
     let mut next = 0;
@@ -343,6 +366,30 @@ mod tests {
         // 녹취록 부분이 자리 안쪽
         let body = c.text.split("## 녹취록").nth(1).unwrap();
         assert!(body.chars().count() < 600 + 200, "{}", body.chars().count());
+    }
+
+    /// 한 사람이 쉬지 않고 길게 말해 문단 하나가 자리보다 커도 녹취록이 통째로 빠지지 않는다
+    #[test]
+    fn one_long_speech_is_cut_into_pieces_not_dropped() {
+        let mut v = Vec::new();
+        for i in 0..60u64 {
+            v.push((i * 5, 0, "오늘 발표는 매출 분석 화면 구성과 일정에 관한 이야기입니다"));
+        }
+        v[40] = (200, 0, "VPN 은 월 12만 원에 도입했습니다");
+        let d = doc(&v);
+        assert_eq!(d.to_text().lines().count(), 1, "문단 하나로 묶인다");
+        let c = context(&d, "VPN 비용은?", 800);
+        assert!(c.partial);
+        assert!(c.text.contains("[03:20] 이낙원 실장님: VPN 은 월 12만 원"), "{}", c.text);
+
+        // 나뉘지 않은 아주 긴 발화 하나도 잘라서, 질문과 맞는 조각을 싣는다
+        let long = format!("{}VPN 은 월 12만 원{}", "가".repeat(3000), "나".repeat(3000));
+        let d = doc(&[(0, 0, long.as_str())]);
+        let c = context(&d, "VPN 비용은?", 800);
+        let body = c.text.split("## 녹취록").nth(1).unwrap();
+        assert!(body.contains("VP"), "{body}");
+        assert!(body.contains("(이어서)"));
+        assert!(body.chars().count() < 800, "{}", body.chars().count());
     }
 
     #[test]
