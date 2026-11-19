@@ -2698,9 +2698,10 @@ function replaceAllIn(d, q, to) {
     r.u += n;
   }
   // 고치는 중인 요약은 입력 칸이 원본이라 건드리지 않는다
+  // 바꾼 요약은 직접 고친 요약 — AI 로 다시 요약할 때 묻고 바꾸게 (되돌리면 전 표시로)
   if (d.summary && S.sumEdit?.doc !== d) {
     const [v, n] = replaceIn(d.summary, q, to);
-    if (n) { undo.summary = [d.summary, v]; d.summary = v; r.s = n; }
+    if (n) { undo.summary = [d.summary, v, !!d.summaryEdited]; d.summary = v; d.summaryEdited = true; r.s = n; }
   }
   if (d.title) {
     const [v, n] = replaceIn(d.title, q, to);
@@ -2724,7 +2725,7 @@ function undoReplace(undo) {
     const x = byId.get(id);
     if (x && x.text === now) { x.text = old; n++; }
   }
-  if (undo.summary && d.summary === undo.summary[1]) { d.summary = undo.summary[0]; n++; }
+  if (undo.summary && d.summary === undo.summary[1]) { d.summary = undo.summary[0]; d.summaryEdited = undo.summary[2]; n++; }
   if (undo.title && d.title === undo.title[1]) { d.title = undo.title[0]; n++; }
   if (!n) return;
   saveReplaced(d);
