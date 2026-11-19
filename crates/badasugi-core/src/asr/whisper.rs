@@ -86,7 +86,7 @@ fn ctx_margin() -> i32 {
     env_i32("BADASUGI_CTX_MARGIN", 100).clamp(0, 1500)
 }
 
-fn params_template<'a>(threads: i32, beam: u32, req: &'a AsrRequest<'a>) -> FullParams<'a, 'a> {
+fn params_template<'a>(threads: i32, beam: u32, req: &'a AsrRequest<'a>, prompt: &'a str) -> FullParams<'a, 'a> {
     let strategy = if beam >= 2 {
         SamplingStrategy::BeamSearch {
             beam_size: beam as i32,
@@ -113,8 +113,8 @@ fn params_template<'a>(threads: i32, beam: u32, req: &'a AsrRequest<'a>) -> Full
     params.set_temperature(0.0);
     params.set_temperature_inc(0.2);
     params.set_no_speech_thold(0.6);
-    if !req.prompt.trim().is_empty() {
-        params.set_initial_prompt(req.prompt);
+    if !prompt.is_empty() {
+        params.set_initial_prompt(prompt);
     }
     params
 }
@@ -155,7 +155,8 @@ impl Transcriber for LocalWhisper {
         let audio_ctx = (frames + ctx_margin()).clamp(ctx_min(), 1500);
         let reduced = audio_ctx < 1500 && std::env::var("BADASUGI_FULL_CTX").is_err();
 
-        let mut params = params_template(self.threads, self.beam, req);
+        let prompt = req.full_prompt();
+        let mut params = params_template(self.threads, self.beam, req, &prompt);
         if reduced {
             params.set_audio_ctx(audio_ctx);
             // whisper 자체의 온도 올려 다시 풀기(최대 5번)는 끈다: 짧은 발화가 같은 말을 되풀이하면 이게 돌아
@@ -187,7 +188,7 @@ impl Transcriber for LocalWhisper {
             // 바로 30초 창으로 가면 이 CPU 에서 50초가 넘게 걸려 뒤 발화가 밀리므로, 창을 두 배로 늘려 한 번 더
             let retry = (audio_ctx * 2).min(1500);
             log::debug!("반복·언어 이상 감지 → 창 {audio_ctx} → {retry} 로 재인식: {text}");
-            let mut params = params_template(self.threads, self.beam, req);
+            let mut params = params_template(self.threads, self.beam, req, &prompt);
             if retry < 1500 {
                 params.set_audio_ctx(retry);
             }

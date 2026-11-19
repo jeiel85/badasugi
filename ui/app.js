@@ -52,7 +52,7 @@ const LLM_PRIVACY = '<br>API를 쓰면 녹취록이 해당 서비스로 전송�
 
 const ENGINE_DESC = {
   local: '인터넷 없이 이 PC에서 인식합니다. 회의 내용이 밖으로 나가지 않아요. 첫 사용 때 모델을 한 번 내려받습니다.',
-  openai: 'OpenAI gpt-4o-transcribe — 한국어 정확도가 가장 높습니다. 사용한 만큼 과금돼요. 회의 소리가 OpenAI 로 전송돼요.' + KEY_STEPS.openai + KEY_NOTE,
+  openai: 'OpenAI gpt-transcribe — 한국어 정확도가 가장 높아요. 용어집 낱말을 따로 챙겨 듣고, 바로 앞 문장에 맞춰 문장부호·띄어쓰기를 이어 가요. 사용한 만큼 과금돼요(1시간 약 $0.27). 회의 소리가 OpenAI 로 전송돼요.' + KEY_STEPS.openai + KEY_NOTE,
   groq: 'Groq Whisper — 매우 빨라 회의가 길어도 밀리지 않아요. <b>무료 등급</b>으로 시작할 수 있어요(사용량 한도 있음). 회의 소리가 Groq 로 전송돼요.' + KEY_STEPS.groq + KEY_NOTE,
   custom: 'OpenAI 호환 음성 인식 서버(faster-whisper-server, LocalAI, 사내 서버 등)를 사용합니다.',
 };
@@ -3489,7 +3489,7 @@ function createMock() {
   const st = {
     settings: {
       engine: 'local', localModel: 'large-v3-turbo-q5_0', beamSize: 1, threads: 0,
-      openaiModel: 'gpt-4o-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
+      openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', alwaysOnTop: false, theme: 'system',

@@ -305,13 +305,18 @@ fn build_engine(s: &Settings, paths: &Paths) -> Result<EngineConfig, String> {
     })
 }
 
-/// 용어집을 whisper 프롬프트로 (자연스러운 문장 형태가 효과가 좋다)
-fn glossary_prompt(glossary: &str) -> String {
-    let terms: Vec<&str> = glossary
+/// 용어집 낱말 (쉼표 · 줄바꿈 · 세미콜론으로 구분)
+fn glossary_terms(glossary: &str) -> Vec<String> {
+    glossary
         .split([',', '\n', ';'])
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .collect();
+        .map(str::to_string)
+        .collect()
+}
+
+/// 용어집을 whisper 프롬프트로 (자연스러운 문장 형태가 효과가 좋다)
+fn glossary_prompt(terms: &[String]) -> String {
     if terms.is_empty() {
         String::new()
     } else {
@@ -555,6 +560,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         } else {
             Vec::new()
         };
+        let terms = glossary_terms(&s.glossary);
         let cfg = PipelineConfig {
             capture: CaptureConfig {
                 source: s.source,
@@ -565,7 +571,8 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
             speaker_model: speaker_model.exists().then_some(speaker_model),
             segmenter: Default::default(),
             language: s.language.clone(),
-            prompt: glossary_prompt(&s.glossary),
+            prompt: glossary_prompt(&terms),
+            keywords: terms,
             record_path,
             known_voices,
         };

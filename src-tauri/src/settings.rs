@@ -100,7 +100,7 @@ impl Default for Settings {
             local_model: "large-v3-turbo-q5_0".into(),
             beam_size: 1,
             threads: 0,
-            openai_model: "gpt-4o-transcribe".into(),
+            openai_model: "gpt-transcribe".into(),
             groq_model: "whisper-large-v3-turbo".into(),
             custom_url: "http://localhost:8000/v1".into(),
             custom_model: "whisper-1".into(),
@@ -150,7 +150,17 @@ pub fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Pat
 
 impl Settings {
     pub fn load(path: &Path) -> Settings {
-        load_json_or_default(path)
+        let mut s: Settings = load_json_or_default(path);
+        s.migrate();
+        s
+    }
+
+    /// 예전 기본값을 새 기본값으로. OpenAI 는 gpt-4o-transcribe 를 2027-02-26 에 끝내고
+    /// 더 정확하고 25% 싼 gpt-transcribe 로 바꾸라고 한다 (2026-07 출시).
+    fn migrate(&mut self) {
+        if self.openai_model.trim() == "gpt-4o-transcribe" {
+            self.openai_model = "gpt-transcribe".into();
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -219,6 +229,19 @@ mod tests {
         let none: Settings = load_json_or_default(&dir.join("none.json"));
         assert_eq!(none.hotkey, Settings::default().hotkey);
         assert!(!dir.join("none.json.bad").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_openai_default_moves_to_gpt_transcribe() {
+        let dir = std::env::temp_dir().join(format!("bd-settings-mig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, br#"{ "openaiModel": "gpt-4o-transcribe" }"#).unwrap();
+        assert_eq!(Settings::load(&path).openai_model, "gpt-transcribe");
+        // 일부러 고른 다른 모델은 그대로
+        std::fs::write(&path, br#"{ "openaiModel": "gpt-4o-mini-transcribe" }"#).unwrap();
+        assert_eq!(Settings::load(&path).openai_model, "gpt-4o-mini-transcribe");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

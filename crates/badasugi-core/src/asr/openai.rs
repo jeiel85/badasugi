@@ -1,6 +1,6 @@
 //! OpenAI 호환 음성 인식 API (`POST {base}/audio/transcriptions`)
 //!
-//! OpenAI(gpt-4o-transcribe, whisper-1), Groq(whisper-large-v3-turbo), 자체 호스팅 서버
+//! OpenAI(gpt-transcribe, gpt-4o-transcribe, whisper-1), Groq(whisper-large-v3-turbo), 자체 호스팅 서버
 //! (faster-whisper-server/speaches, LocalAI 등) 를 모두 같은 코드로 호출한다.
 
 use std::time::Duration;
@@ -42,16 +42,9 @@ impl ApiTranscriber {
         let file = multipart::Part::bytes(wav.to_vec())
             .file_name("speech.wav")
             .mime_str("audio/wav")?;
-        let mut form = multipart::Form::new()
-            .part("file", file)
-            .text("model", self.model.clone())
-            .text("response_format", "json")
-            .text("temperature", "0");
-        if req.language != "auto" && !req.language.is_empty() {
-            form = form.text("language", req.language.to_string());
-        }
-        if !req.prompt.trim().is_empty() {
-            form = form.text("prompt", req.prompt.to_string());
+        let mut form = multipart::Form::new().part("file", file);
+        for (name, value) in form_fields(&self.model, req) {
+            form = form.text(name, value);
         }
         let mut rb = self.client.post(&self.url).multipart(form);
         if !self.api_key.is_empty() {
@@ -108,6 +101,47 @@ impl Transcriber for ApiTranscriber {
         }
         Err(last_err.unwrap_or_else(|| anyhow!("알 수 없는 API 오류")))
     }
+}
+
+/// OpenAI 의 새 음성 인식 모델(gpt-transcribe, 2026-07) — 언어를 `languages[]` 로 받고(`language` 와 함께 보내면 안 됨)
+/// 용어를 `keywords[]` 로 따로 받는다. whisper-1 · gpt-4o-transcribe 와 Groq · 자체 서버는 예전 형식 그대로.
+fn is_gpt_transcribe(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    m.starts_with("gpt-transcribe") || m.starts_with("gpt-live-transcribe")
+}
+
+/// OpenAI 의 GPT 기반 인식 모델 (gpt-transcribe · gpt-4o-transcribe · gpt-4o-mini-transcribe …) — Whisper 가 아니다
+pub fn is_gpt_transcriber(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    m.starts_with("gpt-") && m.contains("transcribe")
+}
+
+/// 요청 본문의 글자 칸 (파일 빼고). 같은 이름을 여러 번 보내면 배열이다 (`keywords[]`)
+fn form_fields(model: &str, req: &AsrRequest) -> Vec<(&'static str, String)> {
+    let new_api = is_gpt_transcribe(model);
+    let mut f = vec![
+        ("model", model.to_string()),
+        ("response_format", "json".to_string()),
+        ("temperature", "0".to_string()),
+    ];
+    if req.language != "auto" && !req.language.is_empty() {
+        f.push((if new_api { "languages[]" } else { "language" }, req.language.to_string()));
+    }
+    let prompt = req.full_prompt();
+    if !prompt.is_empty() {
+        f.push(("prompt", prompt));
+    }
+    if new_api {
+        // 한 줄이어야 하고 '<' '>' 가 있으면 요청 전체가 거절된다
+        for k in req.keywords {
+            let k: String = k.chars().filter(|c| !matches!(c, '<' | '>' | '\r' | '\n')).collect();
+            let k = k.trim();
+            if !k.is_empty() {
+                f.push(("keywords[]", k.to_string()));
+            }
+        }
+    }
+    f
 }
 
 /// 요청 한도에 걸렸을 때 한 번에 기다리는 최대 시간
@@ -200,6 +234,62 @@ pub fn test_connection(base_url: &str, api_key: &str, model: &str) -> Result<()>
         samples: &silence,
         language: "ko",
         prompt: "",
+        keywords: &[],
+        context: "",
     };
     t.call(&wav, &req).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req<'a>(keywords: &'a [String], context: &'a str) -> AsrRequest<'a> {
+        AsrRequest {
+            samples: &[],
+            language: "ko",
+            prompt: "회의 녹취록입니다. 주요 용어: OKPOS, 스캔프리.",
+            keywords,
+            context,
+        }
+    }
+
+    fn names(f: &[(&'static str, String)]) -> Vec<&'static str> {
+        f.iter().map(|(n, _)| *n).collect()
+    }
+
+    #[test]
+    fn gpt_transcribe_sends_languages_array_and_keywords() {
+        let kw = vec!["OKPOS".to_string(), "스캔<프리>".to_string(), "  ".to_string()];
+        let f = form_fields("gpt-transcribe", &req(&kw, "그래서 결제는 됐어요."));
+        let n = names(&f);
+        assert!(n.contains(&"languages[]"));
+        assert!(!n.contains(&"language"), "language 와 languages 를 함께 보내면 안 된다");
+        let kws: Vec<&str> = f.iter().filter(|(n, _)| *n == "keywords[]").map(|(_, v)| v.as_str()).collect();
+        assert_eq!(kws, ["OKPOS", "스캔프리"]);
+        let prompt = &f.iter().find(|(n, _)| *n == "prompt").unwrap().1;
+        assert!(prompt.ends_with("그래서 결제는 됐어요."), "앞 문맥은 프롬프트 끝에: {prompt}");
+    }
+
+    #[test]
+    fn whisper_models_keep_the_old_form() {
+        let kw = vec!["OKPOS".to_string()];
+        for model in ["whisper-large-v3", "whisper-1", "gpt-4o-transcribe"] {
+            let n = names(&form_fields(model, &req(&kw, "")));
+            assert!(n.contains(&"language"), "{model}");
+            assert!(!n.contains(&"languages[]") && !n.contains(&"keywords[]"), "{model}");
+        }
+    }
+
+    #[test]
+    fn auto_language_and_empty_prompt_are_left_out() {
+        let r = AsrRequest {
+            samples: &[],
+            language: "auto",
+            prompt: " ",
+            keywords: &[],
+            context: "",
+        };
+        assert_eq!(names(&form_fields("gpt-transcribe", &r)), ["model", "response_format", "temperature"]);
+    }
 }

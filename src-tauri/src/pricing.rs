@@ -101,7 +101,8 @@ pub fn audio_price(provider: &str, model: &str) -> Option<f64> {
     Some(match (provider, m.as_str()) {
         ("groq", "whisper-large-v3-turbo") => 0.04,
         ("groq", "whisper-large-v3") => 0.111,
-        // 분당 $0.006 · $0.003
+        // 분당 $0.0045 · $0.006 · $0.003
+        ("openai", "gpt-transcribe") => 0.27,
         ("openai", "gpt-4o-transcribe" | "whisper-1") => 0.36,
         ("openai", "gpt-4o-mini-transcribe") => 0.18,
         _ => return None,
