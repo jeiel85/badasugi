@@ -16,7 +16,7 @@
       </div>
       <div class="tb-actions">
         <button class="icon-btn" id="btn-notes" title="메모 · 요약 · 코멘트 — 회의 내용을 보면서 옆에 적어요 (Ctrl+M)"><svg><use href="#i-notes"/></svg></button>
-        <button class="icon-btn" id="btn-find" title="녹취록에서 찾기 (Ctrl+F)"><svg><use href="#i-search"/></svg></button>
+        <button class="icon-btn" id="btn-find" title="녹취록에서 찾기 (Ctrl+F) · 바꾸기 (Ctrl+H)"><svg><use href="#i-search"/></svg></button>
         <button class="icon-btn" id="btn-history" title="회의 기록"><svg><use href="#i-history"/></svg></button>
         <button class="icon-btn" id="btn-mini" title="미니 창 — 녹음 버튼만 작업 표시줄 시계 위에 (제목 줄을 더블클릭해도 돼요)"><svg><use href="#i-mini"/></svg></button>
         <button class="icon-btn" id="btn-pin" title="항상 위에 표시"><svg><use href="#i-pin"/></svg></button>
@@ -68,7 +68,15 @@
       <span class="find-count" id="find-count"></span>
       <button class="icon-btn sm" id="find-prev" title="이전 (Shift+Enter)"><svg><use href="#i-up"/></svg></button>
       <button class="icon-btn sm" id="find-next" title="다음 (Enter)"><svg><use href="#i-chevron"/></svg></button>
+      <button class="icon-btn sm" id="find-rep-toggle" title="바꾸기 (Ctrl+H)" aria-pressed="false"><svg><use href="#i-replace"/></svg></button>
       <button class="icon-btn sm" id="find-close" title="닫기 (Esc)"><svg><use href="#i-x"/></svg></button>
+      <!-- 바꾸기 (Ctrl+H) -->
+      <div class="rep-row" id="rep-row" hidden>
+        <svg><use href="#i-replace"/></svg>
+        <input id="rep-input" placeholder="바꿀 말" spellcheck="false" autocomplete="off" />
+        <button class="chip-btn" id="rep-one" title="지금 고른 곳만 바꾸고 다음으로 (Enter)">바꾸기</button>
+        <button class="chip-btn" id="rep-all" title="녹취록의 모든 곳 — 요약 · 제목에 있는 같은 말도 같이 바꿔요. 바꾼 뒤 되돌릴 수 있어요 (Ctrl+Enter)">모두 바꾸기</button>
+      </div>
     </div>
 
     <!-- 고른 화자: 그 화자가 말한 곳만 건너다니기 (스크롤 막대에도 그 자리가 표시된다) -->
@@ -513,6 +521,12 @@
       </div>
     </div>
     <div class="scrim" id="scrim" hidden></div>
+    <!-- 제안 막대: 바꾼 뒤 되돌리기 · 고친 말을 같은 말 모두에 · 용어집으로 -->
+    <div class="nudge" id="nudge" role="status" hidden>
+      <span class="nudge-msg" id="nudge-msg"></span>
+      <span class="nudge-acts" id="nudge-acts"></span>
+      <button class="icon-btn sm" id="nudge-close" title="닫기"><svg><use href="#i-x"/></svg></button>
+    </div>
     <div class="toast" id="toast" hidden></div>
   </div>
 
@@ -549,6 +563,7 @@
       <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
       <symbol id="i-ask" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M14.5 21.7a.5.5 0 0 0 .9-.1l6.5-19a.5.5 0 0 0-.6-.6l-19 6.5a.5.5 0 0 0-.1.9l7.9 3.2a2 2 0 0 1 1.1 1.1z"/><path d="m21.9 2.1-10.9 10.9"/></symbol>
+      <symbol id="i-replace" viewBox="0 0 24 24"><path d="M14 4a2 2 0 0 1 2-2"/><path d="M16 10a2 2 0 0 1-2-2"/><path d="M20 2a2 2 0 0 1 2 2"/><path d="M22 8a2 2 0 0 1-2 2"/><path d="m3 7 3 3 3-3"/><path d="M6 10V5a3 3 0 0 1 3-3h1"/><rect x="2" y="14" width="8" height="8" rx="2"/></symbol>
       <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8l-1.3 4.4a.5.5 0 0 0 .6.6l4.4-1.3a2 2 0 0 0 .8-.5z"/></symbol>
     </defs>
   </svg>
