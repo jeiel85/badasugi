@@ -84,6 +84,11 @@ const S = {
   sumEdit: null,
   cmt: null,
   livePosMs: 0,
+  // 고른 화자 (합친 화자를 따라간 번호) · 그 회의 id · 마우스를 올린 칩 · 화자 바로 마지막에 옮겨 간 문장 id
+  spkSel: null,
+  spkDoc: null,
+  spkPeek: null,
+  spkCur: null,
 };
 const doc = () => (S.live ? S.liveDoc : S.viewDoc);
 
@@ -150,13 +155,13 @@ function hl(text) {
   return t.replace(new RegExp(q, 'gi'), (m) => `<mark>${m}</mark>`);
 }
 let toastTimer;
-function toast(msg, kind = '') {
+function toast(msg, kind = '', ms) {
   const t = $('#toast');
   t.textContent = msg;
   t.className = `toast ${kind}`;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), kind === 'error' || kind === 'warn' ? 6500 : 2600);
+  toastTimer = setTimeout(() => (t.hidden = true), ms ?? (kind === 'error' || kind === 'warn' ? 6500 : 2600));
 }
 async function call(cmd, args) {
   try {
@@ -286,7 +291,7 @@ function renderDoc() {
     }
   }
   patchTranscript(tr, groups.map((g) => `
-    <div class="group" style="--c:${spkColor(g.speaker)}">
+    <div class="group" data-spk="${g.speaker ?? ''}" style="--c:${spkColor(g.speaker)}">
       <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}" data-ids="${g.items.filter((x) => x.kind === 'u').map((x) => x.id).join(',')}" title="이름 바꾸기 · 화자 바꾸기">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
       ${g.items.map((it) => it.kind === 'u'
         ? `<div class="u" data-id="${it.id}">${hl(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>${commentHtml(cms.byU.get(it.id))}`
@@ -297,11 +302,13 @@ function renderDoc() {
 
   $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking && !S.paused && !S.fileMode);
   renderMeta();
+  syncSpkSel(d);
   renderNotes();
   renderSummary();
   updateActions();
   renderMiniCap();
   syncAudio();
+  renderPlLane();
   markPlaying(false);
   if (S.findQ) { updateFind(false); return; }
   if (stick) pinBottom();
@@ -323,7 +330,7 @@ function renderMeta() {
     ? '<button class="link spk-undo" id="btn-undo-refine" title="회의가 끝난 뒤 다시 정리하기 전, 녹음 중에 정해진 화자 배정과 이름으로 돌아가요">화자 정리 되돌리기</button>'
     : '';
   box.innerHTML = [...spk].sort((a, b) => a - b)
-    .map((s) => `<button class="spk-chip" data-spk="${s}" style="--c:${spkColor(s)}" title="이름 바꾸기 · 다른 화자와 합치기"><i></i>${esc(speakerName(d, s))}</button>`)
+    .map((s) => `<button class="spk-chip${s === S.spkSel ? ' sel' : ''}" data-spk="${s}" style="--c:${spkColor(s)}" title="말한 곳 표시 · 이름 바꾸기 · 다른 화자와 합치기"><i></i>${esc(speakerName(d, s))}</button>`)
     .join('') + undo;
 }
 
@@ -436,6 +443,7 @@ function renderBanners(has) {
   const review = S.rec === 'idle' && (!!v || ended);
   $('#app').classList.toggle('review', review);
   $('#btn-rec').title = review ? '새 회의 녹음 시작' : '녹음 시작/중지';
+  renderNoAudio();
 }
 
 // 첫 화면의 최근 회의 (최신 5개)
@@ -940,7 +948,7 @@ $('#pop-spk').addEventListener('click', (e) => {
 $('#speakers').addEventListener('click', (e) => {
   if (e.target.closest('#btn-undo-refine')) return undoRefine();
   const c = e.target.closest('.spk-chip');
-  if (c && !c.querySelector('input')) speakerMenu(c, c.dataset.spk, null);
+  if (c && !c.querySelector('input')) { setSpkSel(c.dataset.spk); speakerMenu(c, c.dataset.spk, null); }
 });
 async function undoRefine() {
   const d = doc();
@@ -963,8 +971,138 @@ async function undoRefine() {
 }
 $('#transcript').addEventListener('click', (e) => {
   const n = e.target.closest('.g-name');
-  if (n) speakerMenu(n, n.dataset.spk, n.dataset.ids || '');
+  if (n) { setSpkSel(n.dataset.spk); speakerMenu(n, n.dataset.spk, n.dataset.ids || ''); }
 });
+
+/* ───────────── 화자 고르기: 그 화자가 말한 곳을 스크롤 막대에 표시 · 건너다니기 ───────────── */
+// 칩(또는 문단의 화자 이름)을 누르면 그 화자를 고른다 — 이름 바꾸기 · 합치기 메뉴는 그대로 뜬다.
+// 고르면: 스크롤 막대 위에 그 화자 색 눈금(VS Code 의 개요 눈금자처럼), 녹취록의 그 화자 문단에 옅은 배경,
+// 위에 화자 바(이전 · 다음 · 끄기). 칩에 마우스만 올려도 눈금을 흐리게 미리 보여 준다.
+// 다른 회의로 넘어가거나 그 화자가 없어지면 저절로 꺼지고, 다른 화자와 합치면 합친 화자로 옮겨 간다.
+const ruler = $('#ov-ruler');
+// 어느 문단을 칠할지는 규칙 한 줄로 — 고른 화자를 바꿔도 녹취록을 다시 그리지 않는다
+const spkSelStyle = document.head.appendChild(document.createElement('style'));
+
+function setSpkSel(s) {
+  const d = doc();
+  s = s == null || s === '' || !d ? null : resolveSpk(d, +s);
+  if (s === S.spkSel && (s == null || S.spkDoc === d.id)) return;
+  S.spkSel = s;
+  S.spkDoc = s == null ? null : d.id;
+  S.spkCur = null;
+  paintSpkSel();
+}
+function paintSpkSel() {
+  const s = S.spkSel;
+  const g = `#transcript .group[data-spk="${s}"]`;
+  spkSelStyle.textContent = s == null ? '' : `${g}{isolation:isolate}${g}::after{content:""}${g}::before{width:4px}`;
+  $$('#speakers .spk-chip').forEach((c) => c.classList.toggle('sel', c.dataset.spk === String(s)));
+  renderSpkbar();
+  scheduleRuler();
+  renderPlLane();
+}
+// 그릴 때마다: 다른 회의로 넘어갔거나 고른 화자가 없어졌으면 끄고, 합쳐졌으면 합친 화자로 옮긴다
+function syncSpkSel(d) {
+  if (S.spkSel != null) {
+    const s = d && d.id === S.spkDoc ? resolveSpk(d, S.spkSel) : null;
+    if (s == null || !knownSpeakers(d).includes(s)) { S.spkSel = null; S.spkDoc = null; S.spkCur = null; paintSpkSel(); return; }
+    if (s !== S.spkSel) { S.spkSel = s; paintSpkSel(); return; }
+  }
+  renderSpkbar();
+  if (S.spkSel != null || S.spkPeek != null || !ruler.hidden) scheduleRuler();
+}
+// 고른 화자가 말한 문단 (받아 적는 중인 자리만 있는 문단은 빼고)
+function spkGroups() {
+  if (S.spkSel == null) return [];
+  return $$(`#transcript .group[data-spk="${S.spkSel}"]`).filter((g) => g.querySelector('.u[data-id]'));
+}
+// 화자 바로 마지막에 옮겨 간 문장 — 아직 화면에 보일 때만 (스크롤해 벗어났으면 null)
+function spkCurEl() {
+  const el = S.spkCur == null ? null : $(`#transcript .u[data-id="${S.spkCur}"]`);
+  if (!el) return null;
+  const r = el.getBoundingClientRect(), b = body.getBoundingClientRect();
+  return r.bottom > b.top && r.top < b.bottom ? el : null;
+}
+function renderSpkbar() {
+  const bar = $('#spkbar');
+  bar.hidden = S.spkSel == null;
+  if (bar.hidden) return;
+  const gs = spkGroups();
+  const i = gs.indexOf(spkCurEl()?.closest('.group'));
+  bar.style.setProperty('--c', spkColor(S.spkSel));
+  $('#spkbar-name').textContent = speakerName(doc(), S.spkSel);
+  $('#spkbar-count').textContent = i >= 0 ? `${i + 1}/${gs.length}` : `${gs.length}곳`;
+}
+// 이전 · 다음 곳으로 — 방금 옮겨 간 곳이 아직 보이면 거기서 차례로,
+// 아니면(처음이거나 직접 스크롤해 벗어났으면) 지금 읽는 자리(본문 위 1/3)에서 가까운 곳부터
+function stepSpk(dir) {
+  const gs = spkGroups();
+  if (!gs.length) return;
+  let i = gs.indexOf(spkCurEl()?.closest('.group'));
+  if (i >= 0) {
+    i = (i + dir + gs.length) % gs.length;
+  } else {
+    const line = body.getBoundingClientRect().top + body.clientHeight / 3;
+    const after = gs.findIndex((g) => g.querySelector('.u[data-id]').getBoundingClientRect().top > line + 4);
+    i = dir > 0 ? Math.max(after, 0) : ((after < 0 ? gs.length : after) - 1 + gs.length) % gs.length;
+  }
+  S.spkCur = +gs[i].querySelector('.u[data-id]').dataset.id;
+  gotoUtterance(S.spkCur);
+  renderSpkbar();
+}
+// 직접 스크롤해 그 곳이 화면에서 벗어나면 '몇 번째' 표시를 놓는다
+// (스크롤 이벤트마다 보지만, 고른 곳이 있을 때 문장 하나 위치만 잰다)
+body.addEventListener('scroll', () => {
+  if (S.spkCur != null && !spkCurEl()) { S.spkCur = null; renderSpkbar(); }
+}, { passive: true });
+$('#spk-prev').addEventListener('click', () => stepSpk(-1));
+$('#spk-next').addEventListener('click', () => stepSpk(1));
+$('#spk-close').addEventListener('click', () => setSpkSel(null));
+$('#speakers').addEventListener('mouseover', (e) => {
+  const c = e.target.closest('.spk-chip');
+  const s = c && !c.querySelector('input') ? +c.dataset.spk : null;
+  if (s !== S.spkPeek) { S.spkPeek = s; scheduleRuler(); }
+});
+$('#speakers').addEventListener('mouseleave', () => {
+  if (S.spkPeek != null) { S.spkPeek = null; scheduleRuler(); }
+});
+
+// 스크롤 막대 위 눈금: 문단 위치 ÷ 본문 전체 높이 × 막대 길이 (막대에 위아래 화살표가 없어 막대 길이 = 본문 높이)
+// 눈금은 스크롤 위치와 상관없어 스크롤할 때는 다시 재지 않고, 녹취록 · 본문 크기가 바뀔 때만 다시 잰다.
+// 긴 회의에서 아직 화면에 나오지 않은 문단은 높이를 어림하므로(content-visibility) 처음엔 조금 어긋날 수 있다
+let rulerQueued = false;
+function scheduleRuler() {
+  if (rulerQueued) return;
+  rulerQueued = true;
+  requestAnimationFrame(() => { rulerQueued = false; renderRuler(); });
+}
+function renderRuler() {
+  const s = S.spkPeek ?? S.spkSel;
+  const groups = s == null || !doc() ? [] : $$(`#transcript .group[data-spk="${s}"]`);
+  ruler.hidden = !groups.length;
+  if (ruler.hidden) return;
+  const H = body.scrollHeight, track = body.clientHeight;
+  const br = body.getBoundingClientRect();
+  const base = br.top - body.scrollTop;
+  ruler.style.top = `${br.top - $('#main-col').getBoundingClientRect().top}px`;
+  ruler.style.height = `${track}px`;
+  ruler.style.width = `${Math.max(6, body.offsetWidth - body.clientWidth)}px`;
+  const marks = [];
+  for (const g of groups) {
+    const r = g.getBoundingClientRect();
+    const y = ((r.top - base) / H) * track;
+    const h = Math.max(2, (r.height / H) * track);
+    const last = marks[marks.length - 1];
+    // 1px 안으로 붙은 눈금은 하나로 (긴 회의도 눈금 수가 많아지지 않게)
+    if (last && y - (last.y + last.h) < 1) last.h = Math.max(last.h, y + h - last.y);
+    else marks.push({ y, h });
+  }
+  ruler.style.setProperty('--c', spkColor(s));
+  ruler.classList.toggle('peek', s !== S.spkSel);
+  ruler.innerHTML = marks.map((m) => `<i style="top:${m.y.toFixed(1)}px;height:${m.h.toFixed(1)}px"></i>`).join('');
+}
+const rulerFit = new ResizeObserver(() => { if (!ruler.hidden || S.spkSel != null) scheduleRuler(); });
+for (const el of [body, $('#summary-card'), $('#transcript'), $('#listening')]) rulerFit.observe(el);
 
 // 발화 고치기 (더블클릭 · 문장 위 '고치기')
 function startEdit(el) {
@@ -1555,10 +1693,15 @@ function gotoUtterance(id) {
   follow = false;
   const center = () => {
     const r = el.getBoundingClientRect(), b = body.getBoundingClientRect();
-    body.scrollTo({ top: body.scrollTop + r.top - b.top - body.clientHeight / 3, behavior: 'instant' });
+    const dy = r.top - b.top - body.clientHeight / 3;
+    if (Math.abs(dy) >= 1) body.scrollTo({ top: body.scrollTop + dy, behavior: 'instant' });
   };
   center();
-  requestAnimationFrame(center); // 화면 밖 문단은 그려지면서 높이가 바뀐다
+  // 화면 밖 문단은 처음 그려지면서 높이가 바뀌어(content-visibility) 그 문장이 밀려난다 —
+  // 멀리 건너뛰면 몇 프레임에 걸쳐 바뀌므로 자리가 잡힐 때까지 몇 번 더 맞춘다
+  let left = 4;
+  const settle = () => { center(); if (--left > 0) requestAnimationFrame(settle); };
+  requestAnimationFrame(settle);
   el.classList.remove('flash');
   void el.offsetWidth;
   el.classList.add('flash');
@@ -2036,8 +2179,9 @@ $$('[data-close]').forEach((b) => b.addEventListener('click', closePanels));
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#update-modal').hidden) { closeUpdateModal(); return; }
   if (e.key === 'Escape' && !hotkeyCapturing) {
-    // 아무것도 열려 있지 않으면 전체 화면을 끝낸다
+    // 아무것도 열려 있지 않으면 고른 화자 표시부터 끄고(이름을 고치다 Esc 로 그만둔 것은 빼고), 그다음 전체 화면을 끝낸다
     const nothingOpen = $('#findbar').hidden && $$('.panel, .popover').every((p) => p.hidden);
+    if (nothingOpen && S.spkSel != null && !e.target.closest?.('input, textarea, select, [contenteditable="true"]')) { setSpkSel(null); return; }
     if (nothingOpen && WIN.full) toggleFullscreen();
     if (!$('#findbar').hidden && $$('.panel').every((p) => p.hidden)) closeFind();
     closePanels();
@@ -2063,6 +2207,12 @@ document.addEventListener('keydown', (e) => {
   }
   const typing = e.target.closest?.('input:not([type=range]):not([type=checkbox]), textarea, select, [contenteditable="true"]');
   if (e.code === 'Space' && !typing && !e.ctrlKey && !e.altKey && P.src && !S.mini) { e.preventDefault(); togglePlay(); }
+  // 화자를 골랐으면 Enter 다음 곳 · Shift+Enter 이전 곳 (단추에 초점이 있으면 그 단추가 눌린다)
+  if (e.key === 'Enter' && S.spkSel != null && !typing && !e.ctrlKey && !e.altKey && !S.mini && !e.target.closest?.('button, a')
+    && $('#findbar').hidden && $$('.panel, .popover').every((p) => p.hidden)) {
+    e.preventDefault();
+    stepSpk(e.shiftKey ? -1 : 1);
+  }
   if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoom(1); }
   if (e.ctrlKey && e.key === '-') { e.preventDefault(); zoom(-1); }
   if (e.ctrlKey && e.key === '0') { e.preventDefault(); zoom(0); }
@@ -2249,7 +2399,8 @@ const audio = new Audio();
 audio.preload = 'metadata';
 // key: 지금 재생할 수 있는 기록 id · until: 문장 하나만 들을 때 멈출 위치(초)
 // live: 녹음 중인 기록 (파일이 계속 자라므로 필요할 때 다시 읽는다) · wantPlay: 이어 듣는 중
-const P = { key: null, src: null, until: null, curId: null, started: false, raf: 0, seeking: false, followId: null, live: false, wantPlay: false, reloading: null, gen: 0 };
+// checked: 녹음 파일이 있는지 물어본 기록 id (없다는 답까지 받았는지)
+const P = { key: null, src: null, until: null, curId: null, started: false, raf: 0, seeking: false, followId: null, live: false, wantPlay: false, reloading: null, gen: 0, checked: null };
 let playClick;
 
 const isLiveRec = () => S.live && S.rec !== 'idle' && !S.fileMode;
@@ -2299,6 +2450,7 @@ async function syncAudio() {
     return;
   }
   P.key = key;
+  P.checked = null;
   P.live = live;
   P.wantPlay = false;
   P.gen++;
@@ -2311,7 +2463,9 @@ async function syncAudio() {
   if (!key) return;
   let path = null;
   try { path = await api.invoke('session_audio', { id: key }); } catch { /* 없으면 숨김 */ }
-  if (P.key !== key || !path) return;
+  if (P.key !== key) return;
+  P.checked = key;
+  if (!path) { renderNoAudio(); return; }
   P.src = T ? T.core.convertFileSrc(path) : path;
   audio.src = P.src;
   audio.playbackRate = +(localStorage.getItem('playRate') || 1) || 1;
@@ -2324,14 +2478,99 @@ function renderPlayer() {
   const on = !!P.src;
   $('#player').hidden = !on;
   $('#transcript').classList.toggle('can-play', on);
+  renderNoAudio();
   if (!on) return;
   $('#pl-play use').setAttribute('href', audio.paused ? '#i-play' : '#i-pause');
   const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
   $('#pl-time').textContent = fmt(audio.currentTime * 1000);
   $('#pl-dur').textContent = fmt(dur * 1000);
-  if (!P.seeking) $('#pl-seek').value = dur ? Math.round((audio.currentTime / dur) * 1000) : 0;
+  if (!P.seeking) $('#pl-seek').value = dur ? Math.round((audio.currentTime / dur) * 10000) : 0;
+  $('#pl-track').style.setProperty('--p', `${dur ? Math.min(100, (audio.currentTime / dur) * 100) : 0}%`);
   $('#pl-rate').textContent = `${audio.playbackRate}×`;
 }
+// 녹음 파일이 없는 회의를 다시 볼 때: 재생 막대 자리에 왜 없는지 · 켜는 곳
+// (설정을 이미 켜 두었으면 다음 회의부터 막대가 생기므로 보이지 않는다)
+function renderNoAudio() {
+  const d = doc();
+  $('#no-audio').hidden = !!P.src || !d || P.checked !== d.id || !d.utterances.length
+    || !$('#app').classList.contains('review') || !!S.settings?.saveAudio;
+}
+$('#no-audio').addEventListener('click', () => openPanel('settings', 'general'));
+
+// 재생 막대에 그리는 것: 누가 언제 말했는지(화자 색 띠, 고른 화자가 있으면 그 화자만 색 · 나머지는 회색)와
+// 코멘트(메모의 [시각] 줄) 자리의 노란 점. 녹취록 · 메모 · 고른 화자 · 녹음 길이가 바뀔 때만 다시 그린다
+const plTrack = $('#pl-track');
+const plTip = $('#pl-tip');
+let plLaneKey = '';
+// 막대 끝 = 녹음 파일 길이 (녹음 중에는 파일이 자라며 몇 초씩 늦으므로, 넘는 문장은 끝에 붙인다)
+function playDurMs(d) {
+  if (Number.isFinite(audio.duration) && audio.duration > 0) return audio.duration * 1000;
+  return d?.durationMs || 0;
+}
+function renderPlLane() {
+  const d = doc();
+  const dur = P.src && d ? playDurMs(d) : 0;
+  if (!dur) return;
+  const pct = (ms) => `${Math.min(100, Math.max(0, (ms / dur) * 100)).toFixed(3)}%`;
+  // 같은 화자가 2.5초 안에 이어 말한 문장은 한 구간으로 (긴 회의도 구간 수가 많아지지 않게) · 너무 짧은 구간은 막대의 0.25% 로
+  const us = [...d.utterances].sort((a, b) => a.startMs - b.startMs);
+  const segs = [];
+  for (const u of us) {
+    const s = resolveSpk(d, u.speaker);
+    const last = segs[segs.length - 1];
+    if (last && last.s === s && u.startMs - last.e < 2500) last.e = Math.max(last.e, u.endMs);
+    else segs.push({ s, b: u.startMs, e: u.endMs });
+  }
+  const sel = S.spkSel;
+  const stops = ['transparent 0%'];
+  for (const g of segs) {
+    const c = sel != null && g.s !== sel ? 'var(--muted)' : spkColor(g.s);
+    const e = Math.max(g.e, g.b + dur * 0.0025);
+    stops.push(`transparent ${pct(g.b)}`, `${c} ${pct(g.b)}`, `${c} ${pct(e)}`, `transparent ${pct(e)}`);
+  }
+  const bg = segs.length ? `linear-gradient(to right, ${stops.join(', ')})` : 'none';
+  const cms = memoComments(d).list.filter((c) => c.u);
+  const marks = cms.map((c) => `<button class="pl-mark" data-u="${c.u.id}" data-ms="${c.ms}" style="left:${pct(c.ms)}" aria-label="코멘트 ${fmt(c.ms)} ${esc(c.text)}"></button>`).join('');
+  const key = bg + marks;
+  if (key === plLaneKey) return;
+  plLaneKey = key;
+  $('#pl-lane').style.backgroundImage = bg;
+  $('#pl-done').style.backgroundImage = bg;
+  $('#pl-marks').innerHTML = marks;
+}
+// 코멘트 점을 누르면 그 문장으로 가서 들려준다 (문장을 누른 것과 같이)
+$('#pl-marks').addEventListener('click', (e) => {
+  const m = e.target.closest('.pl-mark');
+  if (!m) return;
+  const id = +m.dataset.u;
+  gotoUtterance(id);
+  playUtterance(id);
+});
+// 막대에 마우스를 올리면: 그 시각 · 화자 · 문장 (코멘트 점 위면 그 코멘트)
+plTrack.addEventListener('mousemove', (e) => {
+  const d = doc();
+  const dur = d ? playDurMs(d) : 0;
+  if (!dur) return;
+  const r = plTrack.getBoundingClientRect();
+  const m = e.target.closest('.pl-mark');
+  let html;
+  if (m) {
+    const c = memoComments(d).list.find((x) => x.ms === +m.dataset.ms && x.u?.id === +m.dataset.u);
+    html = `<svg><use href="#i-comment"/></svg><time>${fmt(+m.dataset.ms)}</time>${esc(c?.text || '')}`;
+  } else {
+    const t = (Math.min(Math.max(e.clientX - r.left - 6, 0), r.width - 12) / (r.width - 12)) * dur;
+    const u = d.utterances.find((x) => t >= x.startMs - 300 && t <= x.endMs + 300);
+    const s = u ? resolveSpk(d, u.speaker) : null;
+    html = `<time>${fmt(t)}</time>${u ? `<b style="color:${spkColor(s)}">${esc(speakerName(d, s))}</b>${esc(u.text)}` : ''}`;
+  }
+  plTip.innerHTML = html;
+  plTip.hidden = false;
+  // 막대 위 마우스 자리에 가운데 맞추되 창 밖으로 나가지 않게
+  const w = plTip.offsetWidth;
+  const x = Math.min(Math.max(e.clientX - w / 2, 8), document.documentElement.clientWidth - w - 8);
+  plTip.style.left = `${x - r.left}px`;
+});
+plTrack.addEventListener('mouseleave', () => { plTip.hidden = true; });
 // 녹음 중에 다시 들으면, 재생하는 문장을 백엔드에 알려 그 소리가 다시 받아 적히면 버리게 한다
 function notePlayback(playing, u) {
   if (!P.live) return;
@@ -2340,12 +2579,17 @@ function notePlayback(playing, u) {
   if (!playing) P.notedId = null;
   api.invoke('set_playback', { playing, texts: playing && u ? [u.text] : [] }).catch(() => {});
 }
-function markPlaying(follow) {
+// near: 재생 막대를 옮기는 중 — 말이 없는 틈에 놓아도 바로 앞 문장(맨 앞이면 첫 문장)을 보여 준다
+function markPlaying(follow, near) {
   $$('#transcript .u.playing').forEach((el) => el.classList.remove('playing'));
   const d = doc();
   if (!P.src || !P.started || !d) return;
   const t = audio.currentTime * 1000;
-  const u = d.utterances.find((x) => t >= x.startMs - 200 && t <= x.endMs + 300);
+  let u = d.utterances.find((x) => t >= x.startMs - 200 && t <= x.endMs + 300);
+  if (!u && near) {
+    for (const x of d.utterances) if (x.startMs <= t && (!u || x.startMs >= u.startMs)) u = x;
+    if (!u) for (const x of d.utterances) if (!u || x.startMs < u.startMs) u = x;
+  }
   const el = u && $(`#transcript .u[data-id="${u.id}"]`);
   if (!el) return;
   el.classList.add('playing');
@@ -2385,20 +2629,22 @@ async function playUtterance(id) {
   if (!u || !P.src) return;
   // 듣고 있는 문장을 다시 누르면 멈춤
   if (!audio.paused && P.until != null && P.curId === id) { audio.pause(); return; }
+  // 이어 듣는 중이면 그 문장으로 옮겨 계속 듣고, 멈춰 있으면 그 문장만 들려준다 (재생 막대는 어느 쪽이든 그 자리로)
+  const cont = !audio.paused && P.until == null;
   P.curId = id;
   P.followId = id;
-  P.wantPlay = false;
+  if (!cont) P.wantPlay = false;
   P.gen++;
   await ensureFresh(u.endMs / 1000 + 0.3);
   notePlayback(true, u);
   audio.currentTime = Math.max(0, u.startMs / 1000 - 0.15);
-  P.until = u.endMs / 1000 + 0.2;
+  P.until = cont ? null : u.endMs / 1000 + 0.2;
   audio.play().catch((e) => toast(`재생할 수 없어요: ${e.message || e}`, 'error'));
 }
 audio.addEventListener('play', () => { P.started = true; cancelAnimationFrame(P.raf); P.raf = requestAnimationFrame(tick); });
 audio.addEventListener('pause', () => { renderPlayer(); markPlaying(false); notePlayback(false); });
 audio.addEventListener('timeupdate', checkUntil); // 창이 숨겨져 rAF 가 멈춰도 문장 끝에서 멈추게
-audio.addEventListener('loadedmetadata', renderPlayer);
+audio.addEventListener('loadedmetadata', () => { renderPlayer(); renderPlLane(); });
 audio.addEventListener('ended', async () => {
   P.until = null;
   renderPlayer();
@@ -2433,9 +2679,11 @@ $('#pl-seek').addEventListener('input', (e) => {
   P.wantPlay = !audio.paused;
   P.started = true;
   const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
-  audio.currentTime = (+e.target.value / 1000) * dur;
+  audio.currentTime = (+e.target.value / 10000) * dur;
+  // 받아 적는 중이라도 옮긴 곳을 보고 있게 맨 아래 따라가기는 멈춘다 ('새 발화 ↓' 로 돌아감)
+  if (following()) follow = false;
   renderPlayer();
-  markPlaying(true);
+  markPlaying(true, true);
 });
 $('#pl-seek').addEventListener('change', () => { P.seeking = false; });
 const RATES = [1, 1.25, 1.5, 2, 0.75];
@@ -2448,12 +2696,24 @@ $('#pl-rate').addEventListener('click', () => {
 // 문장 한 번 누르기 → 그 부분 듣기 (더블클릭 편집·글자 선택과 겹치지 않게 잠깐 기다린다)
 $('#transcript').addEventListener('click', (e) => {
   const el = e.target.closest('.u[data-id]');
-  if (!el || !P.src || editing || e.target.closest('.g-name') || ghostHit(el, e)) return;
+  if (!el || editing || e.target.closest('.g-name') || ghostHit(el, e)) return;
   if (!window.getSelection().isCollapsed) return;
   clearTimeout(playClick);
+  if (!P.src) { playClick = setTimeout(noAudioHint, 230); return; }
   const id = +el.dataset.id;
   playClick = setTimeout(() => playUtterance(id), 230);
 });
+// 녹음 파일이 없는 회의에서 문장을 누르면 — 왜 들리지 않는지, 어떻게 켜는지 회의마다 한 번 알려 준다
+// ('녹음 파일도 저장' 설정은 기본으로 꺼져 있어 문장 눌러 듣기가 있는 줄 모르기 쉽다)
+const noAudioHinted = new Set();
+function noAudioHint() {
+  const d = doc();
+  if (!d || P.src || P.checked !== d.id || noAudioHinted.has(d.id)) return;
+  noAudioHinted.add(d.id);
+  const why = isLiveRec() ? '녹음 파일을 저장하지 않고 받아 적는 중이라 다시 들을 수 없어요' : '이 회의는 녹음 파일이 없어 다시 들을 수 없어요';
+  const how = "설정 › 일반에서 '녹음 파일도 저장'을 켜면 다음 회의부터 문장을 눌러 다시 들을 수 있어요";
+  toast(S.settings?.saveAudio ? why : `${why}\n${how}`, '', 6500);
+}
 
 /* ───────────── 미니 창 ───────────── */
 // 미니 창에서는 도크 빈 곳을 잡고 끌어 옮긴다 (큰 창에서는 더블클릭 최대화를 막으려고 끈다)

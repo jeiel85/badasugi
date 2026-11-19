@@ -61,15 +61,6 @@
       <div class="speakers" id="speakers"></div>
     </section>
 
-    <!-- 다시 듣기 -->
-    <div class="player" id="player" hidden>
-      <button class="icon-btn sm" id="pl-play" title="재생 · 멈춤 (Space)"><svg><use href="#i-play"/></svg></button>
-      <span class="pl-time" id="pl-time">00:00</span>
-      <input type="range" id="pl-seek" min="0" max="1000" value="0" title="원하는 곳으로 옮기기" />
-      <span class="pl-time" id="pl-dur">00:00</span>
-      <button class="pl-rate" id="pl-rate" title="재생 속도">1×</button>
-    </div>
-
     <!-- 찾기 -->
     <div class="findbar" id="findbar" hidden>
       <svg><use href="#i-search"/></svg>
@@ -78,6 +69,16 @@
       <button class="icon-btn sm" id="find-prev" title="이전 (Shift+Enter)"><svg><use href="#i-up"/></svg></button>
       <button class="icon-btn sm" id="find-next" title="다음 (Enter)"><svg><use href="#i-chevron"/></svg></button>
       <button class="icon-btn sm" id="find-close" title="닫기 (Esc)"><svg><use href="#i-x"/></svg></button>
+    </div>
+
+    <!-- 고른 화자: 그 화자가 말한 곳만 건너다니기 (스크롤 막대에도 그 자리가 표시된다) -->
+    <div class="findbar spkbar" id="spkbar" hidden>
+      <i class="spk-dot"></i>
+      <span class="spkbar-name" id="spkbar-name"></span>
+      <span class="find-count" id="spkbar-count"></span>
+      <button class="icon-btn sm" id="spk-prev" title="이 화자가 말한 이전 곳 (Shift+Enter)"><svg><use href="#i-up"/></svg></button>
+      <button class="icon-btn sm" id="spk-next" title="이 화자가 말한 다음 곳 (Enter)"><svg><use href="#i-chevron"/></svg></button>
+      <button class="icon-btn sm" id="spk-close" title="표시 끄기 (Esc)"><svg><use href="#i-x"/></svg></button>
     </div>
 
     <!-- 본문 -->
@@ -117,6 +118,8 @@
         <span class="tools-hint">Enter 저장 · Esc 취소 · 글자를 다 지우면 문장 삭제</span>
       </div>
     </main>
+    <!-- 고른 화자가 말한 자리를 스크롤 막대 위에 눈금으로 (VS Code 의 개요 눈금자처럼) -->
+    <div class="ov-ruler" id="ov-ruler" aria-hidden="true" hidden></div>
 
     <button class="jump" id="jump" hidden>새 발화 ↓</button>
     </div>
@@ -182,6 +185,25 @@
           <svg><use href="#i-mic"/></svg><span id="source-label">마이크</span><svg class="chev"><use href="#i-chevron"/></svg>
         </button>
       </div>
+      <!-- 다시 듣기: 막대를 옮기면 녹취록의 그 문장이 표시되고, 문장을 누르면 막대가 그 자리로 간다 -->
+      <div class="player dock-play" id="player" hidden>
+        <button class="icon-btn sm" id="pl-play" title="재생 · 멈춤 (Space)"><svg><use href="#i-play"/></svg></button>
+        <span class="pl-time" id="pl-time">00:00</span>
+        <!-- 막대 = 누가 언제 말했는지(화자 색, 들은 곳은 진하게) · 위의 노란 점 = 코멘트(메모의 [시각] 줄) -->
+        <div class="pl-track" id="pl-track">
+          <div class="pl-lane" id="pl-lane"></div>
+          <div class="pl-lane pl-done" id="pl-done"></div>
+          <input type="range" id="pl-seek" min="0" max="10000" value="0" aria-label="재생 위치 — 옮기면 녹취록에서 그 문장을 보여 줘요" />
+          <div class="pl-marks" id="pl-marks"></div>
+          <div class="pl-tip" id="pl-tip" hidden></div>
+        </div>
+        <span class="pl-time" id="pl-dur">00:00</span>
+        <button class="pl-rate" id="pl-rate" title="재생 속도">1×</button>
+      </div>
+      <!-- 녹음 파일이 없는 회의: 재생 막대 자리에 왜 없는지 · 켜는 곳 -->
+      <button class="no-audio dock-play" id="no-audio" hidden title="설정 › 일반 › 녹음 파일도 저장을 켜면 다음 회의부터 여기서 다시 들을 수 있어요">
+        <svg><use href="#i-play"/></svg><span>녹음 파일이 없는 회의라 다시 들을 수 없어요</span><b>켜는 곳</b>
+      </button>
       <div class="dock-actions">
         <button class="icon-btn" id="btn-pause" title="일시정지 · 이어서" hidden><svg><use href="#i-pause"/></svg></button>
         <button class="icon-btn" id="btn-copy" title="전체 복사"><svg><use href="#i-copy"/></svg></button>
