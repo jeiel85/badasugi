@@ -488,6 +488,19 @@ mark.cur { background: var(--warn); color: #111; }
 .app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) { grid-template-columns: auto minmax(0, 1fr) auto; }
 .app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) > .dock-mid { display: none; }
 .app.mini .dock-play { display: none !important; }
+/* 좁은 창(기본 420px 등): 한 줄에 다 넣으면 재생 막대가 버튼들 위로 넘친다 → 막대만 아랫줄 전체 너비로.
+   윗줄은 막대가 없을 때와 같다 (녹음 중: 녹음 · 시계 · 버튼 / 다시 볼 때: 녹음 · 입력 고르기 · 버튼).
+   녹음 중 한 줄에 필요한 너비 ≈ 녹음 52 + 시계 · 입력 110~190 + 버튼 168 + 막대 최소 230 + 여백 → 720px 아래에서 내린다 */
+@media (max-width: 720px) {
+  .app:not(.mini):not(.review) .dock:has(> .dock-play:not([hidden])) { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 8px; }
+  .app:not(.mini):not(.review) .dock > .dock-play { grid-row: 2; grid-column: 1 / -1; }
+}
+/* 다시 볼 때 한 줄에 필요한 너비 ≈ 녹음 36 + 막대 최소 230 + 버튼 136 + 여백 → 500px 아래에서 내린다 */
+@media (max-width: 500px) {
+  .app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 6px; }
+  .app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) > .dock-mid { display: flex; }
+  .app.review:not(.mini) .dock > .dock-play { grid-row: 2; grid-column: 1 / -1; }
+}
 .fprog { flex-basis: 90px; }
 .player { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 6px 2px 2px; border-radius: 10px; background: var(--sunken); border: 1px solid var(--line); }
 .no-audio { display: flex; align-items: center; gap: 8px; min-width: 0; justify-self: start; padding: 5px 10px 5px 8px; border-radius: 10px; font-size: 12px; color: var(--muted); }
