@@ -30,6 +30,9 @@ const api = T ? {
 const COLORS = ['#7c6cff', '#0ea5e9', '#f59e0b', '#10b981', '#f43f5e', '#6366f1', '#14b8a6', '#f97316', '#a855f7', '#84cc16'];
 const spkColor = (s) => (s == null ? 'var(--muted)' : COLORS[s % COLORS.length]);
 const SOURCE_LABEL = { mic: '마이크', system: '시스템 소리', both: '마이크 + 시스템' };
+// 회의 시작 알림이 지켜볼 수 있는 앱 (meeting.rs 의 MATCHERS 와 같은 id)
+const MEET_APPS = [['zoom', 'Zoom'], ['teams', 'Teams'], ['browser', '브라우저'], ['webex', 'Webex'], ['slack', 'Slack'], ['discord', 'Discord'], ['kakaotalk', '카카오톡']];
+const MEET_DEFAULT = ['zoom', 'teams', 'browser', 'webex'];
 const SOURCE_ICON = { mic: '#i-mic', system: '#i-speaker', both: '#i-both' };
 // 설명은 앱이 정한 문구만 넣으므로 innerHTML 로 그린다 (링크 · 단계 안내)
 const KEY_STEPS = {
@@ -681,7 +684,8 @@ function renderDock() {
   app.classList.toggle('busy', S.rec === 'starting' || S.rec === 'stopping');
   app.classList.toggle('paused', rec && S.paused);
   app.classList.toggle('filemode', S.rec !== 'idle' && S.fileMode);
-  const src = S.settings?.source || 'mic';
+  // 녹음 중이면 이번 녹음이 실제로 받는 소리 (회의 시작 알림에서 시작하면 설정과 다를 수 있다)
+  const src = (S.rec !== 'idle' && S.recSource) || S.settings?.source || 'mic';
   const fileName = S.fileMode && S.rec !== 'idle' ? S.liveDoc?.sourceFile : null;
   $('#source-label').textContent = fileName || SOURCE_LABEL[src];
   $('#btn-source use').setAttribute('href', fileName ? '#i-file' : SOURCE_ICON[src]);
@@ -772,6 +776,7 @@ async function refreshState() {
   S.paused = !!S.app.paused;
   setMini(!!S.settings.miniMode);
   S.fileMode = !!S.app.fileMode;
+  S.recSource = S.app.recSource || null;
   if (S.app.update) S.update = S.app.update;
   applyTheme();
   if (S.app.current) S.liveDoc = S.app.current;
@@ -3536,8 +3541,24 @@ function renderSettings() {
   $('#opt-audio').checked = s.saveAudio;
   $('#opt-unload').checked = s.unloadWhenIdle;
   $('#opt-autoupdate').checked = s.autoUpdate;
+  $('#opt-meet').checked = !!s.meetingAlert;
+  renderMeetApps();
   setSeg('seg-theme', s.theme || 'system');
   renderAbout();
+}
+// 설정 › 회의 시작 알림: 지켜볼 앱 (켰을 때만)
+function renderMeetApps() {
+  const on = new Set(S.settings?.meetingApps || []);
+  $('#meet-apps-field').hidden = !S.settings?.meetingAlert;
+  $('#meet-apps').replaceChildren(...MEET_APPS.map(([id, name]) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip-btn';
+    b.dataset.app = id;
+    b.textContent = name;
+    b.setAttribute('aria-pressed', String(on.has(id)));
+    return b;
+  }));
 }
 // 앱 정보 카드: 버전 + 업데이트 상태
 function renderAbout() {
@@ -3786,6 +3807,21 @@ bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
 bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
 bind('opt-unload', (t) => (S.settings.unloadWhenIdle = t.checked));
 bind('opt-autoupdate', (t) => { S.settings.autoUpdate = t.checked; renderAbout(); });
+bind('opt-meet', (t) => {
+  S.settings.meetingAlert = t.checked;
+  if (t.checked && !(S.settings.meetingApps || []).length) S.settings.meetingApps = [...MEET_DEFAULT];
+  renderMeetApps();
+  if (t.checked) toast(`회의 앱이 마이크를 쓰기 시작하면 시계 위에서 물어볼게요${S.app?.autostart ? '' : '\n받아쓰기가 켜져 있어야 해요 — Windows 시작 시 실행도 켜 두면 놓치지 않아요'}`, '', 6000);
+});
+$('#meet-apps').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-app]');
+  if (!b) return;
+  const on = new Set(S.settings.meetingApps || []);
+  if (!on.delete(b.dataset.app)) on.add(b.dataset.app);
+  S.settings.meetingApps = MEET_APPS.map(([id]) => id).filter((id) => on.has(id));
+  renderMeetApps();
+  saveSettings();
+});
 bind('opt-usd-krw', (t) => {
   const v = Math.round(Number(String(t.value).replace(/,/g, '')));
   if (v >= 100 && v <= 10000) S.settings.usdKrw = v;
@@ -3928,6 +3964,7 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
 (async function init() {
   await api.listen('bd://event', (e) => onEvent(e.payload));
   await api.listen('bd://rec', (e) => onRec(e.payload));
+  await api.listen('bd://rec-source', (e) => { S.recSource = e.payload || null; renderDock(); });
   await api.listen('bd://download', (e) => onDownload(e.payload));
   await api.listen('bd://toast', (e) => toast(String(e.payload), 'error'));
   await api.listen('bd://paused', (e) => onPaused(!!e.payload));
@@ -4082,7 +4119,8 @@ function createMock() {
       openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
-      saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false, theme: 'system',
+      saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
+      meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
       usdKrw: 1360,
@@ -4096,7 +4134,7 @@ function createMock() {
     customModels: [], speakerModelReady: true,
     keys: { openai: false, groq: false, custom: false, anthropic: false, gemini: false, llmCustom: false },
     autostart: false, version: '0.2.0', current: null, elapsedMs: 0,
-    paused: false, fileMode: false, update: null, updatedFrom: null,
+    paused: false, fileMode: false, recSource: null, update: null, updatedFrom: null,
     audioExts: ['wav', 'mp3', 'm4a', 'mp4', 'mov', 'aac', 'flac', 'ogg', 'oga', 'opus'],
     demo: new URLSearchParams(location.search).has('demo'),
   };

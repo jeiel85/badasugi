@@ -709,14 +709,14 @@
     <canvas id="field" aria-hidden="true"></canvas>
     <div class="wrap hero-copy">
       <!-- 릴리스 때 아래 버전 문자열(vX.Y.Z)을 갱신. 페이지가 열리면 GitHub 최신 릴리스로 다시 맞춘다. -->
-      <a class="pill" href="https://github.com/jeiel85/badasugi/releases/latest"><b><span class="rec-dot"></span><span data-ver>v0.4.20</span></b>새 버전이 나왔어요<span class="arr">→</span></a>
+      <a class="pill" href="https://github.com/jeiel85/badasugi/releases/latest"><b><span class="rec-dot"></span><span data-ver>v0.4.21</span></b>새 버전이 나왔어요<span class="arr">→</span></a>
       <h1 class="h1" aria-label="회의는 말로, 기록은 받아쓰기가.">
         <span class="l1" aria-hidden="true">회의는 말로,</span>
         <span class="l2" id="h1l2" aria-hidden="true">기록은 받아쓰기가.</span>
       </h1>
       <p class="lead">누가 말했는지까지 나눠, 말이 멈추는 순간 글자로 옮깁니다. 러스트로 만든 가벼운 Windows 앱 — <b>로컬 AI라 인터넷 없이도</b>, 회의 내용이 PC 밖으로 나가지 않아요.</p>
       <div class="cta">
-        <a class="btn primary lg" href="https://github.com/jeiel85/badasugi/releases/latest" data-dl><svg class="i"><use href="#i-download"/></svg>Windows용 무료 다운로드<span class="sub"><span data-ver>v0.4.20</span> · <span data-size>약 13MB</span></span></a>
+        <a class="btn primary lg" href="https://github.com/jeiel85/badasugi/releases/latest" data-dl><svg class="i"><use href="#i-download"/></svg>Windows용 무료 다운로드<span class="sub"><span data-ver>v0.4.21</span> · <span data-size>약 13MB</span></span></a>
         <a class="btn ghost lg" href="https://github.com/jeiel85/badasugi"><svg class="i"><use href="#i-github"/></svg>GitHub에서 보기</a>
       </div>
       <ul class="trust">
@@ -806,7 +806,7 @@
               <div class="no">01</div>
               <h3>소리 듣기</h3>
               <p>마이크와 PC 소리를 한꺼번에 받아요. Zoom · Teams · Meet 상대방 목소리까지 — 가상 오디오 장치는 필요 없어요.</p>
-              <div class="tags"><span class="tag">WASAPI 루프백</span><span class="tag">마이크 + 시스템</span></div>
+              <div class="tags"><span class="tag">WASAPI 루프백</span><span class="tag">마이크 + 시스템</span><span class="tag">회의 시작 알림</span></div>
             </div>
             <div class="step" data-step="2">
               <div class="no">02</div>
@@ -1184,7 +1184,7 @@
           <details class="rv"><summary>웹앱인가요, 설치 프로그램인가요?</summary><p>설치형 Windows 프로그램입니다. 설치하면 시작 메뉴·바탕 화면에 <b>받아쓰기</b>가 생기고 <code>badasugi.exe</code>로 실행돼요. 브라우저나 인터넷 없이 동작하며, 화면만 Windows에 기본으로 들어 있는 WebView2로 그려서 설치 파일이 13MB 정도로 가볍습니다. 처음 실행할 때 음성 인식 모델(약 574MB)과 화자 모델(28MB)을 한 번만 받으면 이후 오프라인으로 동작해요.</p></details>
           <details class="rv"><summary>어떤 PC에서 돌아가나요? GPU가 필요한가요?</summary><p>Windows 10/11 64비트, AVX2를 지원하는 CPU(2013년 이후 대부분)면 됩니다. GPU는 없어도 됩니다. 로컬 모드의 속도는 CPU 성능에 따라 달라서, 사양이 낮은 노트북이라면 Groq API(매우 빠르고 저렴)를 추천합니다.</p></details>
           <details class="rv"><summary>설치하면 "Windows의 PC 보호" 경고가 떠요.</summary><p>코드 서명 인증서가 없는 개인 오픈소스 앱이라 SmartScreen이 경고합니다. <b>추가 정보 → 실행</b>을 누르면 설치됩니다. 걱정되면 소스를 직접 빌드할 수 있어요.</p></details>
-          <details class="rv"><summary>온라인 회의(Zoom · Teams · Meet)도 받아 적을 수 있나요?</summary><p>입력을 <b>마이크 + 시스템</b>으로 바꾸면 내 목소리와 상대방 목소리를 함께 받아 적습니다. 스피커 소리가 마이크로 다시 들어가면 중복될 수 있어 헤드셋을 권장합니다.</p></details>
+          <details class="rv"><summary>온라인 회의(Zoom · Teams · Meet)도 받아 적을 수 있나요?</summary><p>입력을 <b>마이크 + 시스템</b>으로 바꾸면 내 목소리와 상대방 목소리를 함께 받아 적습니다. 스피커 소리가 마이크로 다시 들어가면 중복될 수 있어 헤드셋을 권장합니다. 설정 › 일반의 <b>회의 시작 알림</b>을 켜 두면 Zoom · Teams · 브라우저가 마이크를 쓰기 시작할 때 시계 위에서 받아쓸지 묻고, 누르면 마이크 + 시스템으로 바로 받아 적어요. 녹음을 저절로 시작하지는 않아요.</p></details>
           <details class="rv"><summary>AI 요약은 어떤 걸로 하나요? 앱에 들어 있나요?</summary><p>가볍게 유지하려고 LLM을 앱에 넣지 않았어요. 설정에서 <b>Groq · Gemini</b>(무료 등급), Claude, OpenAI, 또는 PC에 설치한 <b>Ollama</b>(인터넷 불필요) 중 하나를 고르면 됩니다. 키를 넣고 "연결 확인"을 누르면 쓸 수 있는 모델 목록까지 불러와요. 긴 회의는 구간으로 나눠 메모한 뒤 합쳐 회의록을 만듭니다.</p></details>
           <details class="rv"><summary>화자 구분이 틀리면 어떻게 하나요?</summary><p>녹음이 끝나면 앱이 회의 전체를 다시 듣고 한 번 더 정리해요(둘로 나뉜 같은 사람 합치기 · 잘못 붙은 문장 옮기기). 그래도 틀린 곳은 화자 칩을 눌러 <b>다른 화자와 합치기</b>, 본문 화자 이름을 눌러 <b>이 문단의 화자 바꾸기</b>로 바로 고칠 수 있어요. 미리 조절하려면 설정의 <b>구분 민감도</b>를 쓰고, 참석 인원을 알면 <b>최대 화자 수</b>를 지정하는 게 가장 정확합니다.</p></details>
           <details class="rv"><summary>업데이트는 어떻게 하나요?</summary><p>자동입니다. 새 버전을 백그라운드에서 받아 두었다가 녹음 중이 아닐 때 서명을 확인하고 적용해요. 창을 보고 있다면 위쪽 배너의 <b>자세히 보기</b>로 바뀐 내용을 확인하고 <b>지금 적용</b>을 누르면 됩니다.</p></details>
