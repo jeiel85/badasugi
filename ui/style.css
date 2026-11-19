@@ -121,6 +121,7 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .speakers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .spk-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 7px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--text-2); background: var(--sunken); border: 1px solid var(--line); transition: border-color .15s; }
 .spk-chip:hover { border-color: var(--c); }
+.spk-chip.sel { border-color: var(--c); background: color-mix(in srgb, var(--c) 16%, var(--surface)); color: var(--text); }
 .spk-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
 .spk-chip input { width: 70px; border: 0; outline: 0; background: transparent; font-size: 12px; font-weight: 600; padding: 0; }
 .speakers .spk-undo { align-self: center; margin-left: 2px; font-size: 12px; }
@@ -163,6 +164,8 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 /* 발화 */
 .group { position: relative; padding: 10px 0 10px 14px; animation: rise .28s ease-out; }
 .group::before { content: ""; position: absolute; left: 0; top: 13px; bottom: 12px; width: 3px; border-radius: 3px; background: var(--c); opacity: .9; }
+/* 고른 화자의 문단: 옅은 배경 · 굵은 색 막대 — 어느 화자인지는 app.js 가 규칙 한 줄로 정한다(content 를 넣을 때만 보인다) */
+#transcript .group::after { position: absolute; z-index: -1; top: 4px; bottom: 4px; left: 0; right: 0; border-radius: 8px; background: color-mix(in srgb, var(--c) 10%, transparent); pointer-events: none; }
 .g-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
 .g-name { font-weight: 700; font-size: 12.5px; color: var(--c); cursor: pointer; }
 .g-time { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -402,6 +405,13 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 4px 0 0; }
 .findbar svg { width: 15px; height: 15px; color: var(--muted); }
 .findbar input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 13px; padding: 4px 2px; user-select: text; }
 .find-count { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 고른 화자 바 — 찾기 바와 같은 자리 · 모양 */
+.spkbar .spk-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; margin-right: 4px; }
+.spkbar-name { flex: 1; min-width: 0; padding: 4px 2px; font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 고른 화자가 말한 자리: 스크롤 막대 위 눈금 (스크롤 막대 끌기 · 누르기는 그대로 되게 마우스는 통과) */
+.ov-ruler { position: absolute; right: 0; z-index: 3; pointer-events: none; }
+.ov-ruler i { position: absolute; left: 2px; right: 2px; border-radius: 2px; background: var(--c); opacity: .8; }
+.ov-ruler.peek i { opacity: .45; }
 mark { background: color-mix(in srgb, var(--warn) 32%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
 mark.cur { background: var(--warn); color: #111; }
 
@@ -472,10 +482,51 @@ mark.cur { background: var(--warn); color: #111; }
 .app.mini .toast { top: 4px; bottom: auto; padding: 5px 10px; font-size: 11.5px; max-width: calc(100% - 12px); }
 .app.mini .source .chev { display: none; }
 
-/* ── 다시 듣기 ── */
-.player { display: flex; align-items: center; gap: 6px; margin: 8px 12px 0; padding: 2px 6px 2px 2px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); flex: none; }
+/* ── 다시 듣기: 도크의 녹음 버튼 오른쪽 재생 막대 ──
+   막대가 보이면 도크를 [녹음][시계 · 입력][재생 막대][버튼] 네 칸으로. 다시 볼 때(review)는 입력 고르기를 빼고 녹음 버튼 바로 옆에 */
+.app:not(.mini) .dock:has(> .dock-play:not([hidden])) { grid-template-columns: auto auto minmax(0, 1fr) auto; }
+.app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) { grid-template-columns: auto minmax(0, 1fr) auto; }
+.app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) > .dock-mid { display: none; }
+.app.mini .dock-play { display: none !important; }
+/* 좁은 창(기본 420px 등): 한 줄에 다 넣으면 재생 막대가 버튼들 위로 넘친다 → 막대만 아랫줄 전체 너비로.
+   윗줄은 막대가 없을 때와 같다 (녹음 중: 녹음 · 시계 · 버튼 / 다시 볼 때: 녹음 · 입력 고르기 · 버튼).
+   녹음 중 한 줄에 필요한 너비 ≈ 녹음 52 + 시계 · 입력 110~190 + 버튼 168 + 막대 최소 230 + 여백 → 720px 아래에서 내린다 */
+@media (max-width: 720px) {
+  .app:not(.mini):not(.review) .dock:has(> .dock-play:not([hidden])) { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 8px; }
+  .app:not(.mini):not(.review) .dock > .dock-play { grid-row: 2; grid-column: 1 / -1; }
+}
+/* 다시 볼 때 한 줄에 필요한 너비 ≈ 녹음 36 + 막대 최소 230 + 버튼 136 + 여백 → 500px 아래에서 내린다 */
+@media (max-width: 500px) {
+  .app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 6px; }
+  .app.review:not(.mini) .dock:has(> .dock-play:not([hidden])) > .dock-mid { display: flex; }
+  .app.review:not(.mini) .dock > .dock-play { grid-row: 2; grid-column: 1 / -1; }
+}
+.fprog { flex-basis: 90px; }
+.player { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 6px 2px 2px; border-radius: 10px; background: var(--sunken); border: 1px solid var(--line); }
+.no-audio { display: flex; align-items: center; gap: 8px; min-width: 0; justify-self: start; padding: 5px 10px 5px 8px; border-radius: 10px; font-size: 12px; color: var(--muted); }
+.no-audio svg { width: 15px; height: 15px; opacity: .6; }
+.no-audio span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.no-audio b { flex: none; color: var(--accent); font-weight: 600; }
+.no-audio:hover { background: var(--sunken); }
+.no-audio:hover b { text-decoration: underline; text-underline-offset: 3px; }
 .player .icon-btn { color: var(--accent); }
-.player input[type=range] { flex: 1; min-width: 40px; margin: 0; }
+/* 재생 막대: 막대 자체가 화자 색 띠(말 없는 틈은 회색), 들은 곳까지 진하게 · 위의 노란 점은 코멘트.
+   손잡이(12px)의 가운데가 0 ~ 끝을 오가므로 띠 · 점은 양쪽을 손잡이 반(6px)씩 들여 맞춘다 */
+.pl-track { position: relative; flex: 1; min-width: 60px; height: 26px; }
+.pl-lane { position: absolute; left: 6px; right: 6px; top: 50%; height: 6px; margin-top: -3px; border-radius: 3px; background-color: var(--line-strong); opacity: .4; pointer-events: none; }
+.pl-lane.pl-done { opacity: 1; clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0); }
+#pl-seek { position: relative; z-index: 1; display: block; width: 100%; height: 26px; margin: 0; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
+#pl-seek::-webkit-slider-runnable-track { height: 6px; background: transparent; }
+#pl-seek::-webkit-slider-thumb { -webkit-appearance: none; box-sizing: border-box; width: 12px; height: 12px; margin-top: -3px; border-radius: 50%; background: var(--surface); border: 2.5px solid var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, .3); }
+#pl-seek:focus-visible { outline: none; }
+#pl-seek:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent-soft); }
+.pl-marks { position: absolute; z-index: 2; left: 6px; right: 6px; top: 0; height: 100%; pointer-events: none; }
+.pl-mark { position: absolute; top: 0; width: 9px; height: 9px; margin-left: -4.5px; padding: 0; border-radius: 50%; background: var(--warn); border: 2px solid var(--sunken); pointer-events: auto; cursor: pointer; }
+.pl-mark:hover { transform: scale(1.3); }
+.pl-tip { position: absolute; z-index: 40; bottom: calc(100% + 8px); left: 0; max-width: min(360px, 80vw); padding: 5px 9px; border-radius: 8px; background: var(--elev); border: 1px solid var(--line-strong); box-shadow: var(--shadow); font-size: 12px; line-height: 1.45; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.pl-tip time { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.pl-tip b { font-weight: 700; margin-right: 5px; }
+.pl-tip svg { width: 12px; height: 12px; margin-right: 4px; vertical-align: -1px; color: var(--warn); }
 .pl-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .pl-rate { font-size: 11px; font-weight: 700; color: var(--text-2); padding: 2px 6px; border-radius: 6px; background: var(--sunken); min-width: 38px; }
 .pl-rate:hover { color: var(--accent); }
@@ -577,16 +628,17 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .body { position: relative; scrollbar-gutter: stable; }
 /* 넓은 창에서도 한 줄이 너무 길어지지 않게 가운데 기둥에 */
 .body > .transcript, .body > .listening, .body > .summary-card { max-width: var(--page); margin-left: auto; margin-right: auto; }
-/* 제목 · 화자 · 다시 듣기 · 찾기도 녹취록과 같은 기둥에 맞춘다 — 시작선이 하나로.
+/* 제목 · 화자 · 찾기 · 고른 화자 바도 녹취록과 같은 기둥에 맞춘다 — 시작선이 하나로.
    녹취록은 본문 칸(오른쪽 스크롤 막대 10px · 좌우 여백 16px) 안 가운데라, 같은 셈으로 왼쪽 · 오른쪽 끝을 잡는다 */
 .main-col > .meta { padding-left: max(16px, calc((100% - 10px - var(--page)) / 2)); padding-right: max(16px, calc((100% + 10px - var(--page)) / 2)); }
-.main-col > .player, .main-col > .findbar { margin-left: max(12px, calc((100% - 10px - var(--page)) / 2)); margin-right: max(12px, calc((100% + 10px - var(--page)) / 2)); }
+.main-col > .findbar { margin-left: max(12px, calc((100% - 10px - var(--page)) / 2)); margin-right: max(12px, calc((100% + 10px - var(--page)) / 2)); }
 
 /* ── 넓은 본문(side-cmt): 코멘트를 녹취록 옆 여백에, 그 문장과 같은 줄에 ──
    문단을 [문장 | 여백] 두 칸 그리드로 — 문장 뒤에 오는 코멘트가 자동으로 그 문장 줄 오른쪽에 놓인다 */
 .work.side-cmt .main-col { --cm-gap: 28px; --cm-w: clamp(240px, 22cqi, 300px); --page: calc(840px + var(--cm-gap) + var(--cm-w)); }
 .work.side-cmt .group { display: grid; grid-template-columns: minmax(0, 1fr) var(--cm-w); column-gap: var(--cm-gap); align-items: start; }
 .work.side-cmt .group > * { grid-column: 1; }
+.work.side-cmt #transcript .group::after { right: calc(var(--cm-w) + var(--cm-gap) / 2); }
 .work.side-cmt .group > .cmt + .u { margin-top: 2px; }
 .work.side-cmt .group > .cmt { grid-column: 2; position: relative; margin: 1px 0 4px; padding: 5px 10px 6px; border-radius: 8px; font-size: 12.5px; background: color-mix(in srgb, var(--warn) 9%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warn) 26%, transparent); transition: border-color .15s, background .15s; }
 .work.side-cmt .group > .cmt svg { width: 12px; height: 12px; margin-top: .32em; }
