@@ -163,13 +163,15 @@ fn context(doc: &SessionDoc, query: &str, budget: usize) -> Context {
         head.push_str(&format!("\n화자: {}", names.join(", ")));
     }
     head.push_str("\n\n");
+    // 요약 · 메모도 자리에 맞춰 — 직접 고친 요약이나 메모가 아주 길면 그것만으로 한 번에 보낼 크기를 넘어,
+    // 너무 크다고 거절돼 자리를 줄여 다시 보내도 계속 거절된다 (자리가 줄면 함께 준다)
     if let Some(sum) = doc.summary.as_deref().filter(|s| !s.trim().is_empty()) {
-        head.push_str(&format!("## AI 요약 (참고용)\n{}\n\n", sum.trim()));
+        head.push_str(&format!("## AI 요약 (참고용)\n{}\n\n", clip(sum.trim(), (budget / 3).max(MIN_UNIT))));
     }
     if !doc.notes.trim().is_empty() {
         head.push_str(&format!(
             "## 메모 (회의 중 사람이 적은 것 — [12:34] 로 시작하는 줄은 그 시각 문장에 단 코멘트)\n{}\n\n",
-            doc.notes.trim()
+            clip(doc.notes.trim(), (budget / 5).max(MIN_UNIT))
         ));
     }
     let transcript = doc.to_text();
@@ -397,6 +399,22 @@ mod tests {
         // 녹취록 부분이 자리 안쪽
         let body = c.text.split("## 녹취록").nth(1).unwrap();
         assert!(body.chars().count() < 600 + 200, "{}", body.chars().count());
+    }
+
+    /// 아주 긴 요약 · 메모도 자리에 맞춰 잘린다 (메모만 있는 회의도) — 줄여 다시 보내면 함께 준다
+    #[test]
+    fn long_summaries_and_notes_are_bounded() {
+        let mut d = meeting();
+        d.summary = Some("요약 ".repeat(3_000));
+        d.notes = "메모 ".repeat(3_000);
+        for budget in [4_000, 2_000] {
+            let n = context(&d, "VPN", budget).text.chars().count();
+            assert!(n <= budget + 300, "{budget}: {n}");
+        }
+        let mut only_notes = doc(&[]);
+        only_notes.notes = "메모 ".repeat(3_000);
+        let c = context(&only_notes, "VPN", 2_000);
+        assert!(c.text.chars().count() <= 2_000 && c.text.contains("메모 메모"), "{}", c.text.chars().count());
     }
 
     /// 한 사람이 쉬지 않고 길게 말해 문단 하나가 자리보다 커도 녹취록이 통째로 빠지지 않는다
