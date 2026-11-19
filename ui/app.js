@@ -2607,6 +2607,8 @@ $('#btn-find').addEventListener('click', () => ($('#findbar').hidden ? openFind(
 const onFindInput = debounce(() => { S.findQ = $('#find-input').value.trim(); S.findIdx = 0; renderDoc(); updateFind(true); }, 150);
 $('#find-input').addEventListener('input', onFindInput);
 $('#find-input').addEventListener('keydown', (e) => {
+  // 한글을 치는 중의 Enter 는 글자를 확정하는 것 — 다음 곳으로 넘기지 않는다
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter') {
     e.preventDefault();
     // 치자마자 누른 Enter 는 새로 찾은 첫 곳을 보여 주고, 그다음부터 다음 곳으로
@@ -2625,6 +2627,8 @@ $('#find-rep-toggle').addEventListener('click', () => {
   (on && $('#find-input').value.trim() ? $('#rep-input') : $('#find-input')).focus();
 });
 $('#rep-input').addEventListener('keydown', (e) => {
+  // 한글을 치는 중의 Enter 는 글자를 확정하는 것 — 바꾸지 않는다
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); replaceAllFound(); return; }
   if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) stepFind(-1); else replaceOne(); }
   if (e.key === 'Escape') { e.stopPropagation(); closeFind(); }
@@ -2697,11 +2701,13 @@ function replaceAllIn(d, q, to) {
     x.text = t;
     r.u += n;
   }
-  // 고치는 중인 요약은 입력 칸이 원본이라 건드리지 않는다
+  // 고치는 중인 요약은 입력 칸이 원본이라, 정리하는 중인 요약은 곧 새 요약으로 바뀌어 고친 것이 사라지므로 건드리지 않는다
   // 바꾼 요약은 직접 고친 요약 — AI 로 다시 요약할 때 묻고 바꾸게 (되돌리면 전 표시로)
-  if (d.summary && S.sumEdit?.doc !== d) {
+  const busy = S.sumEdit?.doc === d || (S.summarizing && S.sumId === d.id);
+  if (d.summary) {
     const [v, n] = replaceIn(d.summary, q, to);
-    if (n) { undo.summary = [d.summary, v, !!d.summaryEdited]; d.summary = v; d.summaryEdited = true; r.s = n; }
+    if (busy) { r.sLeft = n; r.sWhy = S.sumEdit?.doc === d ? '고치는' : '정리하는'; } // 남겨 둔 곳 (알림에 적는다)
+    else if (n) { undo.summary = [d.summary, v, !!d.summaryEdited]; d.summary = v; d.summaryEdited = true; r.s = n; }
   }
   if (d.title) {
     const [v, n] = replaceIn(d.title, q, to);
@@ -2731,14 +2737,16 @@ function undoReplace(undo) {
   saveReplaced(d);
   toast('바꾸기 전으로 되돌렸어요');
 }
+// 요약을 고치거나 정리하는 중이라 남겨 둔 곳
+const sumLeftMsg = (r) => `요약은 ${r.sWhy} 중이라 그대로 뒀어요`;
 function replacedMsg(r, from, to) {
   const parts = [r.u && `녹취록 ${r.u}곳`, r.s && `요약 ${r.s}곳`, r.t && '제목'].filter(Boolean);
-  return `${parts.join(' · ')}을 바꿨어요 · ${from} → ${to || '(지움)'}`;
+  return `${parts.join(' · ')}을 바꿨어요 · ${from} → ${to || '(지움)'}${r.sLeft ? ` (${sumLeftMsg(r)})` : ''}`;
 }
 // 모두 바꾼 뒤: 되돌리기 · 바꾼 말을 용어집에
 function replaceAllAndNudge(d, from, to) {
   const r = replaceAllIn(d, from, to);
-  if (!r.u && !r.s && !r.t) { toast('바꿀 곳이 없어요'); return false; }
+  if (!r.u && !r.s && !r.t) { toast(r.sLeft ? `바꾸지 않았어요 — ${sumLeftMsg(r)}` : '바꿀 곳이 없어요'); return false; }
   saveReplaced(d);
   nudge(replacedMsg(r, from, to), [{ label: '되돌리기', fn: () => undoReplace(r.undo) }, ...glossaryAct(to)]);
   return true;
