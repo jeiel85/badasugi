@@ -342,10 +342,87 @@ function renderMeta() {
   const undo = d.beforeRefine && !(S.live && S.rec !== 'idle')
     ? '<button class="link spk-undo" id="btn-undo-refine" title="회의가 끝난 뒤 다시 정리하기 전, 녹음 중에 정해진 화자 배정과 이름으로 돌아가요">화자 정리 되돌리기</button>'
     : '';
-  box.innerHTML = [...spk].sort((a, b) => a - b)
-    .map((s) => `<button class="spk-chip${s === S.spkSel ? ' sel' : ''}" data-spk="${s}" style="--c:${spkColor(s)}" title="말한 곳 표시 · 이름 바꾸기 · 다른 화자와 합치기"><i></i>${esc(speakerName(d, s))}</button>`)
-    .join('') + undo;
+  // 화자가 둘 이상이면 칩 아래에 말한 비율 막대 · 끝에 '발언 통계'
+  const st = speakerStats(d);
+  const by = new Map(st.list.map((x) => [x.spk, x]));
+  const showStats = st.list.length >= 2 && st.total > 0;
+  const html = [...spk].sort((a, b) => a - b)
+    .map((s) => {
+      const x = showStats ? by.get(s) : null;
+      const pct = x ? Math.round(x.share * 100) : null;
+      const tip = x ? `${durLabel(x.ms)} 말함 (${pct}%) · 발언 ${x.turns}번 — 눌러서 말한 곳 표시 · 이름 바꾸기 · 합치기` : '말한 곳 표시 · 이름 바꾸기 · 다른 화자와 합치기';
+      return `<button class="spk-chip${s === S.spkSel ? ' sel' : ''}${x ? ' has-share' : ''}" data-spk="${s}" style="--c:${spkColor(s)};--share:${x ? (x.share * 100).toFixed(1) : 0}%" title="${esc(tip)}"><i></i>${esc(speakerName(d, s))}${x ? `<small class="spk-pct">${pct}%</small>` : ''}</button>`;
+    })
+    .join('')
+    + (showStats ? '<button class="link spk-stats-btn" id="btn-spk-stats" title="화자마다 말한 시간 · 비율 · 발언 수 · 가장 긴 발언">발언 통계</button>' : '')
+    + undo;
+  // 녹음 중에는 문장마다 다시 그리게 되므로 바뀐 때만 (칩에 올린 마우스 · 열린 메뉴가 흔들리지 않게)
+  // (이름 바꾸기 · 합치기 뒤에는 칩을 비워 다시 그리게 한다)
+  if (box.dataset.html !== html || !box.children.length) { box.innerHTML = html; box.dataset.html = html; }
 }
+
+/* 화자별 발언 통계 — 앱 쪽 session.rs 의 speaker_stats 와 같은 규칙:
+   말한 시간 = 문장 길이 합 · 발언 수 = 같은 화자가 앞 발언 끝에서 15초 안에 다시 말하면 한 번 · 가장 길게 이어 말한 발언.
+   화자가 없는 문장은 뺀다. 말한 시간이 많은 순 */
+function speakerStats(d) {
+  const us = (d?.utterances || []).filter((u) => u.speaker != null)
+    .map((u) => ({ u, s: resolveSpk(d, u.speaker) }))
+    .sort((a, b) => a.u.startMs - b.u.startMs || a.u.id - b.u.id);
+  const by = new Map();
+  let cur = null; // 지금 이어지는 발언 { s, start, end, id }
+  const close = () => {
+    if (!cur) return;
+    const x = by.get(cur.s);
+    const len = cur.end - cur.start;
+    if (x.turns === 1 || len > x.longestMs) { x.longestMs = len; x.longestAt = cur.start; x.longestId = cur.id; }
+  };
+  for (const { u, s } of us) {
+    if (!by.has(s)) by.set(s, { spk: s, ms: 0, turns: 0, longestMs: 0, longestAt: 0, longestId: null });
+    const x = by.get(s);
+    x.ms += Math.max(0, u.endMs - u.startMs);
+    if (cur && cur.s === s && u.startMs - cur.end < 15000) { cur.end = Math.max(cur.end, u.endMs); continue; }
+    close();
+    x.turns++;
+    cur = { s, start: u.startMs, end: u.endMs, id: u.id };
+  }
+  close();
+  const list = [...by.values()];
+  const total = list.reduce((a, x) => a + x.ms, 0);
+  for (const x of list) x.share = total ? x.ms / total : 0;
+  list.sort((a, b) => b.ms - a.ms || a.spk - b.spk);
+  return { total, list };
+}
+// 걸린 시간: 45초 · 3분 12초 · 3분 · 1시간 5분 (앱 쪽 fmt_dur 와 같게)
+function durLabel(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}초`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? `${m}분 ${s % 60}초` : `${m}분`;
+  return m % 60 ? `${Math.floor(m / 60)}시간 ${m % 60}분` : `${Math.floor(m / 60)}시간`;
+}
+// 발언 통계 팝오버: 화자마다 비율 막대 · 말한 시간 · 발언 수 · 가장 긴 발언(누르면 그 문장으로)
+function showStats(anchor) {
+  const d = doc();
+  const st = speakerStats(d);
+  if (!d || !st.list.length) return;
+  const rows = st.list.map((x) => `
+    <div class="st-row" style="--c:${spkColor(x.spk)}">
+      <div class="st-name"><i></i><b>${esc(speakerName(d, x.spk))}</b><span>${Math.round(x.share * 100)}%</span></div>
+      <div class="st-bar"><span style="width:${(x.share * 100).toFixed(1)}%"></span></div>
+      <div class="st-nums"><span>${durLabel(x.ms)}</span><span>발언 ${x.turns}번</span>
+        <button class="st-long" data-u="${x.longestId}" title="가장 길게 이어 말한 곳으로">가장 긴 발언 ${durLabel(x.longestMs)} · <time>${fmt(x.longestAt)}</time></button></div>
+    </div>`).join('');
+  const pop = $('#pop-stats');
+  pop.innerHTML = `<div class="st-head"><b>발언 통계</b><span>화자 ${st.list.length}명 · 모두 ${durLabel(st.total)} 말함</span></div>${rows}
+    <p class="st-note">말한 시간은 받아 적은 문장 길이의 합이에요. 같은 사람이 15초 안에 이어 말하면 발언 한 번으로 세요.</p>`;
+  showPopover(pop, anchor, 'left', true);
+}
+$('#pop-stats').addEventListener('click', (e) => {
+  const b = e.target.closest('.st-long[data-u]');
+  if (!b) return;
+  hidePopovers();
+  gotoUtterance(+b.dataset.u);
+});
 
 // 받침이 있으면 '을', 없으면 '를' (한글로 끝나지 않으면 '을')
 function objJosa(w) {
@@ -922,6 +999,14 @@ function speakerMenu(anchor, spk, ids) {
   const pop = $('#pop-spk');
   const item = (s, action) => `<button data-act="${action}" data-to="${s}"><i style="--c:${spkColor(s)}"></i>${esc(speakerName(d, s))}</button>`;
   let html = `<button data-act="rename"><svg><use href="#i-pencil"/></svg>이름 바꾸기</button>`;
+  // 칩에서 열면 맨 위에 그 화자의 발언 통계 (화자가 둘 이상일 때)
+  const st = ids ? null : speakerStats(d);
+  const x = st && st.list.length >= 2 ? st.list.find((y) => y.spk === spk) : null;
+  if (x) {
+    html = `<div class="spk-stat"><b>${durLabel(x.ms)}</b> 말함 · ${Math.round(x.share * 100)}% · 발언 ${x.turns}번</div>`
+      + `<button data-act="longest" data-u="${x.longestId}" title="가장 길게 이어 말한 곳으로"><svg><use href="#i-clock"/></svg>가장 긴 발언 · ${fmt(x.longestAt)} (${durLabel(x.longestMs)})</button><hr>`
+      + html;
+  }
   if (ids) {
     html += '<hr><div class="pop-title">이 문단의 화자를</div>' + others.map((s) => item(s, 'move')).join('')
       + `<button data-act="move" data-to="new"><svg><use href="#i-mic"/></svg>새 화자로 나누기</button>`;
@@ -940,6 +1025,7 @@ $('#pop-spk').addEventListener('click', (e) => {
   const pop = $('#pop-spk');
   const spk = +pop.dataset.spk;
   hidePopovers();
+  if (b.dataset.act === 'longest') return gotoUtterance(+b.dataset.u);
   if (b.dataset.act === 'rename') return startRename(spk);
   if (b.dataset.act === 'merge') {
     const to = +b.dataset.to;
@@ -965,6 +1051,8 @@ $('#pop-spk').addEventListener('click', (e) => {
 });
 $('#speakers').addEventListener('click', (e) => {
   if (e.target.closest('#btn-undo-refine')) return undoRefine();
+  const sb = e.target.closest('#btn-spk-stats');
+  if (sb) { const open = !$('#pop-stats').hidden; hidePopovers(); if (!open) showStats(sb); return; }
   const c = e.target.closest('.spk-chip');
   if (c && !c.querySelector('input')) { setSpkSel(c.dataset.spk); speakerMenu(c, c.dataset.spk, null); }
 });
@@ -1887,10 +1975,17 @@ $('#btn-fold-summary').addEventListener('click', () => $('#summary-card').classL
 
 function showPopover(pop, anchor, align = 'left', below = false) {
   hidePopovers();
+  pop.style.maxHeight = '';
   pop.hidden = false;
   const a = anchor.getBoundingClientRect();
-  const p = pop.getBoundingClientRect();
   const appR = $('#app').getBoundingClientRect();
+  // 아래에도 위에도 다 들어가지 않으면 더 넓은 쪽 높이로 줄인다 — 화자가 많을 때의 발언 통계 · 화자 메뉴는 안에서 스크롤
+  if (below) {
+    const h = pop.getBoundingClientRect().height;
+    const down = appR.height - a.bottom - 14, up = a.top - 14;
+    if (h > down && h > up) pop.style.maxHeight = `${Math.max(down, up, 120)}px`;
+  }
+  const p = pop.getBoundingClientRect();
   let left = align === 'right' ? a.right - p.width : a.left;
   left = Math.max(8, Math.min(left, appR.width - p.width - 8));
   pop.style.left = `${left}px`;
@@ -1902,7 +1997,7 @@ function hidePopovers() {
   if (S.cmt) closeComment(true); // 쓰던 코멘트는 바깥을 눌러도 저장
   $$('.popover').forEach((p) => (p.hidden = true));
 }
-document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name')) hidePopovers(); });
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name, #btn-spk-stats')) hidePopovers(); });
 
 $('#btn-save').addEventListener('click', (e) => showPopover($('#pop-save'), e.currentTarget, 'right'));
 $('#pop-save').addEventListener('click', async (e) => {
