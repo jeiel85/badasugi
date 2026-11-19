@@ -717,9 +717,9 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .qa-q { align-self: flex-end; max-width: 88%; padding: 7px 11px; border-radius: 12px 12px 4px 12px; background: var(--accent-soft); color: var(--text); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; }
 .qa-a { font-size: 13px; line-height: 1.7; color: var(--text); word-break: keep-all; overflow-wrap: anywhere; }
 .qa-a > :first-child { margin-top: 0; }
-.qa-a .ts { display: inline-block; margin: 0 1px; padding: 0 5px; border-radius: 5px; font-family: var(--font); font-size: 11.5px; font-weight: 600; line-height: 1.6; color: var(--accent); background: var(--accent-soft); font-variant-numeric: tabular-nums; vertical-align: 1px; }
-.qa-a .ts:hover { text-decoration: underline; }
-.qa-a .ts:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.qa-a .ts, .summary-body .ts { display: inline-block; margin: 0 1px; padding: 0 5px; border-radius: 5px; font-family: var(--font); font-size: 11.5px; font-weight: 600; line-height: 1.6; color: var(--accent); background: var(--accent-soft); font-variant-numeric: tabular-nums; vertical-align: 1px; }
+.qa-a .ts:hover, .summary-body .ts:hover { text-decoration: underline; }
+.qa-a .ts:focus-visible, .summary-body .ts:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .qa-meta { display: flex; align-items: center; gap: 2px; min-height: 22px; font-size: 11px; color: var(--muted); }
 .qa-meta > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .qa-meta button { flex: none; padding: 2px 6px; border-radius: 6px; font-size: 11.5px; font-weight: 600; color: var(--muted); }

@@ -207,6 +207,19 @@ function md(src) {
   if (list) html += '</ul>';
   return html;
 }
+// md + 녹취록 시각 [12:34] · [1:02:03] 을 누를 수 있는 단추로 (회의에 묻기 답 · AI 요약의 근거 시각).
+// 회의 d 의 마지막 문장보다 뒤인 시각(모델이 지어낸 값)이나 형식이 맞지 않는 것은 글자 그대로 둔다
+const TS_RE = /\[(?:(\d{1,3}):)?(\d{1,3}):(\d{2})\]/g;
+function mdTimes(text, d) {
+  const end = (d?.utterances || []).reduce((m, u) => Math.max(m, u.endMs), -1);
+  return md(text).replace(TS_RE, (m, h, mi, s) => {
+    if (+s >= 60 || (h != null && +mi >= 60)) return m;
+    const ms = ((+h || 0) * 3600 + +mi * 60 + +s) * 1000;
+    // 시각은 초 단위라 [20:35] 는 20:35.000 ~ 20:35.999
+    if (ms > end) return m;
+    return `<button class="ts" data-ms="${ms}" title="녹취록에서 이 문장 보기">${fmt(ms)}</button>`;
+  });
+}
 
 /* ───────────── 테마 ───────────── */
 const darkMq = matchMedia('(prefers-color-scheme: dark)');
@@ -389,7 +402,8 @@ function renderSummary() {
   empty.hidden = !card.hidden;
   $('#btn-summary-ai').disabled = !(d && d.utterances.length);
   $('#sum-mark').hidden = !(d && d.summary && d.summaryEdited);
-  if (d && d.summary) $('#summary-body').innerHTML = md(d.summary);
+  // 불릿 끝의 근거 시각 [12:34] 은 눌러서 녹취록 그 문장으로 (회의에 묻기 답과 같이)
+  if (d && d.summary) $('#summary-body').innerHTML = mdTimes(d.summary, d);
 }
 // 진행 막대 · 퍼센트 · 걸린 시간. 막대는 되돌아가지 않는다 (긴 회의 구간이 더 잘게 나뉘어 전체가 늘어도)
 function renderSumProgress() {
@@ -1577,6 +1591,8 @@ async function cancelSummaryEdit() {
 $('#btn-edit-summary').addEventListener('click', startSummaryEdit);
 $('#btn-summary-write').addEventListener('click', startSummaryEdit);
 $('#summary-card').addEventListener('click', (e) => {
+  const ts = e.target.closest('.ts');
+  if (ts) { gotoMs(+ts.dataset.ms); return; }
   const b = e.target.closest('[data-sum]');
   if (!b) return;
   if (b.dataset.sum === 'save') endSummaryEdit(true);
@@ -1910,15 +1926,8 @@ const askList = $('#ask-list');
 const askInput = $('#ask-input');
 const ASK_CANCELLED = '답을 멈췄어요';
 let askShown = '';
-const TS_RE = /\[(?:(\d{1,3}):)?(\d{1,3}):(\d{2})\]/g;
 // 답 → HTML (목록 · 굵게). 녹취록 시각은 누를 수 있게
-function askHtml(text) {
-  return md(text).replace(TS_RE, (m, h, mi, s) => {
-    if (+s >= 60 || (h != null && +mi >= 60)) return m;
-    const ms = ((+h || 0) * 3600 + +mi * 60 + +s) * 1000;
-    return `<button class="ts" data-ms="${ms}" title="녹취록에서 이 문장 보기">${fmt(ms)}</button>`;
-  });
-}
+const askHtml = (text) => mdTimes(text, doc());
 // 물어볼 만한 것 — 화자 이름을 붙였으면 그 사람 의견도
 function askSuggestions(d) {
   const out = ['결정된 것만 정리해 줘', '할 일과 담당자 · 기한은?', '숫자나 금액이 나온 곳은?', '의견이 갈린 부분은?'];
@@ -3387,7 +3396,7 @@ function demoDoc() {
     engine: '로컬 · large-v3-turbo-q5_0',
     speakers: { 0: '김 팀장', 1: '이 개발', 2: '박 디자인' },
     utterances: lines.map(([s, e, spk, text], i) => ({ id: i, startMs: s, endMs: e, speaker: spk, text, latencyMs: 1400 + ((i * 523) % 1700) })),
-    summary: '### 한 줄 요약\n다음 달 15일 앱 출시를 확정하고 목요일에 최종 점검한다.\n\n### 결정 사항\n- 출시일 **15일** 확정, 목요일 최종 점검\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일',
+    summary: '### 한 줄 요약\n다음 달 15일 앱 출시 확정, 목요일 최종 점검\n\n### 결정 사항\n- 출시일 **15일** 확정, 목요일 최종 점검 [00:25]\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일 [00:07]\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일 [00:17]\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일 [00:46] [00:52]',
     audioFile: null,
     // 시각 줄 = 그 시각 문장의 코멘트 (00:34 · 00:35 는 같은 문장에 둘)
     notes: '[00:07] 결제 모듈 — 테스트 서버 검증 결과 금요일에 공유받기\n[00:34] 0.4초는 피크 시간대 기준인지 확인\n[00:35] 키오스크 인덱스: 2초 → 0.4초\n[00:52] 금요일 공유 — 담당 박 디자인\n\n- 매장 피드백 양식 미리 보내 두기',
@@ -3454,7 +3463,8 @@ function createMock() {
     await wait(1500); check();
     const steps = [['제목', 0.0], ['제목', 0.01], ['한 줄 요약', 0.02], ['주요 논의', 0.08], ['주요 논의', 0.3], ['주요 논의', 0.45], ['결정 사항', 0.53], ['결정 사항', 0.62], ['할 일', 0.68], ['할 일', 0.85], ['남은 질문', 0.9], ['남은 질문', 0.97]];
     for (const [section, frac] of steps) { send({ writing: true, section, frac }); await wait(450); check(); }
-    return { text: '### 한 줄 요약\n15일 출시를 확정했다.\n\n### 주요 논의\n- 출시 일정 확인 (김 팀장)\n\n### 결정 사항\n- 15일 출시\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일\n\n### 남은 질문\n- 없음', title: null };
+    // 근거 시각: [00:34] 는 녹취록으로 가는 단추, 회의(1분) 뒤인 [12:00] 은 지어낸 값이라 글자 그대로
+    return { text: '### 한 줄 요약\n15일 출시 확정\n\n### 주요 논의\n- **출시 일정**\n  - 15일 출시, 목요일 점검 (김 팀장) [00:25]\n- **키오스크 응답 속도**\n  - 인덱스 추가로 2초 → 0.4초 (이 개발) [00:34]\n\n### 결정 사항\n- 15일 출시 [00:25]\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일 [12:00]\n\n### 남은 질문\n- 없음', title: null };
   }
   // 브라우저 미리보기: 읽는 척 잠깐 쉬었다가 답을 조금씩 보낸다 (?askslow 면 느리게 · ?askfail 이면 오류)
   const mockQa = {};

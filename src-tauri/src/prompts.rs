@@ -24,6 +24,9 @@ const FILES: &[(&str, &str)] = &[
     ("rules/open_questions.md", include_str!("../prompts/rules/open_questions.md")),
     // 구간 메모를 합칠 때: 앞 구간의 남은 질문이 뒤 구간에서 풀렸으면 빼게 한다
     ("rules/drop_resolved.md", include_str!("../prompts/rules/drop_resolved.md")),
+    // 요약 불릿 끝의 근거 시각 [12:34] — 화면에서 눌러 녹취록 그 문장으로 간다 (회의에 묻기와 같은 표기).
+    // 긴 회의는 구간 메모에도 달게 해, 메모를 합치고 줄여도 시각이 회의록까지 살아남게 한다
+    ("rules/evidence_time.md", include_str!("../prompts/rules/evidence_time.md")),
 ];
 
 /// md 를 보낼 글로: `{{다른 파일}}` 자리를 그 파일 내용으로 바꾸고 끝의 줄바꿈을 뗀다
@@ -111,5 +114,19 @@ mod tests {
         assert!(merge_final().ends_with(drop_resolved()));
         // 규칙 뒤 빈 줄이 그대로 (규칙 끝 줄바꿈을 떼고 md 의 빈 줄로 잇는다)
         assert!(summary().contains("되풀이하지 마세요.\n\n\"남은 질문\"에는"));
+    }
+
+    #[test]
+    fn evidence_times_survive_every_step() {
+        // 회의록 · 구간 메모 모두 근거 시각을 달고, 메모를 합치거나 줄여도 시각을 지우지 않는다
+        for (name, text) in [("summary", summary()), ("summary_part", summary_part())] {
+            assert!(text.contains("근거가 된 발언의 녹취록 시각"), "{name}: 근거 시각 규칙");
+            assert!(text.contains("[시각]"), "{name}: 형식에 시각 자리");
+        }
+        for (name, text) in [("merge_notes", merge_notes()), ("merge_final", merge_final()), ("shrink_note", shrink_note())] {
+            assert!(text.contains("시각 [12:34]"), "{name}: 메모의 시각을 그대로 옮기라는 말");
+        }
+        // 화면이 누를 수 있는 표기 — 회의에 묻기와 같은 [분:초]
+        assert!(ask().contains("[12:34]"));
     }
 }
