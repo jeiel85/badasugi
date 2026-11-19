@@ -13,20 +13,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 
+use crate::prompts;
 use crate::session::{fmt_time, SessionDoc};
 use crate::settings::SummarySettings;
 use crate::summary::{self, Reply, Turn};
-
-const SYSTEM: &str = "당신은 한국 회사의 회의 기록을 보고 질문에 답하는 비서입니다. \
-녹취록은 음성 인식 결과라서 오탈자와 잘못 들린 단어가 있을 수 있으니 문맥으로 바로잡아 이해하세요.\n\n\
-- 회의 기록(녹취록 · AI 요약 · 메모)에 있는 내용만 근거로 답하세요. 기록에 없는 것은 지어내지 말고 \
-\"회의에서 나오지 않았어요\"처럼 짧게 말하세요. 짐작이 섞이면 짐작이라고 밝히세요.\n\
-- 답의 근거가 된 발언은 녹취록의 시각을 [12:34] 처럼 그대로 적어 문장 끝에 붙이세요 (여럿이면 [12:34] [15:02]). \
-시각은 녹취록에 있는 것만 쓰세요.\n\
-- 누가 한 말인지 화자 이름을 밝히세요.\n\
-- AI 요약 · 메모는 참고용입니다. 녹취록과 다르면 녹취록을 따르세요.\n\
-- 녹취록이 일부만 실려 있으면('…' 줄은 건너뛴 곳) 실린 부분으로 답하고, 건너뛴 곳에 답이 있을 수 있으면 그렇다고 말하세요.\n\
-- 한국어로, 질문에 맞는 길이로 간결하게 답하세요. 여러 가지면 '- ' 목록으로 쓰고, 제목(#)과 표는 쓰지 마세요.";
 
 /// 앞선 질문 · 답을 이만큼까지 이어 보낸다 (최근 것)
 const HISTORY: usize = 6;
@@ -304,7 +294,7 @@ fn ask_with(
         }
         turns.push(Turn::user(question));
         let wrote = Cell::new(false);
-        let res = chat(SYSTEM, &turns, &mut |t| {
+        let res = chat(prompts::ask(), &turns, &mut |t| {
             wrote.set(true);
             on_event(Event::Text(t));
         });
@@ -466,7 +456,7 @@ mod tests {
         d.qa.push(QaItem { q: "VPN 은 얼마야?".into(), a: "월 12만 원이에요 [08:20]".into(), ..Default::default() });
         let mut seen: Vec<(bool, String, bool)> = Vec::new();
         let mut chat = |s: &str, turns: &[Turn], t: &mut dyn FnMut(&str)| {
-            assert_eq!(s, SYSTEM);
+            assert_eq!(s, prompts::ask());
             seen = turns.iter().map(|x| (x.user, x.text.to_string(), x.cache)).collect();
             t("다음 달에 ");
             t("다시 봐요 [08:40]");
