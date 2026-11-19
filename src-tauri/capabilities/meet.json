@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "meet",
+  "description": "회의 시작 알림 창 권한 (내용을 받고 단추 답만 보낸다)",
+  "windows": ["meet"],
+  "permissions": ["core:default"]
+}

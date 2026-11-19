@@ -40,6 +40,10 @@ pub struct Settings {
     /// 중요 표시 ⭐ 전역 단축키 — 녹음 · 다시 듣기 중 지금 말하는 곳을 메모에 `[시각] ⭐` 로 (빈 값이면 없음)
     pub star_hotkey: String,
     pub always_on_top: bool,
+    /// 회의 시작 알림 — 회의 앱이 마이크를 쓰기 시작하면 받아쓸지 묻는다 (녹음을 저절로 시작하지는 않음)
+    pub meeting_alert: bool,
+    /// 회의 시작 알림이 지켜볼 앱 (meeting::MATCHERS 의 id)
+    pub meeting_apps: Vec<String>,
     /// "system" | "light" | "dark"
     pub theme: String,
     /// 새 버전을 백그라운드에서 받아 두었다가, 녹음 중이 아니고 창이 숨겨져 있을 때 조용히 설치
@@ -117,6 +121,8 @@ impl Default for Settings {
             hotkey: "Ctrl+Alt+R".into(),
             star_hotkey: "Ctrl+Alt+B".into(),
             always_on_top: false,
+            meeting_alert: false,
+            meeting_apps: crate::meeting::default_apps(),
             theme: "system".into(),
             auto_update: true,
             last_version: String::new(),

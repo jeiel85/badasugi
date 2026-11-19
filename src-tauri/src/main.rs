@@ -4,6 +4,7 @@
 mod ant;
 mod ask;
 mod logging;
+mod meeting;
 mod power;
 mod prompts;
 mod session;
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use badasugi_core::asr::EngineConfig;
-use badasugi_core::audio::{CaptureConfig, DeviceInfo};
+use badasugi_core::audio::{CaptureConfig, DeviceInfo, SourceKind};
 use badasugi_core::models::{self, ModelSpec};
 use badasugi_core::pipeline::{Event, EventSink, Pipeline, PipelineConfig};
 use parking_lot::Mutex;
@@ -93,6 +94,8 @@ pub(crate) struct AppState {
     tray_pause: Mutex<Option<MenuItem<Wry>>>,
     tray_mini: Mutex<Option<MenuItem<Wry>>>,
     pub rec_started: Mutex<Option<Instant>>,
+    /// 지금 녹음이 받는 소리 (회의 시작 알림에서 시작하면 설정과 다를 수 있다 · 파일 받아쓰기면 None)
+    rec_source: Mutex<Option<SourceKind>>,
     quit_after_stop: AtomicBool,
     /// PC 가 잠들어서 녹음을 일시정지했다 (사람이 이어서 녹음하면 풀림)
     sleep_paused: AtomicBool,
@@ -105,7 +108,7 @@ pub(crate) struct AppState {
     speaker_hints: Mutex<Option<badasugi_core::pipeline::SharedHints>>,
 }
 
-type CmdResult<T> = Result<T, String>;
+pub(crate) type CmdResult<T> = Result<T, String>;
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -150,6 +153,7 @@ struct StateDto {
     elapsed_ms: u64,
     paused: bool,
     file_mode: bool,
+    rec_source: Option<SourceKind>,
     update: Option<UpdateStatus>,
     updated_from: Option<String>,
     hotkey_error: Option<String>,
@@ -197,6 +201,7 @@ fn get_state(app: AppHandle) -> StateDto {
             .unwrap_or(0),
         paused: st.pipeline.lock().as_ref().is_some_and(|p| p.is_paused()),
         file_mode: st.file_mode.load(Ordering::SeqCst),
+        rec_source: *st.rec_source.lock(),
         update: app.state::<Updates>().status.lock().clone(),
         updated_from: st.updated_from.lock().take(),
         hotkey_error: st.hotkey_error.lock().take(),
@@ -540,11 +545,11 @@ pub(crate) fn on_power(app: &AppHandle, ev: power::PowerEvent) {
 }
 
 fn start_recording_inner(app: &AppHandle) -> CmdResult<()> {
-    start_session(app, None)
+    start_session(app, None, None)
 }
 
-/// 녹음(마이크·시스템 소리) 또는 파일 받아쓰기를 시작한다
-fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
+/// 녹음(마이크·시스템 소리) 또는 파일 받아쓰기를 시작한다. `source` 를 주면 설정 대신 그 소리를 받는다(회의 시작 알림)
+pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option<SourceKind>) -> CmdResult<()> {
     let st = app.state::<AppState>();
     {
         let mut rec = st.rec.lock();
@@ -590,7 +595,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
         let terms = glossary_terms(&s.glossary);
         let cfg = PipelineConfig {
             capture: CaptureConfig {
-                source: s.source,
+                source: source.unwrap_or(s.source),
                 mic_device: s.mic_device.clone(),
             },
             engine,
@@ -627,6 +632,9 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
             *st.speaker_hints.lock() = Some(p.speaker_hints());
             *st.pipeline.lock() = Some(p);
             *st.rec_started.lock() = Some(Instant::now());
+            let src = file.is_none().then(|| source.unwrap_or(st.settings.lock().source));
+            *st.rec_source.lock() = src;
+            let _ = app.emit("bd://rec-source", src);
             set_rec(app, RecState::Recording);
             Ok(())
         }
@@ -640,7 +648,7 @@ fn start_session(app: &AppHandle, file: Option<&Path>) -> CmdResult<()> {
     }
 }
 
-fn stop_recording_inner(app: &AppHandle) {
+pub(crate) fn stop_recording_inner(app: &AppHandle) {
     let st = app.state::<AppState>();
     let p = st.pipeline.lock().take();
     if let Some(p) = p {
@@ -683,7 +691,7 @@ async fn transcribe_file(app: AppHandle, path: String) -> CmdResult<()> {
     if !p.is_file() {
         return Err("파일을 찾을 수 없어요".into());
     }
-    start_session(&app, Some(&p))
+    start_session(&app, Some(&p), None)
 }
 
 fn on_pipeline_event(app: &AppHandle, ev: Event) {
@@ -860,6 +868,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 }
             }
             *st.rec_started.lock() = None;
+            *st.rec_source.lock() = None;
             app.state::<usage_book::UsageBook>().save();
             if st.settings.lock().unload_when_idle {
                 badasugi_core::asr::whisper::unload();
@@ -1645,7 +1654,7 @@ fn request_quit(app: &AppHandle) {
 
 // ───────────────────────── 창 · 트레이 ─────────────────────────
 
-fn show_main(app: &AppHandle) {
+pub(crate) fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -1782,7 +1791,7 @@ fn open_file_from_cli(app: AppHandle, file: PathBuf) {
     std::thread::spawn(move || {
         // 창(UI)이 이벤트를 받을 준비가 될 때까지 잠깐
         std::thread::sleep(std::time::Duration::from_millis(1500));
-        if let Err(e) = start_session(&app, Some(&file)) {
+        if let Err(e) = start_session(&app, Some(&file), None) {
             show_main(&app);
             let _ = app.emit("bd://toast", e);
         }
@@ -1923,6 +1932,7 @@ fn main() {
                 tray_pause: Mutex::new(None),
                 tray_mini: Mutex::new(None),
                 rec_started: Mutex::new(None),
+                rec_source: Mutex::new(None),
                 quit_after_stop: AtomicBool::new(false),
                 sleep_paused: AtomicBool::new(false),
                 sleep_notified: AtomicBool::new(false),
@@ -1930,6 +1940,7 @@ fn main() {
                 speaker_hints: Mutex::new(None),
             });
             app.manage(Updates::default());
+            app.manage(meeting::Meet::new());
             app.manage(VoiceBook::load(config_dir_for_usage.join("voices.json")));
             app.manage(usage_book::UsageBook::load(config_dir_for_usage.join("usage.json")));
             app.manage(status::Status::new(tray_base));
@@ -1977,6 +1988,7 @@ fn main() {
             }
             update::spawn_background(handle.clone());
             status::spawn_ticker(handle.clone());
+            meeting::spawn(handle.clone());
             if let Some(file) = audio_arg(&std::env::args().collect::<Vec<_>>()) {
                 open_file_from_cli(handle.clone(), file);
             }
@@ -2027,6 +2039,9 @@ fn main() {
             set_playback,
             ui_ready,
             smoke::smoke_probe,
+            meeting::meet_state,
+            meeting::meet_ready,
+            meeting::meet_answer,
             get_usage,
             list_voices,
             forget_voice,

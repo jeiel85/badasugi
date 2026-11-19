@@ -49,6 +49,20 @@ fn clamp_offset(visible: Rect4, work: Rect4) -> (i32, i32) {
     (axis(vl, vr, wl, wr), axis(vt, vb, wt, wb))
 }
 
+/// 알림 창 자리(보이는 테두리의 왼쪽 위): 작업 영역 오른쪽 아래에서 `gap` 안쪽.
+/// 그 자리를 `avoid`(시계 위에 붙은 미니 창)가 차지하면 그 위로 — 올려서 화면을 벗어나면 그냥 둔다
+fn popup_spot(size: (i32, i32), work: Rect4, avoid: Option<Rect4>, gap: i32) -> (i32, i32) {
+    let (w, h) = size;
+    let right = work.2 - gap;
+    let mut bottom = work.3 - gap;
+    if let Some((al, at, ar, ab)) = avoid {
+        if al < right && ar > right - w && at < bottom && ab > bottom - h && at - gap - h >= work.1 {
+            bottom = at - gap;
+        }
+    }
+    (right - w, bottom - h)
+}
+
 #[cfg(windows)]
 mod imp {
     use std::sync::OnceLock;
@@ -61,8 +75,9 @@ mod imp {
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, SetWindowPos, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WM_DISPLAYCHANGE,
-        WM_DPICHANGED, WM_EXITSIZEMOVE, WM_MOVING, WM_SETTINGCHANGE,
+        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindow, HWND_TOPMOST, SPI_SETWORKAREA,
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_EXITSIZEMOVE,
+        WM_MOVING, WM_SETTINGCHANGE,
     };
 
     use super::{Callback, Rect4};
@@ -214,6 +229,31 @@ mod imp {
         }
     }
 
+    /// 알림 창을 `near` 창이 있는 모니터의 오른쪽 아래(시계 위)에, 활성화하지 않고(포커스를 빼앗지 않게) 맨 위로 보인다.
+    /// `avoid` 면 그 자리에 보이는 `near`(미니 창)를 피해 그 위에.
+    pub fn show_popup(hwnd: *mut core::ffi::c_void, near: Option<*mut core::ffi::c_void>, avoid: bool) {
+        let hwnd = hwnd as HWND;
+        let near = near.map(|n| n as HWND);
+        unsafe {
+            // 배율이 다른 모니터로 옮기면 창 크기가 바뀌므로 옮긴 뒤 한 번 더 잰다
+            for _ in 0..2 {
+                let Some((wr, (vl, vt, vr, vb), own)) = geometry(hwnd) else {
+                    return;
+                };
+                let work = near
+                    .and_then(|n| work_area(MonitorFromWindow(n, MONITOR_DEFAULTTONEAREST)))
+                    .map(|r| (r.left, r.top, r.right, r.bottom))
+                    .unwrap_or(own);
+                let shown = near.filter(|&n| avoid && IsWindowVisible(n) != 0 && IsIconic(n) == 0);
+                let avoid_rect = shown.and_then(|n| geometry(n)).map(|g| g.1);
+                let gap = 12 * GetDpiForWindow(hwnd).max(96) as i32 / 96;
+                let (x, y) = super::popup_spot((vr - vl, vb - vt), work, avoid_rect, gap);
+                SetWindowPos(hwnd, HWND_TOPMOST, x - (vl - wr.left), y - (vt - wr.top), 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+
     /// 보이는 창이 작업 영역 오른쪽 아래 모서리에 붙어 있나
     pub fn docked_bottom_right(hwnd: *mut core::ffi::c_void) -> bool {
         unsafe {
@@ -254,6 +294,17 @@ pub fn keep_inside(window: &tauri::WebviewWindow) {
     let _ = window;
 }
 
+/// 알림 창을 `near` 창의 모니터 오른쪽 아래(시계 위)에 포커스를 빼앗지 않고 보인다 (`avoid` = 미니 창을 피해 그 위에)
+pub fn show_popup(window: &tauri::WebviewWindow, near: Option<&tauri::WebviewWindow>, avoid: bool) {
+    #[cfg(windows)]
+    if let Ok(h) = window.hwnd() {
+        imp::show_popup(h.0, near.and_then(|n| n.hwnd().ok()).map(|n| n.0), avoid);
+        return;
+    }
+    let _ = (near, avoid);
+    let _ = window.show();
+}
+
 /// 오른쪽 아래 모서리(시계 위)에 붙어 있나
 pub fn docked_bottom_right(window: &tauri::WebviewWindow) -> bool {
     #[cfg(windows)]
@@ -267,7 +318,7 @@ pub fn docked_bottom_right(window: &tauri::WebviewWindow) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_offset, snap_offset};
+    use super::{clamp_offset, popup_spot, snap_offset};
 
     const WORK: (i32, i32, i32, i32) = (0, 0, 1920, 1032); // 작업 표시줄 48px 를 뺀 1080p
 
@@ -297,5 +348,17 @@ mod tests {
         assert_eq!(clamp_offset((-30, -10, 390, 670), WORK), (30, 10));
         // 작업 영역보다 크면 왼쪽 위에 맞춤 (제목 줄이 보이게)
         assert_eq!(clamp_offset((50, 40, 2050, 1200), WORK), (-50, -40));
+    }
+
+    #[test]
+    fn popup_sits_above_the_clock_or_the_mini_window() {
+        // 시계 위에서 12px 안쪽
+        assert_eq!(popup_spot((344, 118), WORK, None, 12), (1564, 902));
+        // 시계 위에 붙은 미니 창이 있으면 그 위로
+        assert_eq!(popup_spot((344, 118), WORK, Some((1548, 948, 1920, 1032)), 12), (1564, 818));
+        // 미니 창이 다른 곳에 있으면 그대로
+        assert_eq!(popup_spot((344, 118), WORK, Some((100, 100, 472, 184)), 12), (1564, 902));
+        // 올리면 화면 위로 벗어나는 큰 창이면 그대로
+        assert_eq!(popup_spot((344, 118), WORK, Some((1000, 60, 1920, 1032)), 12), (1564, 902));
     }
 }

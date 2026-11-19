@@ -216,6 +216,12 @@ fn run(app: &AppHandle, c: &mut Checks) {
     );
     std::thread::sleep(Duration::from_secs(1));
 
+    // ── 0-2. 회의 시작 알림 창: 포커스를 빼앗지 않고 화면 안(시계 위)에 떴다가, 닫으면 없어진다 ──
+    match crate::meeting::smoke_check(app) {
+        Ok(d) => c.add("회의 알림 창", true, d),
+        Err(e) => c.add("회의 알림 창", false, e),
+    };
+
     // ── 1. 실시간 녹음: 시작 → 일시정지 → 이어서 → 정지 → 저장 ──
     let t0 = Instant::now();
     if !c.add("녹음 시작", crate::start_recording_inner(app).is_ok(), "테스트 음성을 마이크 대신") {
@@ -338,7 +344,7 @@ fn run(app: &AppHandle, c: &mut Checks) {
     // ── 2. 파일 받아쓰기 ──
     let file = std::env::var_os("BADASUGI_SMOKE_FILE").map(PathBuf::from).unwrap_or(wav);
     let t1 = Instant::now();
-    if !c.add("파일 받아쓰기 시작", crate::start_session(app, Some(&file)).is_ok(), file.display().to_string()) {
+    if !c.add("파일 받아쓰기 시작", crate::start_session(app, Some(&file), None).is_ok(), file.display().to_string()) {
         return;
     }
     if !c.add(
