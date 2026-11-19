@@ -226,8 +226,7 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
     // (그대로 두면 단축키가 하나도 없게 되고, 켤 때마다 같은 오류가 난다)
     let mut hotkey_err = None;
     if old_hotkey != settings.hotkey || old_star != settings.star_hotkey {
-        let same = !settings.hotkey.trim().is_empty() && settings.hotkey.trim() == settings.star_hotkey.trim();
-        let res = if same {
+        let res = if settings::same_hotkey(&settings.hotkey, &settings.star_hotkey) {
             Err("녹음 단축키와 중요 표시 단축키를 다른 조합으로 골라 주세요.".to_string())
         } else {
             register_hotkeys(&app, &settings.hotkey, &settings.star_hotkey)
@@ -289,11 +288,17 @@ fn register_hotkeys(app: &AppHandle, rec: &str, star: &str) -> CmdResult<()> {
     first_err.map_or(Ok(()), Err)
 }
 
-/// 눌린 전역 단축키가 중요 표시 ⭐ 단축키인지 (아니면 녹음 단축키)
+/// 눌린 전역 단축키가 중요 표시 ⭐ 단축키인지 (아니면 녹음 단축키).
+/// 두 단축키가 같은 조합이면(설정 파일을 손으로 고친 경우 등) 녹음 단축키로 본다
 fn is_star_shortcut(app: &AppHandle, pressed: &Shortcut) -> bool {
     app.try_state::<AppState>().is_some_and(|st| {
-        let star = st.settings.lock().star_hotkey.clone();
-        star.trim().parse::<Shortcut>().is_ok_and(|s| s.id() == pressed.id())
+        let (rec, star) = {
+            let s = st.settings.lock();
+            (s.hotkey.clone(), s.star_hotkey.clone())
+        };
+        let id = |k: &str| k.trim().parse::<Shortcut>().ok().map(|s| s.id());
+        let star_id = id(&star);
+        star_id.is_some() && star_id == Some(pressed.id()) && id(&rec) != star_id
     })
 }
 

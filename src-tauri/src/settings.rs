@@ -130,6 +130,13 @@ impl Default for Settings {
     }
 }
 
+/// 두 단축키가 같은 조합인지 (대소문자 · 빈칸은 무시, 빈 값은 겹치지 않는다)
+pub fn same_hotkey(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
+    let (a, b) = (norm(a), norm(b));
+    !a.is_empty() && a == b
+}
+
 /// JSON 파일을 읽는다. 있는데 해석하지 못하면(손으로 고침 · 이전 버전으로 되돌림 · 쓰다 끊김) 기본값으로 시작하되,
 /// 원래 파일은 `<이름>.json.bad` 로 남겨 둔다 — 곧 이어질 저장이 원래 내용을 덮어써 없애지 않게
 pub fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
@@ -163,6 +170,11 @@ impl Settings {
     fn migrate(&mut self) {
         if self.openai_model.trim() == "gpt-4o-transcribe" {
             self.openai_model = "gpt-transcribe".into();
+        }
+        // 녹음 단축키를 이미 Ctrl+Alt+B 로 바꿔 쓰던 사람은 새 기본 중요 표시 단축키와 겹친다 →
+        // 녹음 단축키를 지키고 중요 표시는 비운다 (설정 › 일반에서 다른 조합으로 정한다)
+        if same_hotkey(&self.hotkey, &self.star_hotkey) {
+            self.star_hotkey.clear();
         }
     }
 
@@ -253,5 +265,16 @@ mod tests {
         // 중요 표시 단축키가 생기기 전의 설정 파일도 기본 단축키로 읽힌다 (녹음 단축키는 그대로)
         let s: Settings = serde_json::from_str(r#"{ "hotkey": "Ctrl+Shift+F9" }"#).unwrap();
         assert_eq!((s.hotkey.as_str(), s.star_hotkey.as_str()), ("Ctrl+Shift+F9", "Ctrl+Alt+B"));
+        // 녹음 단축키를 이미 Ctrl+Alt+B 로 쓰던 설정: 녹음 단축키를 지키고 중요 표시는 비운다
+        let dir = std::env::temp_dir().join(format!("bd-settings-star-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, br#"{ "hotkey": "ctrl+alt+b" }"#).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!((s.hotkey.as_str(), s.star_hotkey.as_str()), ("ctrl+alt+b", ""));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(same_hotkey("Ctrl+Alt+B", " ctrl + alt + b "));
+        assert!(!same_hotkey("", ""));
+        assert!(!same_hotkey("Ctrl+Alt+R", "Ctrl+Alt+B"));
     }
 }
