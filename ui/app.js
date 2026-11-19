@@ -1975,10 +1975,17 @@ $('#btn-fold-summary').addEventListener('click', () => $('#summary-card').classL
 
 function showPopover(pop, anchor, align = 'left', below = false) {
   hidePopovers();
+  pop.style.maxHeight = '';
   pop.hidden = false;
   const a = anchor.getBoundingClientRect();
-  const p = pop.getBoundingClientRect();
   const appR = $('#app').getBoundingClientRect();
+  // 아래에도 위에도 다 들어가지 않으면 더 넓은 쪽 높이로 줄인다 — 화자가 많을 때의 발언 통계 · 화자 메뉴는 안에서 스크롤
+  if (below) {
+    const h = pop.getBoundingClientRect().height;
+    const down = appR.height - a.bottom - 14, up = a.top - 14;
+    if (h > down && h > up) pop.style.maxHeight = `${Math.max(down, up, 120)}px`;
+  }
+  const p = pop.getBoundingClientRect();
   let left = align === 'right' ? a.right - p.width : a.left;
   left = Math.max(8, Math.min(left, appR.width - p.width - 8));
   pop.style.left = `${left}px`;
