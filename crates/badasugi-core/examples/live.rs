@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         segmenter: Default::default(),
         language: "ko".into(),
         prompt: String::new(),
+        keywords: Vec::new(),
         record_path: None,
         known_voices: Vec::new(),
     };

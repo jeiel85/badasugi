@@ -49,9 +49,12 @@ pub struct PipelineConfig {
     /// "ko" 기본
     #[serde(default = "default_lang")]
     pub language: String,
-    /// 용어집 · 문맥 프롬프트
+    /// 용어집 프롬프트
     #[serde(default)]
     pub prompt: String,
+    /// 용어집 낱말 (따로 받는 모델에만 — [`AsrRequest::keywords`])
+    #[serde(default)]
+    pub keywords: Vec<String>,
     /// 지정하면 녹음도 남긴다: 확장자 `.wav` 면 16 kHz 모노 PCM16, 그 밖(`.opus`)은 Ogg Opus 24 kbps (WAV 의 약 1/10)
     #[serde(default)]
     pub record_path: Option<PathBuf>,
@@ -412,6 +415,8 @@ fn spawn_backend(
     let ctx = Arc::new(WorkerCtx {
         lang: cfg.language.clone(),
         prompt: cfg.prompt.clone(),
+        keywords: cfg.keywords.clone(),
+        recent: cfg.engine.wants_context().then(Default::default),
         sink: sink.clone(),
         inflight: inflight.clone(),
         recorded: cfg.record_path.is_some(),
@@ -529,6 +534,9 @@ impl Drop for InflightDone<'_> {
 struct WorkerCtx {
     lang: String,
     prompt: String,
+    keywords: Vec<String>,
+    /// 받아 적은 최근 문장 — 다음 발화의 앞 문맥 (앞 문맥을 넘기는 엔진만, [`EngineConfig::wants_context`])
+    recent: Option<parking_lot::Mutex<asr::RecentText>>,
     sink: EventSink,
     inflight: Option<Arc<Inflight>>,
     /// 실시간 녹음이 파일로도 남는지 (실패 안내 문구용)
@@ -776,10 +784,13 @@ fn transcribe_patiently(engine: &mut dyn asr::Transcriber, job: &Job, flags: &Fl
 
 /// 한 번 인식한다. API 면 실제로 보낸 요청을 사용량으로 알린다.
 fn recognize(engine: &mut dyn asr::Transcriber, job: &Job, ctx: &WorkerCtx, is_api: bool) -> Result<String> {
+    let context = ctx.recent.as_ref().map(|r| r.lock().before(job.id)).unwrap_or_default();
     let r = engine.transcribe(&AsrRequest {
         samples: &job.seg.samples,
         language: &ctx.lang,
         prompt: &ctx.prompt,
+        keywords: &ctx.keywords,
+        context: &context,
     });
     if is_api {
         ctx.emit(Event::ApiUsage {
@@ -795,6 +806,9 @@ fn emit_text(ctx: &WorkerCtx, job: &Job, raw: String, t0: Instant) {
     if text.is_empty() {
         ctx.emit(Event::Discarded { id: job.id });
     } else {
+        if let Some(r) = &ctx.recent {
+            r.lock().record(job.id, &text);
+        }
         ctx.emit(Event::Transcript {
             id: job.id,
             start_ms: samples_to_ms(job.seg.start),
@@ -1246,6 +1260,8 @@ mod tests {
         let ctx = WorkerCtx {
             lang: "ko".into(),
             prompt: String::new(),
+            keywords: Vec::new(),
+            recent: None,
             sink,
             inflight: None,
             recorded: false,
