@@ -2709,9 +2709,10 @@ function replaceAllIn(d, q, to) {
     if (busy) { r.sLeft = n; r.sWhy = S.sumEdit?.doc === d ? '고치는' : '정리하는'; } // 남겨 둔 곳 (알림에 적는다)
     else if (n) { undo.summary = [d.summary, v, !!d.summaryEdited]; d.summary = v; d.summaryEdited = true; r.s = n; }
   }
+  // 바꾼 제목은 직접 붙인 제목 — 다음 요약이 자동 제목으로 덮어쓰지 않게 (제목 칸에서 고칠 때와 같이, 되돌리면 전 표시로)
   if (d.title) {
     const [v, n] = replaceIn(d.title, q, to);
-    if (n) { undo.title = [d.title, v]; d.title = v; r.t = n; }
+    if (n) { undo.title = [d.title, v, !!d.autoTitle]; d.title = v; d.autoTitle = false; r.t = n; }
   }
   return r;
 }
@@ -2732,7 +2733,7 @@ function undoReplace(undo) {
     if (x && x.text === now) { x.text = old; n++; }
   }
   if (undo.summary && d.summary === undo.summary[1]) { d.summary = undo.summary[0]; d.summaryEdited = undo.summary[2]; n++; }
-  if (undo.title && d.title === undo.title[1]) { d.title = undo.title[0]; n++; }
+  if (undo.title && d.title === undo.title[1]) { d.title = undo.title[0]; d.autoTitle = undo.title[2]; n++; }
   if (!n) return;
   saveReplaced(d);
   toast('바꾸기 전으로 되돌렸어요');
