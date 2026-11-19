@@ -477,6 +477,9 @@ mark.cur { background: var(--warn); color: #111; }
 .app.mini .dock-actions .icon-btn { width: 30px; height: 30px; }
 .app.mini #btn-save, .app.mini #btn-summary, .app.mini #btn-ask, .app.mini .engine-label { display: none; }
 .app.mini .mini-only { display: grid; }
+.star-btn .star-ic, .chip-btn .star-ic { font-style: normal; line-height: 1; }
+.star-btn .star-ic { font-size: 15px; }
+.chip-btn .star-ic { font-size: 11px; }
 .app.mini .mini-cap { display: block; position: absolute; left: 10px; right: 10px; bottom: 4px; font-size: 11px; line-height: 1.4; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mini-cap b { color: var(--text-2); font-weight: 700; margin-right: 4px; }
 .app.mini .toast { top: 4px; bottom: auto; padding: 5px 10px; font-size: 11.5px; max-width: calc(100% - 12px); }
@@ -523,6 +526,9 @@ mark.cur { background: var(--warn); color: #111; }
 .pl-marks { position: absolute; z-index: 2; left: 6px; right: 6px; top: 0; height: 100%; pointer-events: none; }
 .pl-mark { position: absolute; top: 0; width: 9px; height: 9px; margin-left: -4.5px; padding: 0; border-radius: 50%; background: var(--warn); border: 2px solid var(--sunken); pointer-events: auto; cursor: pointer; }
 .pl-mark:hover { transform: scale(1.3); }
+/* 중요 표시 ⭐ 는 점 대신 별 (막대 위에 살짝 걸치게) */
+.pl-mark.star { top: -3px; width: 14px; height: 14px; margin-left: -7px; border: 0; border-radius: 0; background: none; font-size: 12px; line-height: 14px; text-align: center; filter: drop-shadow(0 0 1px var(--sunken)); }
+.pl-tip .star-ic { font-style: normal; margin-right: 4px; }
 .pl-tip { position: absolute; z-index: 40; bottom: calc(100% + 8px); left: 0; max-width: min(360px, 80vw); padding: 5px 9px; border-radius: 8px; background: var(--elev); border: 1px solid var(--line-strong); box-shadow: var(--shadow); font-size: 12px; line-height: 1.45; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .pl-tip time { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
 .pl-tip b { font-weight: 700; margin-right: 5px; }
@@ -764,6 +770,14 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .ce { display: flex; gap: 6px; align-items: flex-start; white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; }
 .ce + .ce { padding-top: 3px; border-top: 1px dashed color-mix(in srgb, var(--warn) 32%, transparent); }
 .ce svg { flex: none; width: 13px; height: 13px; margin-top: .3em; color: var(--warn); }
+.ce .star-ic { flex: none; font-style: normal; font-size: 12px; line-height: 1.55; }
+/* 중요 표시 ⭐ 한 문장: 앞에 별 · 옅은 노란 바탕 */
+.u.star { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.u.star:hover { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+.u-star { font-size: .82em; margin-right: 4px; vertical-align: .05em; user-select: none; }
+.u-tools .star-ic { font-style: normal; font-size: 12px; filter: grayscale(1) opacity(.6); }
+.u-tools [data-tool="star"].on .star-ic, .u-tools [data-tool="star"]:hover .star-ic { filter: none; }
+.u-tools [data-tool="star"].on { color: var(--text); }
 .ce time { margin-right: 6px; font-size: .86em; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cmt:has(.ce + .ce) .ce:hover > span { text-decoration: underline dotted color-mix(in srgb, var(--warn) 60%, transparent); text-underline-offset: 3px; }
 .cmt:hover { background: color-mix(in srgb, var(--warn) 20%, transparent); }

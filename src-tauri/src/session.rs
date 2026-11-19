@@ -1,6 +1,6 @@
 //! 회의 기록: 진행 중 자동 저장(JSON + Markdown), 기록 목록, 내보내기
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -224,6 +224,13 @@ pub fn note_comments(notes: &str) -> Vec<NoteComment> {
         }
     }
     out
+}
+
+/// 중요 표시 ⭐ 코멘트면 ⭐ 뒤의 글(없으면 빈 글) — 메모의 `[12:34] ⭐` · `[12:34] ⭐ 가격 다시 확인` 줄.
+/// (화면의 ⭐ 단축키 · 문장 도구가 이렇게 적는다. 화면 쪽 app.js 의 starNote 와 같은 규칙)
+pub fn star_note(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('⭐')?;
+    Some(rest.trim_start_matches('\u{FE0F}').trim_start())
 }
 
 /// 메모에 `[시각] 글` 코멘트를 시각 순서에 맞는 자리에 넣는다: 시각이 같거나 이른 코멘트 중 메모에서
@@ -662,8 +669,13 @@ impl SessionDoc {
                 };
                 list.sort_by_key(|c| (c.ms, c.from));
                 for c in list.iter() {
-                    let body = c.text.lines().collect::<Vec<_>>().join("  \n> ");
-                    s.push_str(&format!("> 💬 `{}` {}\n\n", fmt_time(c.ms), body));
+                    let (icon, text) = match star_note(&c.text) {
+                        Some("") => ("⭐", "중요 표시"),
+                        Some(note) => ("⭐", note),
+                        None => ("💬", c.text.as_str()),
+                    };
+                    let body = text.lines().collect::<Vec<_>>().join("  \n> ");
+                    s.push_str(&format!("> {icon} `{}` {}\n\n", fmt_time(c.ms), body));
                 }
             }
         }
@@ -674,6 +686,41 @@ impl SessionDoc {
         let mut s = String::new();
         for (spk, start, _, text, _) in self.paragraphs() {
             s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), text));
+        }
+        s
+    }
+
+    /// 중요 표시 ⭐ 가 붙은 문장 id — 메모에서 ⭐ 로 시작하는 코멘트가 붙는 문장
+    pub fn starred_ids(&self) -> HashSet<u64> {
+        self.anchored_comments()
+            .into_iter()
+            .filter(|(c, _)| star_note(&c.text).is_some())
+            .filter_map(|(_, at)| at)
+            .collect()
+    }
+
+    /// 요약에 보내는 녹취록: [`to_text`](Self::to_text) 와 같되 중요 표시 ⭐ 한 문장 앞에 `⭐ ` 를 붙인다
+    /// (메모 · 코멘트 글은 보내지 않는다 — 표시한 곳만 알린다)
+    pub fn to_ai_text(&self) -> String {
+        let starred = self.starred_ids();
+        if starred.is_empty() {
+            return self.to_text();
+        }
+        let texts: HashMap<u64, &str> = self.utterances.iter().map(|u| (u.id, u.text.as_str())).collect();
+        let mut s = String::new();
+        for (spk, start, _, _, ids) in self.paragraphs() {
+            let body: Vec<String> = ids
+                .iter()
+                .map(|id| {
+                    let t = texts.get(id).copied().unwrap_or_default();
+                    if starred.contains(id) {
+                        format!("⭐ {t}")
+                    } else {
+                        t.to_string()
+                    }
+                })
+                .collect();
+            s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), body.join(" ")));
         }
         s
     }
@@ -1477,6 +1524,35 @@ mod tests {
         // 문장이 아직 없으면(녹음 직후) 붙을 곳이 없다
         d.utterances.clear();
         assert_eq!(d.anchored_comments()[0].1, None);
+    }
+
+    #[test]
+    fn starred_sentences_are_marked_for_the_summary_and_export() {
+        let mut d = SessionDoc::new("로컬".into());
+        // 0 · 1 은 같은 화자라 한 문단, 2 는 다른 문단
+        d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 30000, 1)];
+        // ⭐ 만 · ⭐ + 글 · 이모지 변형(⭐️) · 보통 코멘트 · 글 중간의 ⭐ 는 표시가 아니다
+        d.notes = "[00:06] ⭐\n[00:31] ⭐️ 가격 다시 확인\n[00:00] 보통 코멘트\n[00:32] 이건 ⭐ 아님".into();
+        assert_eq!(star_note("⭐"), Some(""));
+        assert_eq!(star_note("⭐️ 가격"), Some("가격"));
+        assert_eq!(star_note("이건 ⭐"), None);
+        assert_eq!(d.starred_ids(), HashSet::from([1, 2]));
+        // 요약에는 표시한 문장 앞에만 ⭐ (메모 글은 보내지 않는다)
+        assert_eq!(
+            d.to_ai_text(),
+            "[00:00] 화자 1: 문장 0 ⭐ 문장 1\n[00:30] 화자 2: ⭐ 문장 2\n"
+        );
+        assert!(!d.to_ai_text().contains("가격"));
+        // 내보내기 · 텍스트 복사는 그대로
+        assert!(!d.to_text().contains('⭐'));
+        // Markdown 회의록: 문장 아래에 ⭐ 로 (글이 없으면 "중요 표시")
+        let md = d.to_markdown();
+        assert!(md.contains("> ⭐ `00:06` 중요 표시"));
+        assert!(md.contains("> ⭐ `00:31` 가격 다시 확인"));
+        assert!(md.contains("> 💬 `00:00` 보통 코멘트"));
+        // 표시가 없으면 to_text 와 같다
+        d.notes = "[00:06] 보통".into();
+        assert_eq!(d.to_ai_text(), d.to_text());
     }
 
     #[test]

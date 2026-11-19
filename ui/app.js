@@ -307,7 +307,7 @@ function renderDoc() {
     <div class="group" data-spk="${g.speaker ?? ''}" style="--c:${spkColor(g.speaker)}">
       <div class="g-head"><span class="g-name" data-spk="${g.speaker ?? ''}" data-ids="${g.items.filter((x) => x.kind === 'u').map((x) => x.id).join(',')}" title="이름 바꾸기 · 화자 바꾸기">${esc(speakerName(d, g.speaker))}</span><span class="g-time">${fmt(g.startMs)}</span></div>
       ${g.items.map((it) => it.kind === 'u'
-        ? `<div class="u" data-id="${it.id}">${hl(it.text)}${it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : ''}</div>${commentHtml(cms.byU.get(it.id))}`
+        ? `${uHtml(it, cms.byU.get(it.id))}${commentHtml(cms.byU.get(it.id))}`
         : it.kind === 'p'
           ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
           : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
@@ -549,6 +549,10 @@ function renderDock() {
   pb.classList.toggle('on', S.paused);
   pb.title = S.paused ? '이어서 받아쓰기' : '일시정지';
   $('#btn-pause use').setAttribute('href', S.paused ? '#i-play' : '#i-pause');
+  const star = $('#btn-star');
+  star.hidden = !(rec && !S.fileMode);
+  star.title = `중요 표시 ⭐ — 지금 말하는 곳${S.settings?.starHotkey ? ` (${S.settings.starHotkey})` : ''} · 요약할 때 꼭 다뤄요`;
+  $('#btn-memo-star').title = `지금 녹음 · 듣고 있는 곳을 중요 표시 ⭐${S.settings?.starHotkey ? ` (${S.settings.starHotkey})` : ''} — 요약할 때 꼭 다뤄요`;
   $('#paused-tag').hidden = !(rec && S.paused);
   $('#paused-tag').textContent = S.sleepPaused ? '절전으로 멈춤' : '일시정지';
   $('#fprog').hidden = !(S.fileMode && S.rec !== 'idle');
@@ -1224,6 +1228,10 @@ function parseMemo(notes) {
   }
   return out;
 }
+// 중요 표시 ⭐ = ⭐ 로 시작하는 코멘트(메모의 `[12:34] ⭐` 줄, ⭐ 뒤에 글을 더 써도 된다) → ⭐ 뒤의 글, 아니면 null
+// (앱 쪽 session.rs 의 star_note 와 같은 규칙 — 요약에 보내는 녹취록에서 그 문장 앞에 ⭐ 가 붙는다)
+const starNote = (text) => (/^⭐/.test(text || '') ? text.replace(/^⭐️?\s*/, '') : null);
+const isStar = (c) => starNote(c.text) != null;
 // 코멘트 칸에 쓴 글 → 메모 줄들 (빈 줄은 코멘트를 끝내므로 뺀다)
 function commentLines(v) {
   const ls = String(v).split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
@@ -1289,9 +1297,75 @@ function memoComments(d) {
   return { list, byU };
 }
 
+// 녹취록의 문장 하나 — 중요 표시 ⭐ 가 붙어 있으면 앞에 ⭐ (고치기를 시작하면 글자만 남는다)
+function uHtml(it, cs) {
+  const star = cs?.find(isStar);
+  const mark = star ? `<span class="u-star" title="중요 표시 ${fmt(star.ms)} — 문장 도구의 ⭐ 로 뗄 수 있어요">⭐</span>` : '';
+  const lat = it.latencyMs != null ? `<span class="lat">${(it.latencyMs / 1000).toFixed(1)}초</span>` : '';
+  return `<div class="u${star ? ' star' : ''}" data-id="${it.id}">${mark}${hl(it.text)}${lat}</div>`;
+}
+// 문장 아래 코멘트 카드 — ⭐ 만 있는 중요 표시는 카드 없이 문장의 ⭐ 로만, ⭐ 뒤에 글이 있으면 ⭐ 코멘트로
 function commentHtml(cs) {
-  if (!cs?.length) return '';
-  return `<div class="cmt">${cs.map((c) => `<div class="ce" data-line="${c.from}" title="코멘트 고치기 — 메모의 [${fmt(c.ms)}] 줄"><svg><use href="#i-comment"/></svg><span><time>${fmt(c.ms)}</time>${esc(c.text)}</span></div>`).join('')}</div>`;
+  const shown = (cs || []).filter((c) => starNote(c.text) !== '');
+  if (!shown.length) return '';
+  return `<div class="cmt">${shown.map((c) => {
+    const note = starNote(c.text);
+    const icon = note != null ? '<i class="star-ic" aria-hidden="true">⭐</i>' : '<svg><use href="#i-comment"/></svg>';
+    return `<div class="ce${note != null ? ' star' : ''}" data-line="${c.from}" title="코멘트 고치기 — 메모의 [${fmt(c.ms)}] 줄">${icon}<span><time>${fmt(c.ms)}</time>${esc(note ?? c.text)}</span></div>`;
+  }).join('')}</div>`;
+}
+
+/* 중요 표시 ⭐ — 단축키(Ctrl+Alt+B) · 도크 · 메모의 ⭐ 단추: 녹음 중이면 녹음 중인 회의에, 아니면 듣고 있는 곳에.
+   누른 때는 이미 말이 지나간 뒤라 조금 앞 시각을 적는다 → 그때 말하던 문장에 붙는다(코멘트와 같은 규칙) */
+const STAR_BACK_MS = 2000;
+// want: 그 회의에만 (메모의 ⭐ 단추 — 녹음 중에 지난 회의를 보고 있으면 녹음 중인 회의가 아니라 보고 있는 회의에)
+function starTarget(want = null) {
+  const live = S.rec === 'recording' && !S.fileMode ? S.liveDoc : null;
+  if (live && (!want || want === live)) return { d: live, ms: S.livePosMs || Math.max(0, Date.now() - S.timerStart) };
+  const d = doc();
+  if (d && (!want || want === d) && P.src && P.started) return { d, ms: audio.currentTime * 1000 };
+  return null;
+}
+// 메모를 바꾸고 저장 · 다시 그린다 (메모 칸에 쓰는 중이면 커서를 지킨다)
+function setNotes(d, next) {
+  d.notes = next;
+  syncMemoBox(d);
+  persistDoc.flush(); // 다른 회의의 저장이 기다리고 있었으면 먼저 보낸다 (debounce 는 마지막 것만 보내므로)
+  persistDoc(d);
+  scheduleRender();
+}
+function addStar(want = null) {
+  const t = starTarget(want);
+  if (!t) {
+    const past = want && S.rec === 'recording' && want !== S.liveDoc;
+    toast(past ? '⭐ 지난 회의는 녹음을 들으면서 표시할 수 있어요 (지금 녹음에는 도크의 ⭐)' : '⭐ 중요 표시는 녹음 중이거나 녹음을 듣는 중에 할 수 있어요');
+    return;
+  }
+  const ms = Math.max(0, Math.floor(t.ms - STAR_BACK_MS));
+  const near = parseMemo(t.d.notes).find((c) => isStar(c) && Math.abs(c.ms - ms) < 5000);
+  if (near) { toast(`⭐ 방금 ${fmt(near.ms)} 에 표시했어요`); return; }
+  setNotes(t.d, insertMemoComment(t.d.notes || '', ms, '⭐'));
+  toast(`⭐ ${fmt(ms)} 중요 표시 — 요약할 때 꼭 다뤄요`);
+}
+// 문장 도구의 ⭐: 표시가 없으면 그 문장 시작 시각에 붙이고, 있으면 뗀다 (⭐ 뒤에 쓴 글은 보통 코멘트로 남긴다)
+function toggleStarU(id) {
+  const d = doc();
+  const u = d?.utterances.find((x) => x.id === id);
+  if (!u) return;
+  const stars = (memoComments(d).byU.get(id) || []).filter(isStar);
+  if (!stars.length) {
+    setNotes(d, insertMemoComment(d.notes || '', u.startMs, '⭐'));
+    toast('⭐ 중요 표시했어요 — 요약할 때 꼭 다뤄요');
+    return;
+  }
+  // 뒤쪽 줄부터 고쳐야 앞 줄 번호가 그대로다
+  let notes = d.notes || '';
+  for (const c of stars.slice().sort((a, b) => b.from - a.from)) {
+    const note = starNote(c.text);
+    notes = note ? rewriteMemoComment(notes, c, note) : rewriteMemoComment(notes, c, '');
+  }
+  setNotes(d, notes);
+  toast('⭐ 중요 표시를 뗐어요');
 }
 
 // 노트를 펼칠지: 넓은 창은 처음부터 펼쳐 두고, 좁은 창은 눌러서 연다 (각각 마지막으로 고른 대로)
@@ -1370,7 +1444,9 @@ function renderCommentList(d) {
   $('#cmt-count').textContent = items.length || '';
   if (curTab() !== 'comments') return;
   const html = items.length
-    ? items.map(({ u, ms, text }) => {
+    ? items.map(({ u, ms, text: raw }) => {
+      const note = starNote(raw);
+      const text = note == null ? raw : `⭐ ${note || '중요 표시'}`;
       if (!u) {
         return `<div class="cmt-item"><div class="cmt-meta"><span>${fmt(ms)}</span><span>· 아직 붙을 문장이 없어요</span></div><div class="cmt-text">${esc(text)}</div></div>`;
       }
@@ -1516,6 +1592,9 @@ function insertTime() {
 }
 $('#btn-memo-time').addEventListener('mousedown', (e) => e.preventDefault()); // 메모 칸의 커서 자리를 지킨다
 $('#btn-memo-time').addEventListener('click', insertTime);
+$('#btn-memo-star').addEventListener('mousedown', (e) => e.preventDefault());
+$('#btn-memo-star').addEventListener('click', () => addStar(doc()));
+$('#btn-star').addEventListener('click', () => addStar());
 
 // 메모의 커서가 코멘트(시각 줄) 안에 있으면 '12:34 문장 보기' — 누르거나 그 줄을 Ctrl+클릭하면 녹취록의 그 문장으로
 function memoCaretComment() {
@@ -1611,7 +1690,8 @@ function openComment(id, anchor, line = null) {
   const u = d?.utterances.find((x) => x.id === id);
   if (!u || !anchor) return;
   if (S.cmt) closeComment(true);
-  const mine = memoComments(d).byU.get(id) || [];
+  // ⭐ 만 있는 중요 표시는 코멘트 칸에 띄우지 않는다 (문장 도구의 ⭐ 로 떼고 붙인다)
+  const mine = (memoComments(d).byU.get(id) || []).filter((x) => starNote(x.text) !== '');
   const c = line != null ? mine.find((x) => x.from === line) || mine[0] : mine[0];
   const s = resolveSpk(d, u.speaker);
   const q = $('#cmt-quote');
@@ -1731,6 +1811,10 @@ function showTools(el, hint = false) {
   if (!el || S.mini) return;
   toolsId = +el.dataset.id;
   tools.classList.toggle('hinting', hint);
+  const starred = el.classList.contains('star');
+  const sb = tools.querySelector('[data-tool="star"]');
+  sb.classList.toggle('on', starred);
+  sb.title = starred ? '중요 표시 ⭐ 떼기' : '이 문장을 중요 표시 ⭐ — 요약할 때 꼭 다뤄요';
   tools.hidden = false;
   const r = el.getBoundingClientRect(), b = body.getBoundingClientRect();
   const top = r.top - b.top + body.scrollTop;
@@ -1755,6 +1839,7 @@ tools.addEventListener('click', (e) => {
   const el = toolsId != null && $(`#transcript .u[data-id="${toolsId}"]`);
   if (!b || !el) { hideTools(); return; }
   if (b.dataset.tool === 'edit') startEdit(el);
+  else if (b.dataset.tool === 'star') { toggleStarU(toolsId); hideTools(); }
   else openComment(toolsId, el);
 });
 
@@ -2539,7 +2624,9 @@ function renderPlLane() {
   }
   const bg = segs.length ? `linear-gradient(to right, ${stops.join(', ')})` : 'none';
   const cms = memoComments(d).list.filter((c) => c.u);
-  const marks = cms.map((c) => `<button class="pl-mark" data-u="${c.u.id}" data-ms="${c.ms}" style="left:${pct(c.ms)}" aria-label="코멘트 ${fmt(c.ms)} ${esc(c.text)}"></button>`).join('');
+  const marks = cms.map((c) => isStar(c)
+    ? `<button class="pl-mark star" data-u="${c.u.id}" data-ms="${c.ms}" style="left:${pct(c.ms)}" aria-label="중요 표시 ${fmt(c.ms)} ${esc(starNote(c.text))}">⭐</button>`
+    : `<button class="pl-mark" data-u="${c.u.id}" data-ms="${c.ms}" style="left:${pct(c.ms)}" aria-label="코멘트 ${fmt(c.ms)} ${esc(c.text)}"></button>`).join('');
   const key = bg + marks;
   if (key === plLaneKey) return;
   plLaneKey = key;
@@ -2565,7 +2652,10 @@ plTrack.addEventListener('mousemove', (e) => {
   let html;
   if (m) {
     const c = memoComments(d).list.find((x) => x.ms === +m.dataset.ms && x.u?.id === +m.dataset.u);
-    html = `<svg><use href="#i-comment"/></svg><time>${fmt(+m.dataset.ms)}</time>${esc(c?.text || '')}`;
+    const note = starNote(c?.text);
+    html = note != null
+      ? `<i class="star-ic">⭐</i><time>${fmt(+m.dataset.ms)}</time>${esc(note || c.u?.text || '중요 표시')}`
+      : `<svg><use href="#i-comment"/></svg><time>${fmt(+m.dataset.ms)}</time>${esc(c?.text || '')}`;
   } else {
     const t = (Math.min(Math.max(e.clientX - r.left - 6, 0), r.width - 12) / (r.width - 12)) * dur;
     const u = d.utterances.find((x) => t >= x.startMs - 300 && t <= x.endMs + 300);
@@ -3270,64 +3360,77 @@ $('#btn-test').addEventListener('click', async (e) => {
   b.textContent = '연결 테스트';
 });
 
-// 단축키 입력 — 키캡을 누르면 새 조합을 기다린다
+// 단축키 입력 — 키캡을 누르면 새 조합을 기다린다 (녹음 · 중요 표시 ⭐ 두 개)
 let hotkeyCapturing = false;
-const hk = $('#opt-hotkey');
-const HOTKEY_DESC = '어디서든 녹음을 시작하고 멈춰요';
 const keycaps = (keys) => keys.map((k) => `<kbd>${esc(k)}</kbd>`).join('<i>+</i>');
-function renderHotkey(note) {
-  const desc = $('#hotkey-desc');
-  desc.classList.toggle('warn', !!note);
-  if (hotkeyCapturing) {
-    desc.textContent = note || 'Esc 취소 · Backspace 단축키 없애기';
+const HOTKEYS = [
+  { key: 'hotkey', label: '녹음', btn: $('#opt-hotkey'), desc: $('#hotkey-desc'), text: '어디서든 녹음을 시작하고 멈춰요' },
+  { key: 'starHotkey', label: '중요 표시', btn: $('#opt-star-hotkey'), desc: $('#star-hotkey-desc'), text: '지금 말하는 곳에 ⭐ · 요약이 꼭 다뤄요' },
+];
+function renderHotkeyField(f, note) {
+  f.desc.classList.toggle('warn', !!note);
+  if (f.capturing) {
+    f.desc.textContent = note || 'Esc 취소 · Backspace 단축키 없애기';
     return;
   }
-  const k = S.settings?.hotkey;
-  hk.innerHTML = k ? keycaps(k.split('+')) : '<span class="kc-note">없음 · 눌러서 정하기</span>';
-  desc.textContent = HOTKEY_DESC;
+  const k = S.settings?.[f.key];
+  f.btn.innerHTML = k ? keycaps(k.split('+')) : '<span class="kc-note">없음 · 눌러서 정하기</span>';
+  f.desc.textContent = f.text;
 }
-function stopHotkeyCapture() { hotkeyCapturing = false; hk.classList.remove('capturing'); if (S.settings) renderHotkey(); }
-hk.addEventListener('click', () => {
-  if (hotkeyCapturing) return;
-  hotkeyCapturing = true;
-  hk.classList.add('capturing');
-  hk.innerHTML = '<span class="kc-note">조합키를 누르세요…</span>';
-  renderHotkey();
-});
-hk.addEventListener('blur', stopHotkeyCapture);
-hk.addEventListener('keydown', (e) => {
-  if (!hotkeyCapturing) return;
-  e.preventDefault();
-  if (e.key === 'Escape') return stopHotkeyCapture();
-  if (e.key === 'Backspace') { S.settings.hotkey = ''; saveSettings(); renderDock(); return stopHotkeyCapture(); }
-  const mods = [];
-  if (e.ctrlKey) mods.push('Ctrl');
-  if (e.altKey) mods.push('Alt');
-  if (e.shiftKey) mods.push('Shift');
-  if (e.metaKey) mods.push('Super');
-  let key = '';
-  if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3);
-  else if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
-  else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
-  else if (['Space', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Pause'].includes(e.code)) key = e.code;
-  // 조합키만 누른 동안은 누른 것을 보여 준다
-  if (!key) { if (mods.length) hk.innerHTML = keycaps([...mods, '…']); return; }
-  if (!mods.length && !/^F\d/.test(key)) { hk.innerHTML = '<span class="kc-note">조합키를 누르세요…</span>'; renderHotkey('Ctrl · Alt · Shift 와 함께 눌러 주세요'); return; }
-  const prev = S.settings.hotkey;
-  S.settings.hotkey = [...mods, key].join('+');
-  stopHotkeyCapture();
-  hk.blur();
-  // 바로 저장해 결과를 본다 — 다른 프로그램이 쓰는 조합이면 앱이 원래 단축키로 되돌린다
-  api.invoke('save_settings', { settings: S.settings })
-    .then(() => toast(`단축키: ${S.settings.hotkey}`))
-    .catch((err) => {
-      S.settings.hotkey = prev;
-      stopHotkeyCapture();
-      renderDock();
-      toast(String(err), 'error');
-    });
-  renderDock();
-});
+function renderHotkey() { HOTKEYS.forEach((f) => renderHotkeyField(f)); }
+function stopCapture(f) {
+  f.capturing = false;
+  hotkeyCapturing = HOTKEYS.some((x) => x.capturing);
+  f.btn.classList.remove('capturing');
+  if (S.settings) renderHotkeyField(f);
+}
+function stopHotkeyCapture() { HOTKEYS.forEach(stopCapture); }
+for (const f of HOTKEYS) {
+  f.btn.addEventListener('click', () => {
+    if (f.capturing) return;
+    f.capturing = hotkeyCapturing = true;
+    f.btn.classList.add('capturing');
+    f.btn.innerHTML = '<span class="kc-note">조합키를 누르세요…</span>';
+    renderHotkeyField(f);
+  });
+  f.btn.addEventListener('blur', () => stopCapture(f));
+  f.btn.addEventListener('keydown', (e) => {
+    if (!f.capturing) return;
+    e.preventDefault();
+    if (e.key === 'Escape') return stopCapture(f);
+    if (e.key === 'Backspace') { S.settings[f.key] = ''; saveSettings(); renderDock(); return stopCapture(f); }
+    const mods = [];
+    if (e.ctrlKey) mods.push('Ctrl');
+    if (e.altKey) mods.push('Alt');
+    if (e.shiftKey) mods.push('Shift');
+    if (e.metaKey) mods.push('Super');
+    let key = '';
+    if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3);
+    else if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
+    else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
+    else if (['Space', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Pause'].includes(e.code)) key = e.code;
+    // 조합키만 누른 동안은 누른 것을 보여 준다
+    if (!key) { if (mods.length) f.btn.innerHTML = keycaps([...mods, '…']); return; }
+    if (!mods.length && !/^F\d/.test(key)) { f.btn.innerHTML = '<span class="kc-note">조합키를 누르세요…</span>'; renderHotkeyField(f, 'Ctrl · Alt · Shift 와 함께 눌러 주세요'); return; }
+    const combo = [...mods, key].join('+');
+    const other = HOTKEYS.find((x) => x !== f && S.settings[x.key] === combo);
+    if (other) { renderHotkeyField(f, `${other.label} 단축키와 같아요 — 다른 조합을 눌러 주세요`); return; }
+    const prev = S.settings[f.key];
+    S.settings[f.key] = combo;
+    stopCapture(f);
+    f.btn.blur();
+    // 바로 저장해 결과를 본다 — 다른 프로그램이 쓰는 조합이면 앱이 원래 단축키로 되돌린다
+    api.invoke('save_settings', { settings: S.settings })
+      .then(() => toast(`${f.label} 단축키: ${combo}`))
+      .catch((err) => {
+        S.settings[f.key] = prev;
+        stopCapture(f);
+        renderDock();
+        toast(String(err), 'error');
+      });
+    renderDock();
+  });
+}
 
 $('#btn-github').addEventListener('click', () => call('open_url', { url: 'https://github.com/jeiel85/badasugi' }));
 $('#btn-folder-sessions').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
@@ -3360,6 +3463,8 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
     if (!askFrame) askFrame = requestAnimationFrame(renderAskPending);
   });
   await api.listen('bd://mini', (e) => setMini(!!e.payload));
+  // 중요 표시 ⭐ 전역 단축키 (다른 창을 보고 있어도)
+  await api.listen('bd://star', () => addStar());
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await refreshState();
   syncMaxed();
@@ -3396,10 +3501,10 @@ function demoDoc() {
     engine: '로컬 · large-v3-turbo-q5_0',
     speakers: { 0: '김 팀장', 1: '이 개발', 2: '박 디자인' },
     utterances: lines.map(([s, e, spk, text], i) => ({ id: i, startMs: s, endMs: e, speaker: spk, text, latencyMs: 1400 + ((i * 523) % 1700) })),
-    summary: '### 한 줄 요약\n다음 달 15일 앱 출시 확정, 목요일 최종 점검\n\n### 결정 사항\n- 출시일 **15일** 확정, 목요일 최종 점검 [00:25]\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일 [00:07]\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일 [00:17]\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일 [00:46] [00:52]',
+    summary: '### 한 줄 요약\n다음 달 15일 앱 출시 확정, 목요일 최종 점검\n\n### 결정 사항\n- ⭐ 출시일 **15일** 확정, 목요일 최종 점검 [00:25]\n\n### 할 일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일 [00:07]\n- [ ] 온보딩 시안 2종 — 담당: 박 디자인 / 기한: 수요일 [00:17]\n- [ ] 매장 피드백 정리·공유 — 담당: 박 디자인 / 기한: 금요일 [00:46] [00:52]',
     audioFile: null,
-    // 시각 줄 = 그 시각 문장의 코멘트 (00:34 · 00:35 는 같은 문장에 둘)
-    notes: '[00:07] 결제 모듈 — 테스트 서버 검증 결과 금요일에 공유받기\n[00:34] 0.4초는 피크 시간대 기준인지 확인\n[00:35] 키오스크 인덱스: 2초 → 0.4초\n[00:52] 금요일 공유 — 담당 박 디자인\n\n- 매장 피드백 양식 미리 보내 두기',
+    // 시각 줄 = 그 시각 문장의 코멘트 (00:34 · 00:35 는 같은 문장에 둘) · ⭐ 줄 = 중요 표시 (00:28 은 ⭐ 만, 00:40 은 ⭐ + 글)
+    notes: '[00:07] 결제 모듈 — 테스트 서버 검증 결과 금요일에 공유받기\n[00:28] ⭐\n[00:34] 0.4초는 피크 시간대 기준인지 확인\n[00:35] 키오스크 인덱스: 2초 → 0.4초\n[00:40] ⭐ 피크 시간대 수치도 받기\n[00:52] 금요일 공유 — 담당 박 디자인\n\n- 매장 피드백 양식 미리 보내 두기',
     // 회의 후 다시 정리 전 (화면 미리보기에서 '화자 정리 되돌리기' 버튼을 보이게)
     beforeRefine: { speakers: { 0: '김 팀장', 1: '이 개발', 2: '박 디자인', 3: '최 기획' }, assign: lines.map((l, i) => [i, i === 3 ? 3 : l[2]]) },
   };
@@ -3464,7 +3569,7 @@ function createMock() {
     const steps = [['제목', 0.0], ['제목', 0.01], ['한 줄 요약', 0.02], ['주요 논의', 0.08], ['주요 논의', 0.3], ['주요 논의', 0.45], ['결정 사항', 0.53], ['결정 사항', 0.62], ['할 일', 0.68], ['할 일', 0.85], ['남은 질문', 0.9], ['남은 질문', 0.97]];
     for (const [section, frac] of steps) { send({ writing: true, section, frac }); await wait(450); check(); }
     // 근거 시각: [00:34] 는 녹취록으로 가는 단추, 회의(1분) 뒤인 [12:00] 은 지어낸 값이라 글자 그대로
-    return { text: '### 한 줄 요약\n15일 출시 확정\n\n### 주요 논의\n- **출시 일정**\n  - 15일 출시, 목요일 점검 (김 팀장) [00:25]\n- **키오스크 응답 속도**\n  - 인덱스 추가로 2초 → 0.4초 (이 개발) [00:34]\n\n### 결정 사항\n- 15일 출시 [00:25]\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일 [12:00]\n\n### 남은 질문\n- 없음', title: null };
+    return { text: '### 한 줄 요약\n15일 출시 확정\n\n### 주요 논의\n- **출시 일정**\n  - ⭐ 15일 출시, 목요일 점검 (김 팀장) [00:25]\n- **키오스크 응답 속도**\n  - 인덱스 추가로 2초 → 0.4초 (이 개발) [00:34]\n\n### 결정 사항\n- 15일 출시 [00:25]\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일 [12:00]\n\n### 남은 질문\n- 없음', title: null };
   }
   // 브라우저 미리보기: 읽는 척 잠깐 쉬었다가 답을 조금씩 보낸다 (?askslow 면 느리게 · ?askfail 이면 오류)
   const mockQa = {};
@@ -3492,7 +3597,7 @@ function createMock() {
       openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
-      saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', alwaysOnTop: false, theme: 'system',
+      saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false, theme: 'system',
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
       usdKrw: 1360,

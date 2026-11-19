@@ -34,7 +34,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WindowEvent, Wry};
 use tauri_plugin_autostart::ManagerExt as _;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
 use session::{SearchHit, SessionDoc, SessionMeta, SessionStore, Utterance};
@@ -212,7 +212,7 @@ fn get_state(app: AppHandle) -> StateDto {
 fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let mut settings = settings;
-    let old_hotkey = {
+    let (old_hotkey, old_star) = {
         // 창 모드·위치·버전은 앱(백엔드)이 관리한다 — 화면이 들고 있던 옛 값으로 덮어쓰지 않게
         let cur = st.settings.lock();
         settings.mini_mode = cur.mini_mode;
@@ -220,15 +220,21 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
         settings.mini_docked = cur.mini_docked;
         settings.full_bounds = cur.full_bounds;
         settings.last_version = cur.last_version.clone();
-        cur.hotkey.clone()
+        (cur.hotkey.clone(), cur.star_hotkey.clone())
     };
     // 새 단축키부터 등록해 본다 — 다른 프로그램이 쓰는 조합이면 원래 단축키를 되살리고 그 값은 저장하지 않는다
     // (그대로 두면 단축키가 하나도 없게 되고, 켤 때마다 같은 오류가 난다)
     let mut hotkey_err = None;
-    if old_hotkey != settings.hotkey {
-        if let Err(e) = register_hotkey(&app, &settings.hotkey) {
-            let _ = register_hotkey(&app, &old_hotkey);
+    if old_hotkey != settings.hotkey || old_star != settings.star_hotkey {
+        let res = if settings::same_hotkey(&settings.hotkey, &settings.star_hotkey) {
+            Err("녹음 단축키와 중요 표시 단축키를 다른 조합으로 골라 주세요.".to_string())
+        } else {
+            register_hotkeys(&app, &settings.hotkey, &settings.star_hotkey)
+        };
+        if let Err(e) = res {
+            let _ = register_hotkeys(&app, &old_hotkey, &old_star);
             settings.hotkey = old_hotkey;
+            settings.star_hotkey = old_star;
             hotkey_err = Some(e);
         }
     }
@@ -264,14 +270,35 @@ fn list_devices() -> Vec<DeviceInfo> {
     badasugi_core::audio::list_input_devices()
 }
 
-fn register_hotkey(app: &AppHandle, hotkey: &str) -> CmdResult<()> {
+/// 전역 단축키 두 개(녹음 · 중요 표시 ⭐)를 다시 등록한다. 하나가 실패해도 다른 하나는 등록해 두고 첫 오류를 돌려준다
+fn register_hotkeys(app: &AppHandle, rec: &str, star: &str) -> CmdResult<()> {
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
-    if hotkey.trim().is_empty() {
-        return Ok(());
+    let mut first_err = None;
+    for (key, what) in [(rec.trim(), "녹음"), (star.trim(), "중요 표시")] {
+        if key.is_empty() {
+            continue;
+        }
+        if let Err(e) = gs.register(key) {
+            first_err.get_or_insert(format!(
+                "{what} 단축키 '{key}' 는 다른 프로그램이 쓰고 있거나 쓸 수 없는 조합이에요. 다른 조합을 골라 주세요. ({e})"
+            ));
+        }
     }
-    gs.register(hotkey.trim()).map_err(|e| {
-        format!("단축키 '{hotkey}' 는 다른 프로그램이 쓰고 있거나 쓸 수 없는 조합이에요. 다른 조합을 골라 주세요. ({e})")
+    first_err.map_or(Ok(()), Err)
+}
+
+/// 눌린 전역 단축키가 중요 표시 ⭐ 단축키인지 (아니면 녹음 단축키).
+/// 두 단축키가 같은 조합이면(설정 파일을 손으로 고친 경우 등) 녹음 단축키로 본다
+fn is_star_shortcut(app: &AppHandle, pressed: &Shortcut) -> bool {
+    app.try_state::<AppState>().is_some_and(|st| {
+        let (rec, star) = {
+            let s = st.settings.lock();
+            (s.hotkey.clone(), s.star_hotkey.clone())
+        };
+        let id = |k: &str| k.trim().parse::<Shortcut>().ok().map(|s| s.id());
+        let star_id = id(&star);
+        star_id.is_some() && star_id == Some(pressed.id()) && id(&rec) != star_id
     })
 }
 
@@ -1790,16 +1817,22 @@ fn main() {
     builder
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        let app = app.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = toggle_recording_inner(&app) {
-                                show_main(&app);
-                                let _ = app.emit("bd://toast", e);
-                            }
-                        });
+                .with_handler(|app, shortcut, event| {
+                    if event.state() != ShortcutState::Pressed {
+                        return;
                     }
+                    // 중요 표시 ⭐: 메모는 화면만 고치므로(지금 쓰는 글과 겹치지 않게) 화면에 알려 표시하게 한다
+                    if is_star_shortcut(app, shortcut) {
+                        let _ = app.emit("bd://star", ());
+                        return;
+                    }
+                    let app = app.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = toggle_recording_inner(&app) {
+                            show_main(&app);
+                            let _ = app.emit("bd://toast", e);
+                        }
+                    });
                 })
                 .build(),
         )
@@ -1917,7 +1950,7 @@ fn main() {
             }
 
             setup_tray(&handle)?;
-            if let Err(e) = register_hotkey(&handle, &settings.hotkey) {
+            if let Err(e) = register_hotkeys(&handle, &settings.hotkey, &settings.star_hotkey) {
                 log::warn!("{e}");
                 *app.state::<AppState>().hotkey_error.lock() =
                     Some(format!("{e}\n다른 프로그램이 쓰고 있을 수 있어요. 설정 › 일반에서 다른 조합으로 바꿔 주세요."));

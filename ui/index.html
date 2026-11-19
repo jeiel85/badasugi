@@ -115,6 +115,7 @@
       <div class="u-tools" id="u-tools" hidden>
         <button data-tool="edit" title="이 문장 고치기 (더블클릭해도 돼요)"><svg><use href="#i-pencil"/></svg><span>고치기</span></button>
         <button data-tool="comment" title="이 문장에 코멘트 달기"><svg><use href="#i-comment"/></svg><span>코멘트</span></button>
+        <button data-tool="star" title="이 문장을 중요 표시 ⭐ — 요약할 때 꼭 다뤄요"><i class="star-ic" aria-hidden="true">⭐</i><span>중요</span></button>
         <span class="tools-hint">Enter 저장 · Esc 취소 · 글자를 다 지우면 문장 삭제</span>
       </div>
     </main>
@@ -140,6 +141,7 @@
         <textarea id="memo" spellcheck="false" placeholder="회의를 보면서 자유롭게 적어 두세요.&#10;적는 대로 저장되고, Markdown 회의록에도 함께 남아요.&#10;&#10;💬 [12:34] 처럼 시각으로 시작하는 줄은 그 시각 문장의 코멘트가 돼요 (빈 줄 전까지).&#10;⏱ 시각 넣기로 지금 녹음 · 듣는 곳의 시각을 붙일 수 있어요."></textarea>
         <div class="memo-foot">
           <button class="chip-btn" id="btn-memo-time" title="지금 녹음 · 듣고 있는 곳의 시각을 넣어요 (Ctrl+;) — 시각으로 시작하는 줄은 그 시각 문장의 코멘트가 돼요"><svg><use href="#i-clock"/></svg>시각 넣기</button>
+          <button class="chip-btn" id="btn-memo-star" title="지금 녹음 · 듣고 있는 곳을 중요 표시 ⭐ — 요약할 때 꼭 다뤄요"><i class="star-ic" aria-hidden="true">⭐</i>중요 표시</button>
           <button class="chip-btn" id="btn-memo-goto" hidden title="이 줄이 코멘트로 붙은 문장을 녹취록에서 보기 (줄을 Ctrl+클릭해도 돼요)"><svg><use href="#i-comment"/></svg><span></span></button>
           <span class="memo-state" id="memo-state"></span>
         </div>
@@ -206,6 +208,7 @@
       </button>
       <div class="dock-actions">
         <button class="icon-btn" id="btn-pause" title="일시정지 · 이어서" hidden><svg><use href="#i-pause"/></svg></button>
+        <button class="icon-btn star-btn" id="btn-star" title="중요 표시 ⭐ — 지금 말하는 곳" hidden><i class="star-ic" aria-hidden="true">⭐</i></button>
         <button class="icon-btn" id="btn-copy" title="전체 복사"><svg><use href="#i-copy"/></svg></button>
         <button class="icon-btn" id="btn-save" title="파일로 저장"><svg><use href="#i-download"/></svg></button>
         <button class="icon-btn" id="btn-ask" title="회의에 묻기 — AI 에게 이 회의 내용을 물어봐요"><svg><use href="#i-ask"/></svg></button>
@@ -438,6 +441,7 @@
             <h4>녹음 · 창</h4>
             <div class="set-group">
               <div class="row"><span>녹음 단축키<small id="hotkey-desc">어디서든 녹음을 시작하고 멈춰요</small></span><button type="button" class="keycap" id="opt-hotkey" title="눌러서 바꾸기"></button></div>
+              <div class="row"><span>중요 표시 단축키 ⭐<small id="star-hotkey-desc">지금 말하는 곳에 ⭐ · 요약이 꼭 다뤄요</small></span><button type="button" class="keycap" id="opt-star-hotkey" title="눌러서 바꾸기"></button></div>
               <label class="row"><span>항상 위에 표시<small>회의 화면 옆에 띄워 둘 때</small></span><input type="checkbox" class="switch" id="opt-top" /></label>
               <label class="row"><span>녹음 파일도 저장<small>문장을 눌러 다시 듣기 · 1시간 약 11MB</small></span><input type="checkbox" class="switch" id="opt-audio" /></label>
             </div>
