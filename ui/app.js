@@ -884,9 +884,11 @@ function onEvent(e) {
           // 녹음 중에 만든 요약 속 "화자 3" 도 알아본 이름으로 (앱은 이름만 붙였으므로 요약은 화면이 고쳐 저장)
           const note = followSpeakerNames(d, () => { d.speakers[e.speaker] = e.name; });
           if (note) {
-            // 녹음 중에 다른 회의를 고치고 있었으면 그 저장을 먼저 보낸다 (debounce 는 마지막 것만 보내므로)
+            // 녹음 중에 다른 회의를 고치고 있을 수 있다 — debounce 는 마지막 문서만 보내므로, 기다리던 저장을 먼저
+            // 보내고 이 저장도 기다리지 않고 바로 보낸다 (곧이어 다른 회의를 고쳐도 서로 밀어내지 않게)
             persistDoc.flush();
             persistDoc(d);
+            persistDoc.flush();
           }
           $('#speakers').innerHTML = '';
           toast(`목소리로 '${e.name}'님을 알아봤어요${note ? ` · ${note.msg}` : ''}`);
