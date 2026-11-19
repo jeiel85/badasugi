@@ -32,18 +32,32 @@ macro_rules! open_questions_rule {
     };
 }
 
+/// 회의록 문체 — 서술형 문장이 아니라 개조식으로 가볍게. 회의록을 받아 본 사람의 피드백(2026-11-19):
+/// 불릿마다 "~은 ~라고 말했습니다. 또 ~했습니다"처럼 두세 문장씩 풀어 써서 무겁고 읽기 느리다
+macro_rules! style_rule {
+    () => {
+        "문체는 서술형 문장이 아니라 개조식으로, 가볍게 쓰세요.\n\
+- \"~했습니다\" · \"~라고 말했습니다\" · \"~입니다\" 같은 서술형으로 끝내지 말고, 명사형이나 \"~함\" · \"~필요\" · \"~예정\"처럼 짧게 끝내세요.\n\
+- 불릿 하나에는 요점 하나만, 한 줄(40자 안팎)로 쓰세요. 배경 · 이유는 꼭 필요할 때만 \"— 이유\"처럼 짧게 붙이세요.\n\
+- 누가 한 말인지는 문장으로 풀지 말고 \"김 팀장:\"처럼 화자 이름을 앞에 붙이세요.\n\
+- 같은 내용을 여러 곳에 되풀이하지 마세요.\n\n"
+    };
+}
+
 const SYSTEM: &str = concat!(
     "당신은 한국 회사의 회의록을 정리하는 비서입니다. \
 녹취록은 음성 인식 결과라서 오탈자와 잘못 들린 단어가 있을 수 있으니 문맥으로 바로잡아 이해하세요. \
 녹취록에 없는 내용은 지어내지 마세요.\n\n",
+    style_rule!(),
     open_questions_rule!(),
     "결과는 한국어 마크다운으로, 아래 형식만 출력하세요.\n\n\
 ### 제목\n(회의 주제를 20자 이내 명사형으로)\n\n\
-### 한 줄 요약\n(회의 전체를 한 문장으로)\n\n\
-### 주요 논의\n- (핵심 논의를 3~7개 불릿으로, 누가 어떤 의견을 냈는지 화자 이름 포함)\n\n\
-### 결정 사항\n- (확정된 것만. 없으면 \"없음\")\n\n\
+### 한 줄 요약\n(회의 전체를 개조식 한 줄로, 60자 이내)\n\n\
+### 주요 논의\n- **(주제)**\n  - (요점 — 누가 한 말인지 중요하면 화자 이름을 앞에)\n\
+(주제는 3~7개, 주제마다 하위 불릿 1~4개)\n\n\
+### 결정 사항\n- (확정된 것만, 한 줄씩. 없으면 \"없음\")\n\n\
 ### 할 일\n- [ ] (할 일) — 담당: (화자) / 기한: (언급된 경우)\n\n\
-### 남은 질문\n- (회의가 끝날 때까지 답이 나오지 않아 따로 챙겨야 할 것만. 없으면 \"없음\")"
+### 남은 질문\n- (회의가 끝날 때까지 답이 나오지 않아 따로 챙겨야 할 것만, 한 줄씩. 없으면 \"없음\")"
 );
 
 const GROQ_URL: &str = "https://api.groq.com/openai/v1";
@@ -112,11 +126,11 @@ type Sections = &'static [(&'static str, f32, f32)];
 /// [`SYSTEM`] 형식 — 몫은 실제 회의록에서 섹션마다 차지하는 대략의 비율
 const FINAL_SECTIONS: Sections = &[
     ("제목", 0.02, 20.0),
-    ("한 줄 요약", 0.06, 80.0),
-    ("주요 논의", 0.45, 700.0),
-    ("결정 사항", 0.15, 250.0),
-    ("할 일", 0.22, 350.0),
-    ("남은 질문", 0.10, 150.0),
+    ("한 줄 요약", 0.05, 50.0),
+    ("주요 논의", 0.46, 550.0),
+    ("결정 사항", 0.15, 200.0),
+    ("할 일", 0.23, 300.0),
+    ("남은 질문", 0.09, 100.0),
 ];
 
 /// [`PART_SYSTEM`] 형식 (구간 메모 · 메모 합치기 · 줄이기)
@@ -1840,5 +1854,40 @@ mod tests {
         let mut sections: Vec<&str> = seen.borrow().iter().map(|p| p.section).collect();
         sections.dedup();
         assert_eq!(sections, ["제목", "한 줄 요약", "주요 논의", "결정 사항", "할 일", "남은 질문"]);
+    }
+
+    /// 저장된 회의 하나를 지금 설정(설정 › 요약)의 AI 로 요약해 본다 — 프롬프트를 고칠 때 같은 회의로 전 · 후를 비교하려고.
+    /// 실제 API 를 불러 비용이 들므로 평소에는 돌지 않는다 (사용량 장부에도 남지 않는다):
+    /// `BD_SUMMARY_DOC=<기록.json> [BD_SUMMARY_OUT=<결과.md>] cargo test --release -p badasugi summarize_a_saved_meeting -- --ignored --nocapture`
+    /// 설정 파일은 `BD_SETTINGS`, 없으면 `%APPDATA%\com.badasugi.desktop\settings.json`
+    #[test]
+    #[ignore]
+    fn summarize_a_saved_meeting() {
+        let doc_path = std::env::var("BD_SUMMARY_DOC").expect("BD_SUMMARY_DOC 에 회의 기록(.json) 경로");
+        let settings = std::env::var_os("BD_SETTINGS").map(std::path::PathBuf::from).unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("APPDATA").expect("APPDATA"))
+                .join("com.badasugi.desktop")
+                .join("settings.json")
+        });
+        let cfg = crate::settings::Settings::load(&settings).summary;
+        let doc: SessionDoc = serde_json::from_str(&std::fs::read_to_string(&doc_path).unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let s = summarize(
+            &cfg,
+            &doc,
+            &|_| {},
+            &|p, r| {
+                eprintln!("[{p} {}] 입력 {} · 캐시 {}/{} · 출력 {}", r.model, r.in_tokens, r.cache_write, r.cache_read, r.out_tokens)
+            },
+            &flag,
+        )
+        .unwrap();
+        eprintln!("걸린 시간 {:.0}초", started.elapsed().as_secs_f32());
+        let out = format!("### 제목\n{}\n\n{}\n", s.title.unwrap_or_default(), s.text);
+        println!("{out}");
+        if let Some(p) = std::env::var_os("BD_SUMMARY_OUT") {
+            std::fs::write(p, out).unwrap();
+        }
     }
 }
