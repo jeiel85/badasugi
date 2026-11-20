@@ -27,6 +27,8 @@ struct Line {
     depth: usize,
     text: String,
     todo: bool,
+    /// 끝낸 할 일 (`- [x]`) — 메신저 · 메일에는 "(완료)" 를 붙이고, 일정 파일 · 할 일 수에서는 뺀다
+    done: bool,
 }
 
 /// 섹션 종류 (요약 틀마다 이름이 달라 이름으로 어림한다)
@@ -105,13 +107,16 @@ fn parse(summary: &str) -> Vec<Section> {
             Some(b) => (indent / 2, b),
             None => (0, trimmed),
         };
-        let (todo, body) = match ["[ ] ", "[x] ", "[X] "].iter().find_map(|b| body.strip_prefix(b)) {
-            Some(b) => (true, b),
-            None => (false, body),
+        let (todo, done, body) = if let Some(b) = body.strip_prefix("[ ] ") {
+            (true, false, b)
+        } else if let Some(b) = body.strip_prefix("[x] ").or_else(|| body.strip_prefix("[X] ")) {
+            (true, true, b)
+        } else {
+            (false, false, body)
         };
         let text = clean(body);
         if !text.is_empty() {
-            out.last_mut().unwrap().lines.push(Line { depth, text, todo });
+            out.last_mut().unwrap().lines.push(Line { depth, text, todo, done });
         }
     }
     out
@@ -142,7 +147,17 @@ fn todo_of(text: &str) -> Todo {
 }
 
 fn todos(sections: &[Section]) -> Vec<Todo> {
-    sections.iter().flat_map(|s| &s.lines).filter(|l| l.todo && !is_none(&l.text)).map(|l| todo_of(&l.text)).collect()
+    // 끝낸 할 일은 빼고
+    sections.iter().flat_map(|s| &s.lines).filter(|l| l.todo && !l.done && !is_none(&l.text)).map(|l| todo_of(&l.text)).collect()
+}
+
+/// 메신저 · 메일에 쓰는 줄 — 할 일은 [`todo_line`], 끝낸 할 일은 끝에 "(완료)"
+fn line_text(l: &Line) -> String {
+    match (l.todo, l.done) {
+        (true, false) => todo_line(&todo_of(&l.text)),
+        (true, true) => format!("{} (완료)", todo_line(&todo_of(&l.text))),
+        _ => l.text.clone(),
+    }
 }
 
 /// 메신저 · 메일에 쓰는 할 일 한 줄: "할 일 — 이 개발 · 금요일까지"
@@ -199,7 +214,7 @@ pub fn messenger(doc: &SessionDoc) -> Option<String> {
             .lines
             .iter()
             .filter(|l| l.depth == 0 && !is_none(&l.text))
-            .map(|l| format!("• {}", if l.todo { todo_line(&todo_of(&l.text)) } else { l.text.clone() }))
+            .map(|l| format!("• {}", line_text(l)))
             .collect();
         (!items.is_empty()).then(|| format!("{icon} {}\n{}", s.name, items.join("\n")))
     };
@@ -240,7 +255,7 @@ pub fn email(doc: &SessionDoc) -> Option<(String, String)> {
             body.push_str(&format!("\n■ {}\n", s.name));
         }
         for l in lines {
-            let text = if l.todo { todo_line(&todo_of(&l.text)) } else { l.text.clone() };
+            let text = line_text(l);
             match l.depth {
                 0 => body.push_str(&format!("- {text}\n")),
                 _ => body.push_str(&format!("{}· {text}\n", "   ".repeat(l.depth))),
@@ -319,7 +334,17 @@ pub fn due_date(text: &str, base: NaiveDate) -> Option<NaiveDate> {
         number(&compact[start..end]).map(|(n, _)| n)
     };
     // "2027년" 처럼 적힌 해 (두 자리면 2000년대 — 27년은 2027년)
-    let year_before = |end: usize| compact[..end].find('년').and_then(|y| digits_before(y)).map(|y| if y < 100 { 2000 + y } else { y });
+    // "내년" · "올해" 도 해로
+    let year_before = |end: usize| {
+        let head = &compact[..end];
+        if head.contains("내년") {
+            return Some(base.year() as u32 + 1);
+        }
+        if head.contains("올해") || head.contains("금년") {
+            return Some(base.year() as u32);
+        }
+        head.find('년').and_then(|y| digits_before(y)).map(|y| if y < 100 { 2000 + y } else { y })
+    };
     // 11월 25일 · 2027년 11월 25일 (연도가 적혀 있으면 그 해)
     if let Some(i) = compact.find('월') {
         if let (Some(m), Some((d, rest))) = (digits_before(i), number(&compact[i + '월'.len_utf8()..])) {
@@ -402,12 +427,9 @@ pub fn due_date(text: &str, base: NaiveDate) -> Option<NaiveDate> {
                     .and_then(|d| if d < base - Duration::days(7) { last_day(base.year() + 1, m) } else { Some(d) }),
             };
         }
-        return if compact.contains("다음달") {
-            let (y, m) = if base.month() == 12 { (base.year() + 1, 1) } else { (base.year(), base.month() + 1) };
-            last_day(y, m)
-        } else {
-            last_day(base.year(), base.month())
-        };
+        // 이번 달 · 다음 달 · 다다음 달 (위에서 읽은 달 차이)
+        let m0 = base.month0() + months.unwrap_or(0);
+        return last_day(base.year() + (m0 / 12) as i32, m0 % 12 + 1);
     }
     // 달 · 날짜가 적혀 있는데 위에서 다 읽지 못했으면("11월 셋째 주 금요일" · "다음 달 첫째 주 화요일") 요일만 보고
     // 짐작하지 않는다 — 더 이른 날짜로 내보내느니 빼는 게 낫다
@@ -580,6 +602,10 @@ mod tests {
             ("2027년 11월 25일", "2027-11-25"),
             ("2026년 12월 1일까지", "2026-12-01"),
             ("27년 1월 5일", "2027-01-05"),
+            ("내년 12월 1일", "2027-12-01"),
+            ("올해 12월 24일", "2026-12-24"),
+            ("내년 1월 말", "2027-01-31"),
+            ("금요일(11/21)", "2026-11-21"),
             ("12/3", "2026-12-03"),
             ("2026-12-10", "2026-12-10"),
             ("2027.01.04", "2027-01-04"),
@@ -600,13 +626,28 @@ mod tests {
             ("다음 달 1일(화요일)", "2026-12-01"),
             ("이번 달 28일", "2026-11-28"),
             ("다다음 달 5일", "2027-01-05"),
+            ("다다음 달 말", "2027-01-31"),
+            ("다음 달 말일", "2026-12-31"),
             ("이번 주말", "2026-11-21"),
         ] {
             assert_eq!(due_date(text, base), Some(d(want)), "{text}");
         }
-        for text in ["미정", "다음 주", "분기 내", "확인 후", "가능한 빨리", "11월 셋째 주 금요일", "다음 달 첫째 주 화요일"] {
+        for text in ["미정", "다음 주", "분기 내", "확인 후", "가능한 빨리", "11월 셋째 주 금요일", "다음 달 첫째 주 화요일", "다음 달", "이번 달 중", "12시까지", "내년 상반기"] {
             assert_eq!(due_date(text, base), None, "{text}");
         }
+    }
+
+    /// 끝낸 할 일(`- [x]`)은 메신저 · 메일에 "(완료)" 로 남기고, 일정 파일 · 할 일 수에서는 뺀다
+    #[test]
+    fn done_todos_are_marked_and_not_scheduled() {
+        let s = "### 할 일\n- [x] 공지 올리기 — 담당: 박 디자인 / 기한: 내일 [00:10]\n- [X] 견적서 — 기한: 금요일\n- [ ] 결제 모듈 배포 — 담당: 이 개발 / 기한: 금요일";
+        let m = messenger(&doc(s)).unwrap();
+        assert!(m.contains("• 공지 올리기 — 박 디자인 · 내일까지 (완료)\n• 견적서 — 금요일까지 (완료)\n• 결제 모듈 배포"), "{m}");
+        assert!(email(&doc(s)).unwrap().1.contains("- 공지 올리기 — 박 디자인 · 내일까지 (완료)\n"));
+        assert_eq!(todo_counts(&doc(s)), (1, 1));
+        let (ics, n) = ics(&doc(s), "20261120T000000Z");
+        assert_eq!(n, 1);
+        assert!(!ics.contains("공지 올리기") && ics.contains("결제 모듈 배포"));
     }
 
     #[test]
