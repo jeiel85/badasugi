@@ -10,7 +10,7 @@ const T = window.__TAURI__;
 const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
   'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
-const AFTER_CMDS = new Set(['summarize', 'ask_meeting']);
+const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
   if (AFTER_CMDS.has(cmd)) return orderedChain.then(() => T.core.invoke(cmd, args));
@@ -2632,7 +2632,7 @@ function openPanel(name, tab) {
   $('#scrim').hidden = false;
   $(`#panel-${name}`).hidden = false;
   if (name === 'settings') { showSetTab(tab || S.setTab || 'record'); renderSettings(); }
-  if (name === 'history') renderHistory();
+  if (name === 'history') setHMode(S.hMode || 'list');
 }
 // 설정 분류: 녹음 · 화자 · 요약 · 사용량 · 일반
 const SET_TABS = ['record', 'speaker', 'summary', 'usage', 'general'];
@@ -2798,6 +2798,190 @@ $('#history-list').addEventListener('click', async (e) => {
 });
 $('#btn-open-folder').addEventListener('click', () => call('open_folder', { kind: 'sessions' }));
 $('#history-q').addEventListener('input', debounce(renderHistory, 220));
+
+/* ───────────── 모든 회의에 묻기 ───────────── */
+// 회의 기록 패널의 두 번째 탭. 앱이 질문과 관련 있어 보이는 회의를 골라(겹치는 회의가 없으면 최근 회의부터) 요약에 쓰는
+// AI 로 묻는다. 답의 [회의 2 · 12:34] 는 눌러서 그 회의의 그 문장으로 간다. 묻고 답한 것은 기록에 남기지 않는다
+// (앱을 켜 둔 동안만 — 회의 하나에 묶이지 않아서).
+// S.allQa: [{ q, a, sources, considered, recent, at, model }] · S.allAsk: 받는 중인 답 · S.allDays: 기간(일, 0 = 전체)
+S.allQa = [];
+S.allDays = 0;
+S.hMode = 'list';
+const haskList = $('#hask-list');
+const haskInput = $('#hask-input');
+let haskShown = '';
+function setHMode(mode) {
+  S.hMode = mode;
+  $$('#h-tabs [data-hmode]').forEach((b) => b.classList.toggle('on', b.dataset.hmode === mode));
+  $$('#panel-history [data-hpage]').forEach((el) => (el.hidden = el.dataset.hpage !== mode));
+  if (mode === 'ask') {
+    renderAllAsk();
+    if (!haskInput.disabled) haskInput.focus();
+  } else renderHistory();
+}
+$('#h-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-hmode]');
+  if (b && b.dataset.hmode !== S.hMode) setHMode(b.dataset.hmode);
+});
+$('#hask-range').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-days]');
+  if (!b || S.allAsk) return;
+  S.allDays = +b.dataset.days;
+  $$('#hask-range [data-days]').forEach((x) => x.classList.toggle('on', x === b));
+});
+const DAYS_LABEL = { 0: '전체', 7: '최근 1주', 30: '최근 1달', 90: '최근 3달' };
+// "12:34" · "1:02:03" → ms
+const clockMs = (t) => t.split(':').map(Number).reduce((a, n) => a * 60 + n, 0) * 1000;
+// 답 → HTML: [회의 2 · 12:34] · [회의 2] 는 그 회의(의 그 문장)로 가는 단추. 실은 회의에 없는 번호는 글자 그대로
+function allAnswerHtml(text, sources) {
+  return md(text).replace(/\[회의\s*(\d+)(?:\s*[·,:]\s*((?:\d{1,2}:)?\d{1,2}:\d{2}))?\]/g, (m, n, t) => {
+    const s = sources?.find((x) => x.n === +n);
+    if (!s) return m;
+    const tip = `${s.title} · ${whenLabel(s.startedAt)}${t ? ` · ${t}` : ''} — 눌러서 보기`;
+    return `<button class="ts xref" data-id="${esc(s.id)}"${t ? ` data-ms="${clockMs(t)}"` : ''} title="${esc(tip)}">회의 ${n}${t ? ` · ${t}` : ''}</button>`;
+  });
+}
+function allQaHtml(x, i) {
+  const meta = [String(x.at || '').slice(11, 16), DAYS_LABEL[x.days] || '', x.model].filter(Boolean).join(' · ');
+  const head = `실은 회의 ${x.sources.length}개${x.considered > x.sources.length ? ` (기록 ${x.considered}개 중)` : ''}${x.recent ? ' — 질문과 겹치는 회의가 없어 최근 회의부터' : ''}`;
+  const srcs = x.sources.map((s) => `<button data-open="${esc(s.id)}" title="${esc(s.title)} 열기">${s.n}. ${esc(s.title)} <small>${esc(whenLabel(s.startedAt))}</small></button>`).join('');
+  return `<div class="qa" data-i="${i}"><div class="qa-q">${esc(x.q)}</div><div class="qa-a md">${allAnswerHtml(x.a, x.sources)}</div>`
+    + `<div class="hask-srcs"><span>${esc(head)}</span>${srcs}</div>`
+    + `<div class="qa-meta"><span title="${esc(meta)}">${esc(meta)}</span><button data-allqa="copy">복사</button><button data-allqa="del" title="이 질문과 답 지우기">지우기</button></div></div>`;
+}
+function renderAllAsk() {
+  if ($('#panel-history').hidden || S.hMode !== 'ask') return;
+  const pend = S.allAsk;
+  let html;
+  if (!S.allQa.length && !pend) {
+    const sugs = ['최근 회의에서 정해진 것만 모아 줘', '아직 남은 할 일과 담당자는?', '여러 회의에서 반복해서 나온 문제는?', '숫자나 금액이 나온 곳은?'];
+    html = '<div class="n-empty"><svg><use href="#i-ask"/></svg><b>모든 회의에 물어보세요</b>'
+      + '<p>질문과 관련 있어 보이는 회의를 골라, 요약에 쓰는 AI 가 그 회의들의 요약 · 메모 · 녹취록을 보고 답해요.<br>답의 [회의 · 시각]을 누르면 그 회의의 그 문장으로 가요.</p>'
+      + `<div class="ask-sugs">${sugs.map((s) => `<button class="chip-btn" data-sug="${esc(s)}">${esc(s)}</button>`).join('')}</div></div>`;
+  } else {
+    html = S.allQa.map(allQaHtml).join('')
+      + (pend ? `<div class="qa" id="hask-pending" data-token="${pend.token}"></div>` : '')
+      + (S.allQa.length && !pend ? '<div class="qa-tail"><button class="link" data-allqa="clear">묻고 답한 것 모두 지우기</button></div>' : '');
+  }
+  if (html !== haskShown) {
+    const atEnd = haskList.scrollHeight - haskList.scrollTop - haskList.clientHeight < 60;
+    haskList.innerHTML = html;
+    haskShown = html;
+    if (atEnd || pend) haskList.scrollTop = haskList.scrollHeight;
+  }
+  if (pend) renderAllPending();
+  const send = $('#hask-send');
+  send.classList.toggle('stop', !!pend);
+  send.title = pend ? (pend.cancelling ? '멈추는 중…' : '답 멈추기') : '보내기 (Enter · 줄바꿈은 Shift+Enter)';
+  send.disabled = pend ? !!pend.cancelling : !haskInput.value.trim();
+  $$('#hask-list [data-sug], #hask-range [data-days]').forEach((b) => (b.disabled = !!pend));
+  if (haskInput.offsetWidth >= 80) {
+    haskInput.style.height = '';
+    if (haskInput.scrollHeight > haskInput.clientHeight) haskInput.style.height = `${Math.min(haskInput.scrollHeight + 2, 132)}px`;
+  }
+}
+let allFrame = 0;
+function renderAllPending() {
+  allFrame = 0;
+  const p = S.allAsk;
+  const el = $('#hask-pending');
+  if (!p || !el || +el.dataset.token !== p.token) return;
+  const atEnd = haskList.scrollHeight - haskList.scrollTop - haskList.clientHeight < 60;
+  if (!el.firstChild) {
+    el.innerHTML = `<div class="qa-q">${esc(p.q)}</div><div class="qa-a md"></div><div class="qa-meta"><span class="qa-status"></span></div>`;
+    p.shown = null;
+  }
+  if (p.shown !== p.text) {
+    // 받는 중에는 번호만 있고 어느 회의인지는 답이 끝나야 알므로 글자 그대로
+    $('.qa-a', el).innerHTML = p.text ? md(p.text) : '<div class="qa-dots"><i></i><i></i><i></i></div>';
+    p.shown = p.text;
+  }
+  let status;
+  if (p.cancelling) status = '멈추는 중…';
+  else if (p.waitSecs > 0) status = `요청 한도 때문에 ${p.waitSecs}초 기다렸다가 다시 물어요…`;
+  else if (!p.text) status = p.restarted ? '회의 기록을 줄여서 다시 묻는 중…' : '관련 있는 회의를 골라 읽는 중…';
+  else status = '답을 쓰는 중…';
+  $('.qa-status', el).textContent = `${status} ${fmt(Date.now() - p.started)}`;
+  if (atEnd) haskList.scrollTop = haskList.scrollHeight;
+}
+async function askAll(question) {
+  const q = String(question || '').trim();
+  if (!q) return;
+  if (S.allAsk) { toast('앞 질문의 답을 받는 중이에요'); return; }
+  // 방금 고친 문장 · 메모가 들어가게 기다리던 저장을 먼저 보낸다
+  flushSaves();
+  const days = S.allDays;
+  const my = { token: Date.now(), q, text: '', waitSecs: 0, restarted: false, started: Date.now(), cancelling: false, shown: null };
+  S.allAsk = my;
+  if (haskInput.value.trim() === q) haskInput.value = '';
+  clearInterval(S.allTimer);
+  S.allTimer = setInterval(renderAllPending, 1000);
+  renderAllAsk();
+  try {
+    // 앞선 질문 · 답과 그때 실은 회의 — 앱이 "회의 2" 를 회의 이름으로 바꿔 보내고 바로 앞 답의 회의를 다시 싣는다
+    // (물을 때마다 회의를 다시 골라 번호가 바뀐다). 질문의 번호는 물을 때 보던 앞 답의 회의(qSources)로 —
+    // 앞 답을 지워도 질문이 가리키던 회의가 바뀌지 않게 질문과 함께 기억해 둔다
+    const qSources = S.allQa.at(-1)?.sources || [];
+    const history = S.allQa.slice(-4).map((x) => ({ q: x.q, a: x.a, sources: x.sources, qSources: x.qSources || [] }));
+    const r = await api.invoke('ask_all', { question: q, token: my.token, days: days || null, history });
+    S.allQa.push({ q, qSources, a: r.a, sources: r.sources || [], considered: r.considered, recent: r.recent, at: r.at, model: r.model, days });
+  } catch (e) {
+    const msg = String(e);
+    if (msg !== ASK_CANCELLED) toast(msg, 'error');
+    if (!haskInput.value.trim()) haskInput.value = q;
+  } finally {
+    if (S.allAsk === my) S.allAsk = null;
+    clearInterval(S.allTimer);
+    if (allFrame) { cancelAnimationFrame(allFrame); allFrame = 0; }
+    renderAllAsk();
+  }
+}
+function cancelAllAsk() {
+  const a = S.allAsk;
+  if (!a || a.cancelling) return;
+  a.cancelling = true;
+  renderAllAsk();
+  api.invoke('cancel_ask', { token: a.token }).catch(() => {});
+}
+$('#hask-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (S.allAsk) cancelAllAsk();
+  else askAll(haskInput.value);
+});
+haskInput.addEventListener('keydown', (e) => {
+  // 한글 조합 중 Enter 는 글자를 끝내는 것 — 보내지 않는다
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  if (!S.allAsk) askAll(haskInput.value);
+});
+haskInput.addEventListener('input', renderAllAsk);
+haskList.addEventListener('click', async (e) => {
+  // 근거 [회의 2 · 12:34] → 그 회의를 열고 그 문장으로 · 실은 회의 → 그 회의를 연다
+  const ref = e.target.closest('.xref, [data-open]');
+  if (ref) {
+    const ms = ref.dataset.ms;
+    await openSession(ref.dataset.id || ref.dataset.open);
+    // 연 회의를 그린 뒤에 (openSession 이 바로 그린다)
+    if (ms != null) setTimeout(() => gotoMs(+ms), 0);
+    return;
+  }
+  const sug = e.target.closest('[data-sug]');
+  if (sug) { askAll(sug.dataset.sug); return; }
+  const b = e.target.closest('[data-allqa]');
+  if (!b) return;
+  if (b.dataset.allqa === 'clear') { S.allQa = []; renderAllAsk(); return; }
+  const i = +b.closest('.qa')?.dataset.i;
+  const x = S.allQa[i];
+  if (!x) return;
+  if (b.dataset.allqa === 'copy') {
+    const refs = x.sources.map((s) => `회의 ${s.n}: ${s.title} (${whenLabel(s.startedAt)})`).join('\n');
+    await navigator.clipboard.writeText(`Q. ${x.q}\n${x.a}\n\n${refs}`);
+    toast('질문과 답을 복사했어요');
+  } else if (b.dataset.allqa === 'del') {
+    S.allQa.splice(i, 1);
+    renderAllAsk();
+  }
+});
 $('#btn-import').addEventListener('click', () => pickFile());
 $('#btn-open-file').addEventListener('click', () => pickFile());
 
@@ -4207,6 +4391,15 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
     if (p.waitSecs != null) a.waitSecs = p.waitSecs;
     if (!askFrame) askFrame = requestAnimationFrame(renderAskPending);
   });
+  await api.listen('bd://ask-all-progress', (e) => {
+    // 멈춘 앞 질문이 끝까지 받는 답은 버린다
+    const p = e.payload, a = S.allAsk;
+    if (!a || p?.token !== a.token || a.cancelling) return;
+    if (p.restart) { a.text = ''; a.restarted = true; }
+    if (p.delta) { a.text += p.delta; a.waitSecs = 0; }
+    if (p.waitSecs != null) a.waitSecs = p.waitSecs;
+    if (!allFrame) allFrame = requestAnimationFrame(renderAllPending);
+  });
   await api.listen('bd://mini', (e) => setMini(!!e.payload));
   // 중요 표시 ⭐ 전역 단축키 (다른 창을 보고 있어도)
   await api.listen('bd://star', () => addStar());
@@ -4445,6 +4638,24 @@ function createMock() {
       if (cmd === 'export_todos_ics') return 2;
       if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
       if (cmd === 'ask_meeting') return mockAsk(args);
+      // 모든 회의에 묻기: 기록 두 개를 실은 척, 답을 조금씩 (?askfail 이면 오류)
+      if (cmd === 'ask_all') {
+        const q = new URLSearchParams(location.search);
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const send = (p) => handlers['bd://ask-all-progress'] && handlers['bd://ask-all-progress']({ payload: { token: args.token, ...p } });
+        const check = () => { if (mockAskCancel === args.token) throw '답을 멈췄어요'; };
+        await wait(1200); check();
+        if (q.has('askfail')) throw 'AI API 오류 429: Rate limit reached (요청 한도를 넘었어요. 잠시 뒤 다시 시도해 주세요)';
+        const s1 = mockSessions().find((x) => x.id === 's1');
+        const sources = [
+          { n: 1, id: 's1', title: s1?.title || '매장 피드백 정리', startedAt: s1?.startedAt || '2026-11-12 11:20' },
+          { n: 2, id: 'demo', title: '앱 출시 일정 회의', startedAt: S.liveDoc?.startedAt || '2026-11-19 14:30' },
+        ];
+        const answer = '- 출시일은 **15일**로 정하고 목요일에 한 번 더 점검하기로 했어요 (김 팀장) [회의 2 · 00:25]\n- 매장 피드백은 박 디자인이 금요일까지 정리해 공유하기로 했어요 [회의 2 · 00:46] — 앞선 회의에서도 같은 요청이 있었어요 [회의 1]\n- 결제 모듈 배포는 이 개발 담당, 금요일까지 [회의 2 · 00:07] [회의 9 · 01:00]';
+        for (const piece of answer.match(/[\s\S]{1,9}/g)) { send({ delta: piece }); await wait(50); check(); }
+        const n = new Date(), p2 = (x) => String(x).padStart(2, '0');
+        return { a: answer, model: 'claude-opus-5-5', sources, considered: 6, recent: false, at: `${n.getFullYear()}-${p2(n.getMonth() + 1)}-${p2(n.getDate())} ${p2(n.getHours())}:${p2(n.getMinutes())}` };
+      }
       if (cmd === 'cancel_ask') { mockAskCancel = args.token; return; }
       if (cmd === 'delete_qa') {
         await new Promise((r) => setTimeout(r, 300)); // 앱처럼 잠깐 걸린다 (두 번 눌러 보기)

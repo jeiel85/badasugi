@@ -1180,6 +1180,30 @@ impl SessionStore {
         self.flush()
     }
 
+    /// 이 폴더의 기록 전부 (최근 것이 앞) — 모든 회의에 묻기. 녹음 중인 기록은 화면이 아니라 앱이 들고 있는 것을
+    /// 따로 넣는다 (`SessionStore::current` 는 이 사본에 없다)
+    pub fn all_docs(&self) -> Vec<SessionDoc> {
+        let mut out: Vec<SessionDoc> = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .filter_map(|s| serde_json::from_str::<SessionDoc>(&s).ok())
+            .map(|mut d| {
+                d.fold_comments();
+                d
+            })
+            .collect();
+        out.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(b.id.cmp(&a.id)));
+        out
+    }
+
+    /// 녹음 중인 기록 (앱이 들고 있는 것)
+    pub fn current_doc(&self) -> Option<SessionDoc> {
+        self.current.clone()
+    }
+
     /// 제목·녹취록 전체에서 찾기 (대소문자 무시)
     pub fn search(&self, query: &str) -> Vec<SearchHit> {
         let q = query.trim().to_lowercase();
