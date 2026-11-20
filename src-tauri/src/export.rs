@@ -330,11 +330,15 @@ pub(crate) fn blocks(doc: &SessionDoc) -> Vec<Block> {
 /// 본문 너비 (A4 210mm − 좌우 여백 23mm, 1/20 pt)
 const TEXT_W: u32 = 9298;
 
-/// XML 글자 — 특수 문자를 바꾸고, XML 에 넣을 수 없는 제어 문자는 뺀다
+/// XML 글자 — 특수 문자를 바꾸고, XML 에 넣을 수 없는 제어 문자는 뺀다.
+/// 그림 문자 ⭐ 는 ★ 로 — 맑은 고딕에 없어 Word 가 다른 글꼴로 그리며(PDF 저장 때 그 글꼴을 통째로 넣어 수 MB),
+/// 코멘트 아이콘도 같은 까닭으로 ★ · ※ 를 쓴다 (PDF 내보내기는 화면처럼 그림 문자 그대로)
 fn xml(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
+            '⭐' => o.push('★'),
+            '\u{FE0F}' => {}
             '&' => o.push_str("&amp;"),
             '<' => o.push_str("&lt;"),
             '>' => o.push_str("&gt;"),
@@ -459,7 +463,7 @@ fn w_body(blocks: &[Block]) -> String {
             Block::Speech(t) => s.push_str(&w_p("<w:pStyle w:val=\"Speech\"/>", &w_runs(&[Run::plain(t.clone())], ""))),
             Block::Note { icon, time, text } => s.push_str(&w_p(
                 "<w:pStyle w:val=\"Note\"/>",
-                &w_runs(&[Run::plain(format!("{icon} ")), Run::time(time.clone()), Run::plain(format!("  {text}"))], ""),
+                &w_runs(&[Run::plain(format!("{} ", if *icon == "⭐" { "★" } else { "※" })), Run::time(time.clone()), Run::plain(format!("  {text}"))], ""),
             )),
         }
     }
@@ -516,6 +520,8 @@ const STYLES: &str = "<w:docDefaults>\
 <w:pPr><w:keepNext/><w:spacing w:before=\"160\" w:after=\"0\"/></w:pPr></w:style>\
 <w:style w:type=\"paragraph\" w:customStyle=\"1\" w:styleId=\"Speech\"><w:name w:val=\"Speech\"/><w:basedOn w:val=\"Normal\"/>\
 <w:pPr><w:spacing w:after=\"60\"/></w:pPr></w:style>\
+<w:style w:type=\"paragraph\" w:styleId=\"Footer\"><w:name w:val=\"footer\"/><w:basedOn w:val=\"Normal\"/>\
+<w:pPr><w:spacing w:after=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:rPr><w:color w:val=\"8A8A99\"/><w:sz w:val=\"16\"/><w:szCs w:val=\"16\"/></w:rPr></w:style>\
 <w:style w:type=\"paragraph\" w:customStyle=\"1\" w:styleId=\"Note\"><w:name w:val=\"Comment Note\"/><w:basedOn w:val=\"Normal\"/>\
 <w:pPr><w:pBdr><w:left w:val=\"single\" w:sz=\"12\" w:space=\"6\" w:color=\"C9C9D6\"/></w:pBdr><w:spacing w:after=\"60\"/><w:ind w:left=\"240\"/></w:pPr>\
 <w:rPr><w:color w:val=\"4A4A57\"/><w:sz w:val=\"19\"/><w:szCs w:val=\"19\"/></w:rPr></w:style>\
@@ -547,13 +553,13 @@ pub(crate) fn docx(doc: &SessionDoc) -> Vec<u8> {
          </w:sectPr></w:body></w:document>",
         w_body(&blocks(doc))
     );
-    let gray = "<w:rPr><w:color w:val=\"8A8A99\"/><w:sz w:val=\"16\"/><w:szCs w:val=\"16\"/></w:rPr>";
+    // 흐린 작은 글씨는 문단 스타일(Footer)로 — Word 가 쪽 번호 칸을 다시 셀 때 칸 안 글씨 꾸밈을 버린다
     let footer = format!(
-        "{XML_HEAD}<w:ftr {W_NS}><w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr>\
-         <w:r>{gray}<w:t xml:space=\"preserve\">{}   </w:t></w:r>\
-         <w:fldSimple w:instr=\" PAGE \"><w:r>{gray}<w:t>1</w:t></w:r></w:fldSimple>\
-         <w:r>{gray}<w:t xml:space=\"preserve\"> / </w:t></w:r>\
-         <w:fldSimple w:instr=\" NUMPAGES \"><w:r>{gray}<w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>",
+        "{XML_HEAD}<w:ftr {W_NS}><w:p><w:pPr><w:pStyle w:val=\"Footer\"/></w:pPr>\
+         <w:r><w:t xml:space=\"preserve\">{}   </w:t></w:r>\
+         <w:fldSimple w:instr=\" PAGE \"><w:r><w:t>1</w:t></w:r></w:fldSimple>\
+         <w:r><w:t xml:space=\"preserve\"> / </w:t></w:r>\
+         <w:fldSimple w:instr=\" NUMPAGES \"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>",
         xml(title)
     );
     let core = format!(
@@ -904,7 +910,12 @@ mod tests {
         assert!(!body.contains('\u{1}'));
         assert!(body.contains("<w:pStyle w:val=\"Heading1\"/>"));
         assert!(body.contains("<w:numId w:val=\"1\"/>"));
-        assert!(body.contains("☑ ") || body.contains(">☑<"));
+        assert!(body.contains(">☑<"), "끝낸 할 일");
+        // 그림 문자는 맑은 고딕에 있는 기호로 (⭐ → ★, 코멘트 💬 → ※)
+        assert!(!body.contains('⭐') && !body.contains('💬'));
+        assert!(body.contains(">★ <") && body.contains(">※ <"));
+        let footer = &files.iter().find(|(n, _)| n == "word/footer1.xml").unwrap().1;
+        assert!(footer.contains("<w:pStyle w:val=\"Footer\"/>") && footer.contains(" PAGE "), "바닥글 쪽 번호");
         // 여는 · 닫는 태그 수가 맞다 (문단 · 표 · 행 · 칸)
         for tag in ["w:p", "w:tbl", "w:tr", "w:tc", "w:r"] {
             let open = body.matches(&format!("<{tag}>")).count() + body.matches(&format!("<{tag} ")).count();
