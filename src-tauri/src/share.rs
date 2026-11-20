@@ -313,15 +313,18 @@ pub fn due_date(text: &str, base: NaiveDate) -> Option<NaiveDate> {
             }
         }
     }
-    // 11월 25일 · 2027년 11월 25일 (연도가 적혀 있으면 그 해 — 27년은 2027년)
+    // `end` 바로 앞에 붙은 숫자 ("2027년" 의 2027 · "12월" 의 12)
+    let digits_before = |end: usize| -> Option<u32> {
+        let start = compact[..end].rfind(|c: char| !c.is_ascii_digit()).map_or(0, |j| j + compact[j..].chars().next().unwrap().len_utf8());
+        number(&compact[start..end]).map(|(n, _)| n)
+    };
+    // "2027년" 처럼 적힌 해 (두 자리면 2000년대 — 27년은 2027년)
+    let year_before = |end: usize| compact[..end].find('년').and_then(|y| digits_before(y)).map(|y| if y < 100 { 2000 + y } else { y });
+    // 11월 25일 · 2027년 11월 25일 (연도가 적혀 있으면 그 해)
     if let Some(i) = compact.find('월') {
-        let digits_before = |end: usize| -> Option<u32> {
-            let start = compact[..end].rfind(|c: char| !c.is_ascii_digit()).map_or(0, |j| j + compact[j..].chars().next().unwrap().len_utf8());
-            number(&compact[start..end]).map(|(n, _)| n)
-        };
         if let (Some(m), Some((d, rest))) = (digits_before(i), number(&compact[i + '월'.len_utf8()..])) {
             if rest.starts_with('일') {
-                let year = compact[..i].find('년').and_then(|y| digits_before(y)).map(|y| if y < 100 { 2000 + y } else { y });
+                let year = year_before(i);
                 return match year {
                     Some(y) => NaiveDate::from_ymd_opt(y as i32, m, d),
                     None => month_day(base, m, d),
@@ -370,8 +373,17 @@ pub fn due_date(text: &str, base: NaiveDate) -> Option<NaiveDate> {
             };
         }
     }
-    // 월말 · 말일 · 이번 달 말 · 다음 달 말
+    // 월말 · 말일 · 이번 달 말 · 다음 달 말 · 12월 말 · 2027년 1월 말일
     if compact.contains("월말") || compact.contains("말일") || compact.contains("달말") {
+        // 달이 적혀 있으면 그 달의 마지막 날 (해가 없으면 회의보다 일주일 넘게 앞일 때 다음 해)
+        if let Some(m) = compact.find('월').and_then(|i| Some((digits_before(i)?, i))) {
+            let (m, i) = m;
+            return match year_before(i) {
+                Some(y) => last_day(y as i32, m),
+                None => last_day(base.year(), m)
+                    .and_then(|d| if d < base - Duration::days(7) { last_day(base.year() + 1, m) } else { Some(d) }),
+            };
+        }
         return if compact.contains("다음달") {
             let (y, m) = if base.month() == 12 { (base.year() + 1, 1) } else { (base.year(), base.month() + 1) };
             last_day(y, m)
@@ -557,6 +569,10 @@ mod tests {
             ("일주일 내", "2026-11-26"),
             ("월말", "2026-11-30"),
             ("다음 달 말", "2026-12-31"),
+            ("12월 말", "2026-12-31"),
+            ("1월 말일", "2027-01-31"),
+            ("2027년 2월 말", "2027-02-28"),
+            ("이번 달 말일", "2026-11-30"),
             ("이번 주말", "2026-11-21"),
         ] {
             assert_eq!(due_date(text, base), Some(d(want)), "{text}");
