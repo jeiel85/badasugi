@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::io::Write as _;
 
-use crate::session::{fmt_dur, fmt_time, star_note, SessionDoc};
+use crate::session::{fmt_dur, fmt_time, star_note, SessionDoc, TrMode};
 use crate::share::{self, Kind};
 
 /// 화자 색 (화면 ui/app.js 의 `COLORS` 와 같은 차례)
@@ -59,6 +59,8 @@ pub(crate) enum Block {
     Turn { name: String, color: &'static str, time: String },
     /// 녹취록 문단 글
     Speech(String),
+    /// 녹취록 문단의 번역 (원문 · 번역 둘 다 낼 때 문단 아래)
+    Translated(String),
     /// 문장 코멘트 · 중요 표시: 아이콘, 메모에 적힌 시각, 글
     Note { icon: &'static str, time: String, text: String },
 }
@@ -231,8 +233,8 @@ fn summary_blocks(summary: &str, out: &mut Vec<Block>) {
     }
 }
 
-/// 회의 기록 → 문서 블록
-pub(crate) fn blocks(doc: &SessionDoc) -> Vec<Block> {
+/// 회의 기록 → 문서 블록. `tr`: 녹취록을 원문 · 번역 · 둘 다 (번역이 없는 문단은 원문)
+pub(crate) fn blocks(doc: &SessionDoc, tr: TrMode) -> Vec<Block> {
     let mut out = vec![Block::Title(if doc.title.trim().is_empty() { "회의록".into() } else { doc.title.clone() })];
 
     // 참석: 말한 차례로, 합친 화자는 하나로
@@ -307,10 +309,20 @@ pub(crate) fn blocks(doc: &SessionDoc) -> Vec<Block> {
     if !paras.is_empty() {
         out.push(Block::H1("녹취록".into()));
     }
+    let trs = if tr == TrMode::Orig { Default::default() } else { doc.tr_map() };
+    let orig = doc.orig_map();
     for (spk, start, _, text, ids) in paras {
         let color = doc.resolve(spk).map_or(NO_SPEAKER, |n| COLORS[n as usize % COLORS.len()]);
         out.push(Block::Turn { name: doc.speaker_name(spk), color, time: fmt_time(start) });
-        out.push(Block::Speech(text));
+        match (tr, SessionDoc::tr_join(&trs, &ids)) {
+            // 번역 안 된 문장은 원문으로 채운다 (문단 일부만 번역됐어도 문장이 빠지지 않게)
+            (TrMode::Tr, Some(_)) => out.push(Block::Speech(SessionDoc::tr_only(&trs, &orig, &ids))),
+            (TrMode::Both, Some(t)) => {
+                out.push(Block::Speech(text));
+                out.push(Block::Translated(t));
+            }
+            _ => out.push(Block::Speech(text)),
+        }
         for id in ids {
             for c in comments.get(&id).into_iter().flatten() {
                 let (icon, text) = match star_note(&c.text) {
@@ -461,6 +473,9 @@ fn w_body(blocks: &[Block]) -> String {
                 ),
             )),
             Block::Speech(t) => s.push_str(&w_p("<w:pStyle w:val=\"Speech\"/>", &w_runs(&[Run::plain(t.clone())], ""))),
+            Block::Translated(t) => {
+                s.push_str(&w_p("<w:pStyle w:val=\"Translated\"/>", &w_runs(&[Run::plain(format!("→ {t}"))], "")))
+            }
             Block::Note { icon, time, text } => s.push_str(&w_p(
                 "<w:pStyle w:val=\"Note\"/>",
                 &w_runs(&[Run::plain(format!("{} ", if *icon == "⭐" { "★" } else { "※" })), Run::time(time.clone()), Run::plain(format!("  {text}"))], ""),
@@ -522,6 +537,8 @@ const STYLES: &str = "<w:docDefaults>\
 <w:pPr><w:spacing w:after=\"60\"/></w:pPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"Footer\"><w:name w:val=\"footer\"/><w:basedOn w:val=\"Normal\"/>\
 <w:pPr><w:spacing w:after=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:rPr><w:color w:val=\"8A8A99\"/><w:sz w:val=\"16\"/><w:szCs w:val=\"16\"/></w:rPr></w:style>\
+<w:style w:type=\"paragraph\" w:customStyle=\"1\" w:styleId=\"Translated\"><w:name w:val=\"Translation\"/><w:basedOn w:val=\"Normal\"/>\
+<w:pPr><w:spacing w:after=\"80\"/></w:pPr><w:rPr><w:color w:val=\"3F5A9E\"/><w:sz w:val=\"19\"/><w:szCs w:val=\"19\"/></w:rPr></w:style>\
 <w:style w:type=\"paragraph\" w:customStyle=\"1\" w:styleId=\"Note\"><w:name w:val=\"Comment Note\"/><w:basedOn w:val=\"Normal\"/>\
 <w:pPr><w:pBdr><w:left w:val=\"single\" w:sz=\"12\" w:space=\"6\" w:color=\"C9C9D6\"/></w:pBdr><w:spacing w:after=\"60\"/><w:ind w:left=\"240\"/></w:pPr>\
 <w:rPr><w:color w:val=\"4A4A57\"/><w:sz w:val=\"19\"/><w:szCs w:val=\"19\"/></w:rPr></w:style>\
@@ -544,14 +561,14 @@ const NUMBERING: &str = "<w:abstractNum w:abstractNumId=\"0\"><w:multiLevelType 
 </w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>";
 
 /// Word 문서 파일 (.docx)
-pub(crate) fn docx(doc: &SessionDoc) -> Vec<u8> {
+pub(crate) fn docx(doc: &SessionDoc, tr: TrMode) -> Vec<u8> {
     let title = if doc.title.trim().is_empty() { "회의록" } else { doc.title.as_str() };
     let document = format!(
         "{XML_HEAD}<w:document {W_NS}><w:body>{}<w:sectPr><w:footerReference w:type=\"default\" r:id=\"rId3\"/>\
          <w:pgSz w:w=\"11906\" w:h=\"16838\"/>\
          <w:pgMar w:top=\"1304\" w:right=\"1304\" w:bottom=\"1304\" w:left=\"1304\" w:header=\"680\" w:footer=\"567\" w:gutter=\"0\"/>\
          </w:sectPr></w:body></w:document>",
-        w_body(&blocks(doc))
+        w_body(&blocks(doc, tr))
     );
     // 흐린 작은 글씨는 문단 스타일(Footer)로 — Word 가 쪽 번호 칸을 다시 셀 때 칸 안 글씨 꾸밈을 버린다
     let footer = format!(
@@ -661,9 +678,9 @@ fn h_runs(runs: &[Run]) -> String {
 }
 
 /// 인쇄용 HTML (화면의 `#print-doc` 에 넣는다 — 꾸밈은 ui/style.css 의 `.pd`)
-pub(crate) fn html(doc: &SessionDoc) -> String {
+pub(crate) fn html(doc: &SessionDoc, tr: TrMode) -> String {
     let mut s = String::from("<article class=\"pd\">");
-    for b in blocks(doc) {
+    for b in blocks(doc, tr) {
         match b {
             Block::Title(t) => s.push_str(&format!("<h1 class=\"pd-title\">{}</h1>", esc(&t))),
             Block::Meta(rows) => {
@@ -712,6 +729,7 @@ pub(crate) fn html(doc: &SessionDoc) -> String {
                 esc(&time)
             )),
             Block::Speech(t) => s.push_str(&format!("<p class=\"pd-sp\">{}</p>", esc(&t))),
+            Block::Translated(t) => s.push_str(&format!("<p class=\"pd-tr\">🌐 {}</p>", esc(&t))),
             Block::Note { icon, time, text } => s.push_str(&format!(
                 "<div class=\"pd-note\">{icon} <span class=\"pd-t\">{}</span> {}</div>",
                 esc(&time),
@@ -826,7 +844,7 @@ mod tests {
 
     #[test]
     fn summary_sections_and_todo_table() {
-        let b = blocks(&doc());
+        let b = blocks(&doc(), TrMode::Orig);
         assert_eq!(b[0], Block::Title("앱 <출시> & 일정".into()));
         let Block::Meta(meta) = &b[1] else { panic!("메타") };
         assert!(meta.contains(&("참석".into(), "화자 1 · 김 팀장  (2명)".into())), "{meta:?}");
@@ -857,7 +875,7 @@ mod tests {
 
     #[test]
     fn transcript_comments_memo_and_stats() {
-        let b = blocks(&doc());
+        let b = blocks(&doc(), TrMode::Orig);
         // 메모 칸에는 코멘트가 아닌 줄만
         let memo = b.iter().position(|x| *x == Block::H1("메모".into())).expect("메모");
         assert_eq!(b[memo + 1], Block::Para(vec![Run::plain("준비물: 노트북")]));
@@ -898,7 +916,7 @@ mod tests {
 
     #[test]
     fn docx_is_a_zip_with_word_parts() {
-        let files = unzip(&docx(&doc()));
+        let files = unzip(&docx(&doc(), TrMode::Orig));
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names[0], "[Content_Types].xml");
         for need in ["_rels/.rels", "word/document.xml", "word/styles.xml", "word/numbering.xml", "word/footer1.xml"] {
@@ -925,12 +943,12 @@ mod tests {
         }
         assert!(body.ends_with("</w:sectPr></w:body></w:document>"));
         // 같은 회의는 늘 같은 파일
-        assert_eq!(docx(&doc()), docx(&doc()));
+        assert_eq!(docx(&doc(), TrMode::Orig), docx(&doc(), TrMode::Orig));
     }
 
     #[test]
     fn html_is_escaped() {
-        let h = html(&doc());
+        let h = html(&doc(), TrMode::Orig);
         assert!(h.starts_with("<article class=\"pd\">") && h.ends_with("</article>"));
         assert!(h.contains("<h1 class=\"pd-title\">앱 &lt;출시&gt; &amp; 일정</h1>"));
         assert!(h.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
@@ -942,12 +960,45 @@ mod tests {
     }
 
     #[test]
+    fn transcript_with_translation() {
+        let mut d = doc();
+        crate::translate::merge(
+            &mut d.translation,
+            "en",
+            vec![
+                (1, crate::translate::TrItem { src: "시작하겠습니다.".into(), text: "Let's begin.".into() }),
+                // 원문이 바뀐 문장의 번역은 쓰지 않는다
+                (2, crate::translate::TrItem { src: "결제 모듈은 목요일까지.".into(), text: "By Thursday.".into() }),
+            ],
+        );
+        let speech = |b: &[Block]| -> Vec<Block> {
+            b.iter().filter(|x| matches!(x, Block::Speech(_) | Block::Translated(_))).cloned().collect()
+        };
+        let both = speech(&blocks(&d, TrMode::Both));
+        assert_eq!(both[0], Block::Speech("시작하겠습니다. 결제 모듈은 금요일까지.".into()));
+        assert_eq!(both[1], Block::Translated("Let's begin.".into()));
+        assert!(matches!(both[2], Block::Speech(_)), "번역이 없는 문단은 원문만");
+        // 번역만: 번역 안 된(낡은) 문장은 원문으로 채운다 — 문단 일부만 번역돼도 문장이 빠지지 않게
+        let tr = speech(&blocks(&d, TrMode::Tr));
+        assert_eq!(tr[0], Block::Speech("Let's begin. 결제 모듈은 금요일까지.".into()));
+        assert_eq!(tr.len(), 2);
+        assert!(html(&d, TrMode::Both).contains("<p class=\"pd-tr\">🌐 Let's begin.</p>"));
+        assert_eq!(speech(&blocks(&d, TrMode::Orig)).len(), 2, "원문만");
+        // Markdown · 텍스트 · 자막도
+        assert!(d.markdown(TrMode::Both).contains("시작하겠습니다. 결제 모듈은 금요일까지.\n\n🌐 Let's begin.\n\n"));
+        assert!(d.text(TrMode::Tr).starts_with("[00:01] 화자 1: Let's begin. 결제 모듈은 금요일까지.\n"));
+        assert!(d.markdown(TrMode::Tr).contains("  \nLet's begin. 결제 모듈은 금요일까지.\n\n"));
+        assert!(d.srt(TrMode::Both).contains("화자 1: 시작하겠습니다.\nLet's begin.\n\n"));
+        assert!(d.srt(TrMode::Both).contains("화자 1: 결제 모듈은 금요일까지.\n\n"), "낡은 번역은 싣지 않는다");
+    }
+
+    #[test]
     fn empty_meeting_still_makes_a_document() {
         let d: SessionDoc = serde_json::from_value(json!({ "version": 1, "id": "x", "title": "" })).unwrap();
-        let b = blocks(&d);
+        let b = blocks(&d, TrMode::Orig);
         assert_eq!(b[0], Block::Title("회의록".into()));
         assert_eq!(b.len(), 2, "제목 · 메타만");
-        let files = unzip(&docx(&d));
+        let files = unzip(&docx(&d, TrMode::Orig));
         assert!(files.iter().any(|(n, t)| n == "word/document.xml" && t.contains("<w:p/><w:sectPr>")));
     }
 }

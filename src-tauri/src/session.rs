@@ -69,6 +69,28 @@ pub struct SessionDoc {
     /// 회의에 묻고 받은 답 (오래된 것부터). 앱만 고친다 — 화면 사본을 저장할 때는 저장된 것을 지킨다
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub qa: Vec<QaItem>,
+    /// 문장 번역 (녹음 중 실시간 번역 · 번역 단추). 앱만 고친다 — 화면 사본을 저장할 때는 저장된 것을 지킨다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation: Option<crate::translate::Translation>,
+}
+
+/// 내보내기의 녹취록 — 원문 · 번역 · 둘 다 (번역이 없는 문장은 원문)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrMode {
+    #[default]
+    Orig,
+    Tr,
+    Both,
+}
+
+impl TrMode {
+    pub fn parse(s: Option<&str>) -> Self {
+        match s {
+            Some("tr") => TrMode::Tr,
+            Some("both") => TrMode::Both,
+            _ => TrMode::Orig,
+        }
+    }
 }
 
 /// 묻고 답한 것 하나를 내용으로 찾아 지운다 (없으면 그대로). `item` 이 없으면 모두
@@ -746,6 +768,41 @@ impl SessionDoc {
     }
 
     pub fn to_markdown(&self) -> String {
+        self.markdown(TrMode::Orig)
+    }
+
+    /// 문장 id → 지금 원문에 맞는 번역
+    pub(crate) fn tr_map(&self) -> HashMap<u64, &str> {
+        let Some(t) = self.translation.as_ref() else {
+            return HashMap::new();
+        };
+        self.utterances.iter().filter_map(|u| Some((u.id, t.get(u.id, &u.text)?))).collect()
+    }
+
+    /// 문장들의 번역 — 번역된 문장만 빈칸으로 잇는다. 하나도 없으면 None ("둘 다" 의 문단 아래 줄)
+    pub(crate) fn tr_join(map: &HashMap<u64, &str>, ids: &[u64]) -> Option<String> {
+        let parts: Vec<&str> = ids.iter().filter_map(|id| map.get(id).copied()).filter(|t| !t.trim().is_empty()).collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+
+    /// 문장 id → 원문
+    pub(crate) fn orig_map(&self) -> HashMap<u64, &str> {
+        self.utterances.iter().map(|u| (u.id, u.text.as_str())).collect()
+    }
+
+    /// "번역만" 의 문단 글 — 문장마다 번역, 번역이 없는 문장(멈춘 번역 · 빠진 번호 · 고친 문장)은 원문으로 채운다
+    pub(crate) fn tr_only(tr: &HashMap<u64, &str>, orig: &HashMap<u64, &str>, ids: &[u64]) -> String {
+        ids.iter()
+            .filter_map(|id| tr.get(id).copied().filter(|t| !t.trim().is_empty()).or_else(|| orig.get(id).copied()))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Markdown 회의록 — `mode`: 녹취록을 원문 · 번역 · 둘 다(문단 아래 🌐 번역)
+    pub fn markdown(&self, mode: TrMode) -> String {
+        let tr = if mode == TrMode::Orig { HashMap::new() } else { self.tr_map() };
         let mut s = format!("# {}\n\n", self.title);
         let (memo, by_id) = self.memo_and_comments();
         s.push_str(&format!(
@@ -774,8 +831,17 @@ impl SessionDoc {
         }
         s.push_str(&self.stats_markdown());
         s.push_str("## 녹취록\n\n");
+        let orig = self.orig_map();
         for (spk, start, _, text, ids) in self.paragraphs() {
-            s.push_str(&format!("**{}** `{}`  \n{}\n\n", self.speaker_name(spk), fmt_time(start), text));
+            let t = Self::tr_join(&tr, &ids);
+            let body = match (mode, &t) {
+                (TrMode::Tr, Some(_)) => Self::tr_only(&tr, &orig, &ids),
+                _ => text,
+            };
+            s.push_str(&format!("**{}** `{}`  \n{}\n\n", self.speaker_name(spk), fmt_time(start), body));
+            if let (TrMode::Both, Some(t)) = (mode, &t) {
+                s.push_str(&format!("🌐 {t}\n\n"));
+            }
             // 문단 안 문장에 붙는 코멘트는 문단 바로 아래 인용으로 (메모에 적힌 시각을 붙여, 문장 순서 · 시각 순으로)
             for id in ids {
                 let Some(list) = by_id.get(&id) else {
@@ -796,9 +862,24 @@ impl SessionDoc {
     }
 
     pub fn to_text(&self) -> String {
+        self.text(TrMode::Orig)
+    }
+
+    /// 텍스트 녹취록 — `mode`: 원문 · 번역 · 둘 다(줄 아래 "  ↳ 번역")
+    pub fn text(&self, mode: TrMode) -> String {
+        let tr = if mode == TrMode::Orig { HashMap::new() } else { self.tr_map() };
+        let orig = self.orig_map();
         let mut s = String::new();
-        for (spk, start, _, text, _) in self.paragraphs() {
-            s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), text));
+        for (spk, start, _, text, ids) in self.paragraphs() {
+            let t = Self::tr_join(&tr, &ids);
+            let body = match (mode, &t) {
+                (TrMode::Tr, Some(_)) => Self::tr_only(&tr, &orig, &ids),
+                _ => text,
+            };
+            s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), body));
+            if let (TrMode::Both, Some(t)) = (mode, &t) {
+                s.push_str(&format!("  ↳ {t}\n"));
+            }
         }
         s
     }
@@ -909,7 +990,9 @@ impl SessionDoc {
         s
     }
 
-    pub fn to_srt(&self) -> String {
+    /// 자막 — `mode`: 원문 · 번역 · 둘 다(원문 줄 아래 번역 줄, 두 줄 자막)
+    pub fn srt(&self, mode: TrMode) -> String {
+        let tr = if mode == TrMode::Orig { HashMap::new() } else { self.tr_map() };
         fn ts(ms: u64) -> String {
             format!(
                 "{:02}:{:02}:{:02},{:03}",
@@ -921,13 +1004,19 @@ impl SessionDoc {
         }
         let mut s = String::new();
         for (i, u) in self.utterances.iter().enumerate() {
+            let t = tr.get(&u.id).copied().filter(|t| !t.trim().is_empty());
+            let body = match (mode, t) {
+                (TrMode::Tr, Some(t)) => t.to_string(),
+                (TrMode::Both, Some(t)) => format!("{}\n{t}", u.text),
+                _ => u.text.clone(),
+            };
             s.push_str(&format!(
                 "{}\n{} --> {}\n{}: {}\n\n",
                 i + 1,
                 ts(u.start_ms),
                 ts(u.end_ms),
                 self.speaker_name(u.speaker),
-                u.text
+                body
             ));
         }
         s
@@ -1149,6 +1238,8 @@ impl SessionStore {
         let mut doc = doc;
         // 묻고 답한 것은 앱만 고친다 — 묻는 동안 늦게 도착한 화면 사본이 새 답을 지우지 않게
         doc.qa = old.qa.clone();
+        // 번역도 앱만 고친다 (번역하는 동안 늦게 도착한 화면 사본이 새 번역을 지우지 않게)
+        doc.translation = old.translation.clone();
         if doc.speaker_rev < old.speaker_rev {
             // 화자 다시 정리 전에 만든 화면 사본이 늦게 저장됨: 화자 배정 · 이름은 저장된(정리된) 것을 지키고
             // 제목 · 글자 · 삭제만 반영한다
@@ -1180,6 +1271,29 @@ impl SessionStore {
         }
         write_doc(&self.dir, &doc)?;
         Ok(doc)
+    }
+
+    /// 번역을 고쳐 저장한다 (녹음 중인 기록이면 그 기록에) → 고친 뒤의 번역
+    pub fn update_translation(
+        &mut self,
+        id: &str,
+        f: impl FnOnce(&mut Option<crate::translate::Translation>),
+    ) -> Result<Option<crate::translate::Translation>> {
+        if let Some(cur) = self.current.as_mut().filter(|c| c.id == id) {
+            f(&mut cur.translation);
+            let t = cur.translation.clone();
+            self.dirty = true;
+            self.flush_any()?;
+            return Ok(t);
+        }
+        let path = self.json_path(safe_id(id)?);
+        let mut doc: SessionDoc = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .ok_or_else(|| anyhow!("지운 기록이에요"))?;
+        f(&mut doc.translation);
+        write_doc(&self.dir, &doc)?;
+        Ok(doc.translation)
     }
 
     /// 묻고 답한 목록을 고쳐 저장한다 (녹음 중인 기록이면 그 기록에)
@@ -1695,6 +1809,33 @@ mod tests {
         assert_eq!(store.load(&d.id).unwrap().qa, vec![next]);
         store.update_qa(&d.id, |qa| remove_qa(qa, None)).unwrap();
         assert!(store.load(&d.id).unwrap().qa.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 번역도 앱만 고친다 — 번역 전에 만든 화면 사본이 늦게 저장돼도 번역이 남고, 지우기는 번역만
+    #[test]
+    fn translation_survives_stale_screen_copies() {
+        let dir = std::env::temp_dir().join(format!("bd-tr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-20_100000".into();
+        d.utterances = vec![u(0, 0, 0)];
+        write_doc(&dir, &d).unwrap();
+        let mut store = SessionStore::new(dir.clone());
+        let screen = store.load(&d.id).unwrap();
+        let src = d.utterances[0].text.trim().to_string();
+        let item = crate::translate::TrItem { src, text: "Hello".into() };
+        let t = store.update_translation(&d.id, |t| crate::translate::merge(t, "en", vec![(0, item.clone())])).unwrap();
+        assert_eq!(t.as_ref().map(|t| t.items.len()), Some(1));
+        let mut late = screen;
+        late.notes = "메모".into();
+        store.save_doc(late).unwrap();
+        let saved = store.load(&d.id).unwrap();
+        assert_eq!(saved.notes, "메모");
+        assert_eq!(saved.translation.as_ref().and_then(|t| t.items.get(&0)), Some(&item));
+        store.update_translation(&d.id, |t| *t = None).unwrap();
+        let cleared = store.load(&d.id).unwrap();
+        assert!(cleared.translation.is_none() && cleared.notes == "메모" && cleared.utterances.len() == 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
