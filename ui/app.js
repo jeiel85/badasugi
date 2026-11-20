@@ -1039,6 +1039,16 @@ function applyWatchSummary(e) {
   }
   if (doc()?.id === e.id) { renderMeta(); scheduleRender(); }
 }
+// 녹음을 시작한 뒤 Outlook 일정에서 가져온 제목 · 참석자 — 화면 사본도 고쳐 둔다 (화면이 저장할 때 옛 제목으로 덮지 않게)
+function onCalendar(e) {
+  const d = S.liveDoc;
+  if (!d || d.id !== e.id) return;
+  d.title = e.title;
+  d.autoTitle = !!e.autoTitle;
+  d.attendees = e.attendees || [];
+  renderMeta();
+  toast(`일정 '${e.subject}'에서 제목을 가져왔어요${d.attendees.length ? ` · 화자 이름을 바꿀 때 참석자 ${d.attendees.length}명 중에서 고를 수 있어요` : ''}`, '', 5000);
+}
 function onWatch(e) {
   const end = () => {
     S.watchJob = null;
@@ -1154,7 +1164,10 @@ function startRename(spk) {
   if (!d || spk === '' || spk == null) return;
   const chip = $(`.spk-chip[data-spk="${spk}"]`);
   if (!chip) return;
-  chip.innerHTML = `<i></i><input value="${esc(speakerName(d, +spk))}" />`;
+  // 일정에서 가져온 참석자 중 아직 쓰지 않은 이름을 후보로 (입력 칸을 누르거나 쓰기 시작하면 보인다)
+  const used = new Set(Object.values(d.speakers || {}));
+  $('#spk-names').innerHTML = (d.attendees || []).filter((n) => !used.has(n)).map((n) => `<option value="${esc(n)}"></option>`).join('');
+  chip.innerHTML = `<i></i><input value="${esc(speakerName(d, +spk))}" list="spk-names" />`;
   const inp = chip.querySelector('input');
   inp.focus();
   inp.select();
@@ -4209,6 +4222,8 @@ function renderSettings() {
   $('#opt-autoupdate').checked = s.autoUpdate;
   $('#opt-meet').checked = !!s.meetingAlert;
   renderMeetApps();
+  $('#opt-calendar').checked = !!s.calendar;
+  renderCalendar();
   $('#opt-dictate').checked = !!s.dictation;
   $('#opt-dictate-insert').value = s.dictationInsert === 'type' ? 'type' : 'paste';
   $('#opt-dictate-polish').checked = !!s.dictationPolish;
@@ -4237,6 +4252,27 @@ function renderMeetApps() {
 function renderDictate() {
   const on = !!S.settings?.dictation;
   for (const id of ['dictate-hotkey-row', 'dictate-insert-row', 'dictate-polish-row', 'dictate-desc']) $(`#${id}`).hidden = !on;
+}
+// 설정 › 일정에서 가져오기: 지금 Outlook 상태 (켜 두지 않았어도 — 켤 수 있는지 보이게)
+let calReq = 0;
+async function renderCalendar() {
+  const box = $('#cal-status');
+  const my = ++calReq;
+  let st = null;
+  try { st = await api.invoke('calendar_status'); } catch { /* 비움 */ }
+  if (my !== calReq || !st) { if (my === calReq) box.hidden = true; return; }
+  const ev = (e) => `<b>${esc(e.subject || '(제목 없음)')}</b> ${esc(String(e.start).slice(11))}~${esc(String(e.end).slice(11))}${e.attendees?.length ? ` · 참석자 ${e.attendees.length}명` : ''}`;
+  let html;
+  if (st.kind === 'noOutlook') html = '<span class="warn">클래식 Outlook 이 없어요 — 새 Outlook 은 다른 앱이 일정을 읽을 수 없어 이 기능을 쓸 수 없어요</span>';
+  else if (st.kind === 'notRunning') html = 'Outlook 이 꺼져 있어요 — 켜져 있을 때만 일정을 읽어요 (받아쓰기가 Outlook 을 띄우지는 않아요)';
+  else if (st.kind === 'error') html = `<span class="warn">${esc(st.message)}</span>`;
+  else {
+    const parts = [st.now ? `지금 일정: ${ev(st.now)}` : '지금 시각에 맞는 일정이 없어요', st.next ? `다음 일정: ${ev(st.next)}` : ''];
+    if (!st.trusted) parts.push('Outlook 이 바깥 프로그램을 믿지 않는 상태라(백신 · 회사 정책) 보안 경고가 뜨지 않게 참석자는 읽지 않아요');
+    html = parts.filter(Boolean).join('<br>');
+  }
+  box.innerHTML = html;
+  box.hidden = false;
 }
 // 설정 › 녹음 폴더 지켜보기: 폴더 · 지금 상태 (받아 적는 중 · 기다리는 파일 · 받아 적은 파일)
 const shortPath = (p) => {
@@ -4580,6 +4616,11 @@ $('#btn-watch-dir').addEventListener('click', async () => {
   setTimeout(renderWatch, 900);
 });
 bind('opt-watch-sum', (t) => (S.settings.watchSummarize = t.checked));
+bind('opt-calendar', (t) => {
+  S.settings.calendar = t.checked;
+  renderCalendar();
+  if (t.checked) toast('녹음을 시작할 때 지금 Outlook 일정의 제목 · 참석자를 가져와요', '', 4000);
+});
 $('#meet-apps').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-app]');
   if (!b) return;
@@ -4777,6 +4818,7 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://star', () => addStar());
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await api.listen('bd://watch', (e) => onWatch(e.payload || {}));
+  await api.listen('bd://calendar', (e) => onCalendar(e.payload || {}));
   await refreshState();
   loadTemplates();
   syncMaxed();
@@ -4938,7 +4980,7 @@ function createMock() {
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
       meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
-      watchFolder: false, watchDir: '', watchSummarize: true,
+      watchFolder: false, watchDir: '', watchSummarize: true, calendar: false,
       dictation: false, dictationHotkey: 'Ctrl+Alt+Space', dictationInsert: 'paste', dictationPolish: false,
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '', template: 'meeting', templates: [] },
@@ -4991,6 +5033,7 @@ function createMock() {
       };
       if (cmd === 'session_audio') return demoWavUrl();
       if (cmd === 'list_voices') return mockVoices;
+      if (cmd === 'calendar_status') return { kind: 'ready', trusted: true, now: { subject: '주간 개발 회의', start: '2026-11-20 14:00', end: '2026-11-20 15:00', attendees: ['김 팀장', '이 개발', '박 디자인'] }, next: { subject: '고객사 미팅', start: '2026-11-20 16:00', end: '2026-11-20 17:00', attendees: [] } };
       if (cmd === 'watch_status') return { on: st.settings.watchFolder, problem: null, working: null, waiting: 1, done: 3, skipped: 12, stopped: 0, failed: 0, last: { state: 'done', name: '음성 메모 2026-11-20 0930.m4a', at: '2026-11-20 10:02', doc: 's4' } };
       if (cmd === 'forget_voice') { mockVoices = mockVoices.filter((v) => v.name !== args.name); return; }
       if (cmd === 'forget_all_voices') { mockVoices = []; return; }

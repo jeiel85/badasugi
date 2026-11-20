@@ -239,6 +239,7 @@
       <div class="mini-cap" id="mini-cap"></div>
     </footer>
 
+    <datalist id="spk-names"></datalist>
     <!-- 팝오버 메뉴 -->
     <div class="popover" id="pop-source" hidden>
       <button data-source="mic"><svg><use href="#i-mic"/></svg><div><b>마이크</b><small>대면 회의 · 내 목소리</small></div></button>
@@ -549,7 +550,9 @@
               <div class="field" id="meet-apps-field" hidden><span>지켜볼 앱 <small>브라우저 = Google Meet 같은 웹 회의</small></span>
                 <div class="meet-apps" id="meet-apps" role="group" aria-label="지켜볼 앱"></div>
               </div>
+              <label class="row"><span>Outlook 일정에서 제목 · 참석자 가져오기<small>녹음을 시작할 때 지금 일정의 제목을 회의 제목으로, 참석자를 화자 이름 후보로 써요 · 켜져 있는 클래식 Outlook 만 읽고, 로그인이 필요 없어요</small></span><input type="checkbox" class="switch" id="opt-calendar" /></label>
             </div>
+            <p class="desc cal-status" id="cal-status" hidden></p>
           </section>
 
           <section>

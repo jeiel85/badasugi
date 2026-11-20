@@ -44,6 +44,8 @@ pub struct Settings {
     pub meeting_alert: bool,
     /// 회의 시작 알림이 지켜볼 앱 (meeting::MATCHERS 의 id)
     pub meeting_apps: Vec<String>,
+    /// 일정에서 회의 제목 · 참석자 가져오기 — 켜져 있는 클래식 Outlook 의 일정을 읽는다 (calendar.rs)
+    pub calendar: bool,
     /// 녹음 폴더 지켜보기 — 폴더에 새로 생긴 녹음 파일을 알아서 받아 적는다 (watch.rs)
     pub watch_folder: bool,
     /// 지켜볼 폴더 (휴대폰 녹음 · 녹음기 파일이 쌓이는 OneDrive 폴더 등)
@@ -170,6 +172,7 @@ impl Default for Settings {
             always_on_top: false,
             meeting_alert: false,
             meeting_apps: crate::meeting::default_apps(),
+            calendar: false,
             watch_folder: false,
             watch_dir: String::new(),
             watch_summarize: true,

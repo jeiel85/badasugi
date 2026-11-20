@@ -251,6 +251,28 @@ fn dictate_check(app: &AppHandle, c: &mut Checks, expect_first: Option<&str>) {
     }
 }
 
+/// Outlook 이 지금 떠 있나 (작업 관리자의 OUTLOOK.EXE)
+fn outlook_running() -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq OUTLOOK.EXE", "/NH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("outlook.exe"))
+        .unwrap_or(false)
+}
+
+/// 일정에서 가져오기: 꺼져 있는 Outlook 을 띄우지 않는다 (Outlook 이 켜져 있으면 읽기만 본다)
+fn calendar_check(app: &AppHandle, c: &mut Checks) {
+    let before = outlook_running();
+    let st = app.state::<crate::calendar::Calendar>().run(crate::calendar::read_now);
+    std::thread::sleep(Duration::from_secs(3));
+    let after = outlook_running();
+    c.add(
+        "일정: Outlook 을 띄우지 않음",
+        before || !after,
+        format!("{st:?} · Outlook 실행 {before} → {after}"),
+    );
+}
+
 /// 조건이 맞을 때까지 기다린다 (시간 안에 맞으면 true)
 fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
     let t = Instant::now();
@@ -590,6 +612,9 @@ fn run(app: &AppHandle, c: &mut Checks) {
 
     // ── 2-4. 말로 입력 ──
     dictate_check(app, c, expect.first().map(String::as_str));
+
+    // ── 2-5. 일정(Outlook): 꺼져 있으면 띄우지 않고 건너뛴다 ──
+    calendar_check(app, c);
 
     // ── 3. 진단 로그가 남는지 ──
     let logs = crate::logging::log_dir();
