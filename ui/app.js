@@ -2075,7 +2075,8 @@ async function openShare(anchor) {
   const d = doc();
   const pop = $('#pop-share');
   if (!pop.hidden) { hidePopovers(); return; }
-  if (!d?.summary || S.summarizing || S.sumEdit?.doc === d) return;
+  // 요약하는 중인 그 회의 · 고치는 중인 요약만 막는다 (다른 회의를 요약하는 동안에도 이 회의는 보낼 수 있게)
+  if (!d?.summary || (S.summarizing && S.sumId === d.id) || S.sumEdit?.doc === d) return;
   flushSaves();
   let info = { todos: 0, dated: 0 };
   try { info = await api.invoke('share_info', { id: d.id }); } catch { /* 할 일 수만 모른다 */ }
