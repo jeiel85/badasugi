@@ -2918,11 +2918,13 @@ async function askAll(question) {
   S.allTimer = setInterval(renderAllPending, 1000);
   renderAllAsk();
   try {
-    // 앞선 질문 · 답과 그때 실은 회의 — 앱이 답의 "회의 2" 를 회의 이름으로 바꿔 보내고 그 회의들을 다시 싣는다
-    // (물을 때마다 회의를 다시 골라 번호가 바뀐다). 앱은 최근 4개를 보내되, 그 첫 질문의 번호를 읽으려고 하나 더
-    const history = S.allQa.slice(-5).map((x) => ({ q: x.q, a: x.a, sources: x.sources }));
+    // 앞선 질문 · 답과 그때 실은 회의 — 앱이 "회의 2" 를 회의 이름으로 바꿔 보내고 바로 앞 답의 회의를 다시 싣는다
+    // (물을 때마다 회의를 다시 골라 번호가 바뀐다). 질문의 번호는 물을 때 보던 앞 답의 회의(qSources)로 —
+    // 앞 답을 지워도 질문이 가리키던 회의가 바뀌지 않게 질문과 함께 기억해 둔다
+    const qSources = S.allQa.at(-1)?.sources || [];
+    const history = S.allQa.slice(-4).map((x) => ({ q: x.q, a: x.a, sources: x.sources, qSources: x.qSources || [] }));
     const r = await api.invoke('ask_all', { question: q, token: my.token, days: days || null, history });
-    S.allQa.push({ q, a: r.a, sources: r.sources || [], considered: r.considered, recent: r.recent, at: r.at, model: r.model, days });
+    S.allQa.push({ q, qSources, a: r.a, sources: r.sources || [], considered: r.considered, recent: r.recent, at: r.at, model: r.model, days });
   } catch (e) {
     const msg = String(e);
     if (msg !== ASK_CANCELLED) toast(msg, 'error');

@@ -46,11 +46,15 @@ pub struct Source {
 
 /// 이 대화에서 앞서 묻고 받은 것 (그때 실은 회의와 함께)
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Past {
     pub q: String,
     pub a: String,
+    /// 이 답에 실은 회의 (답의 "회의 N")
     pub sources: Vec<Source>,
+    /// 이 질문을 할 때 바로 앞 답에 실었던 회의 (질문의 "회의 N") — 물을 때 화면이 함께 기억해 둔다
+    /// (앞 답을 지워도 질문이 가리키던 회의가 바뀌지 않게)
+    pub q_sources: Vec<Source>,
 }
 
 /// 받은 답
@@ -240,13 +244,10 @@ fn ask_all_with(
     let keep: Vec<&str> = last_sources.iter().map(|s| s.id.as_str()).collect();
     let asked = name_refs(question, last_sources);
     let question = asked.as_str();
-    // 앞선 질문의 번호는 그 질문 바로 앞 답의 번호, 답의 번호는 그 답의 번호
-    let start = past.len().saturating_sub(HISTORY);
-    let past: Vec<(String, String)> = (start..past.len())
-        .map(|k| {
-            let before: &[Source] = if k > 0 { &past[k - 1].sources } else { &[] };
-            (clip(&name_refs(&past[k].q, before), 500), clip(&name_refs(&past[k].a, &past[k].sources), 1_500))
-        })
+    // 앞선 질문의 번호는 그 질문을 할 때 앞 답에 실었던 회의, 답의 번호는 그 답에 실은 회의
+    let past: Vec<(String, String)> = recent_past
+        .iter()
+        .map(|p| (clip(&name_refs(&p.q, &p.q_sources), 500), clip(&name_refs(&p.a, &p.sources), 1_500)))
         .collect();
     // 회의를 고를 때는 바로 앞 질문도 함께 본다 ("그중 기한 있는 것만")
     let query = match past.last() {
@@ -391,7 +392,7 @@ mod tests {
             t("월 12만 원 [회의 2 · 00:00]");
             Ok(Reply { text: "월 12만 원 [회의 2 · 00:00]".into(), model: "m".into(), ..Default::default() })
         };
-        let past = vec![Past { q: "VPN 은 언제 도입했어?".into(), a: "11월 [회의 1]".into(), sources: vec![] }];
+        let past = vec![Past { q: "VPN 은 언제 도입했어?".into(), a: "11월 [회의 1]".into(), ..Default::default() }];
         let mut got = String::new();
         let a = ask_all_with(
             &mut chat,
@@ -432,22 +433,28 @@ mod tests {
             *seen.borrow_mut() = turns.iter().map(|t| t.text.to_string()).collect();
             Ok(Reply { text: "김 팀장".into(), ..Default::default() })
         };
-        let past = vec![Past { q: "VPN 얘기 어디서 했지?".into(), a: "[회의 2 · 00:00] 에서".into(), sources: before.clone() }];
+        let past = vec![Past { q: "VPN 얘기 어디서 했지?".into(), a: "[회의 2 · 00:00] 에서".into(), sources: before.clone(), q_sources: vec![] }];
         let a = ask_all_with(&mut chat, "anthropic", 40_000, &docs(), "회의 2의 담당자는?", &past, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
             .unwrap();
         assert!(a.sources.iter().any(|s| s.id == "d3"), "앞 답에 실은 회의는 다시 {:?}", a.sources);
         assert_eq!(seen.borrow()[2], "[보안 점검 회의(2026-11-12) · 00:00] 에서", "앞 답의 번호 → 회의 이름");
         assert_eq!(seen.borrow()[3], "보안 점검 회의(2026-11-12)의 담당자는?", "새 질문의 번호도 앞 답의 번호로 읽는다");
 
-        // 앞선 질문의 번호는 그 질문 바로 앞 답의 번호로 (그 질문의 답은 번호를 새로 매겼다)
+        // 앞선 질문의 번호는 그 질문을 할 때 앞 답에 실었던 회의로 (그 질문의 답은 번호를 새로 매겼다) —
+        // 사이의 답을 지워도(앞 질문 · 답이 빠져도) 그대로
         let after = vec![src(1, "d3", "보안 점검 회의", "2026-11-12"), src(2, "d1", "예산 회의", "2026-10-29")];
-        let past = vec![
-            Past { q: "VPN 얘기 어디서 했지?".into(), a: "[회의 1] 과 [회의 2]".into(), sources: before.clone() },
-            Past { q: "회의 1 의 결론은?".into(), a: "[회의 2] 에서 정함".into(), sources: after },
-        ];
+        let past = vec![Past { q: "회의 1 의 결론은?".into(), a: "[회의 2] 에서 정함".into(), sources: after, q_sources: before.clone() }];
         ask_all_with(&mut chat, "anthropic", 40_000, &docs(), "고마워", &past, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).unwrap();
-        assert_eq!(seen.borrow()[3], "예산 회의(2026-10-29) 의 결론은?", "앞 답(before)의 1 = 예산 회의");
-        assert_eq!(seen.borrow()[4], "[예산 회의(2026-10-29)] 에서 정함", "그 답(after)의 2 = 예산 회의");
+        // 화면이 보내는 모양 (camelCase) 그대로 읽힌다
+        let from_ui: Vec<Past> = serde_json::from_value(json!([{
+            "q": "회의 1 의 결론은?", "a": "[회의 2] 에서 정함",
+            "sources": [{ "n": 2, "id": "d1", "title": "예산 회의", "startedAt": "2026-10-29 10:00" }],
+            "qSources": [{ "n": 1, "id": "d1", "title": "예산 회의", "startedAt": "2026-10-29 10:00" }]
+        }]))
+        .unwrap();
+        assert_eq!((from_ui[0].sources[0].started_at.as_str(), from_ui[0].q_sources[0].n), ("2026-10-29 10:00", 1));
+        assert_eq!(seen.borrow()[1], "예산 회의(2026-10-29) 의 결론은?", "질문할 때 앞 답(before)의 1 = 예산 회의");
+        assert_eq!(seen.borrow()[2], "[예산 회의(2026-10-29)] 에서 정함", "그 답(after)의 2 = 예산 회의");
     }
 
     #[test]
