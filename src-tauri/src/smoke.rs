@@ -230,9 +230,18 @@ fn watch_check(app: &AppHandle, c: &mut Checks, src: &Path, sessions: &Path) {
     };
     let dir = home.join("watch");
     let _ = std::fs::create_dir_all(&dir);
-    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("wav").to_string();
-    let name = |n: &str| format!("{n}.{ext}");
-    let copy = |n: &str| std::fs::copy(src, dir.join(name(n))).is_ok();
+    // 테스트 음성 앞 12초만 — 받아쓰기를 세 번 하므로 점검이 너무 길어지지 않게 (받아 적는 중에 녹음을 시작할 틈은 남긴다)
+    let clip = match badasugi_core::wav::read_16k_mono(src)
+        .and_then(|s| badasugi_core::wav::encode_pcm16(&s[..s.len().min(badasugi_core::SAMPLE_RATE as usize * 12)]))
+    {
+        Ok(b) => b,
+        Err(e) => {
+            c.add("녹음 폴더: 준비", false, format!("테스트 음성을 자르지 못함: {e}"));
+            return;
+        }
+    };
+    let name = |n: &str| format!("{n}.wav");
+    let copy = |n: &str| std::fs::write(dir.join(name(n)), &clip).is_ok();
     copy("켜기 전 녹음");
     {
         let st = app.state::<AppState>();
@@ -483,6 +492,7 @@ fn run(app: &AppHandle, c: &mut Checks) {
     }
 
     // ── 2. 파일 받아쓰기 ──
+    let wav_for_watch = wav.clone();
     let file = std::env::var_os("BADASUGI_SMOKE_FILE").map(PathBuf::from).unwrap_or(wav);
     let t1 = Instant::now();
     if !c.add("파일 받아쓰기 시작", crate::start_session(app, Some(&file), None).is_ok(), file.display().to_string()) {
@@ -534,7 +544,7 @@ fn run(app: &AppHandle, c: &mut Checks) {
     }
 
     // ── 2-3. 녹음 폴더 지켜보기 ──
-    watch_check(app, c, &file, &sessions);
+    watch_check(app, c, &wav_for_watch, &sessions);
 
     // ── 3. 진단 로그가 남는지 ──
     let logs = crate::logging::log_dir();

@@ -651,7 +651,12 @@ fn tick(app: &AppHandle, can_start: bool) {
         let _ = app.emit("bd://watch", serde_json::json!({ "kind": "armed", "skipped": n }));
         return;
     }
-    let todo: Vec<&Found> = found.iter().filter(|f| i.book.wants(&f.key())).collect();
+    // 받아 적는 중인 파일은 기다리는 파일로 세지 않는다
+    let busy_key = i.job.as_ref().map(|j| j.key.clone());
+    let todo: Vec<&Found> = found
+        .iter()
+        .filter(|f| i.book.wants(&f.key()) && busy_key.as_deref() != Some(f.key().as_str()))
+        .collect();
     i.waiting = todo.len();
     let mut ready = i.settle.settled(&todo, now, wait(STABLE_FOR));
     ready.retain(|f| i.cooldown.get(&f.key()).is_none_or(|t| now >= *t));
