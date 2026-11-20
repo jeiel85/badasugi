@@ -8,6 +8,7 @@ mod meeting;
 mod power;
 mod prompts;
 mod session;
+mod share;
 mod settings;
 mod smoke;
 mod snap;
@@ -1194,6 +1195,69 @@ fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String) -> 
     std::fs::write(path, bytes).map_err(err)
 }
 
+/// 요약을 보내기 좋게 — 할 일 수 (전체, 기한을 날짜로 읽을 수 있는 것)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareInfo {
+    todos: usize,
+    dated: usize,
+}
+
+#[tauri::command]
+async fn share_info(app: AppHandle, id: String) -> CmdResult<ShareInfo> {
+    off_main(move || {
+        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        let (todos, dated) = share::todo_counts(&doc);
+        Ok(ShareInfo { todos, dated })
+    })
+    .await
+}
+
+/// 메신저용 짧은 정리 (요약을 다시 쓴 것, AI 를 부르지 않는다)
+#[tauri::command]
+async fn share_messenger(app: AppHandle, id: String) -> CmdResult<String> {
+    off_main(move || {
+        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        share::messenger(&doc).ok_or_else(|| "요약이 없어요. 먼저 요약해 주세요".to_string())
+    })
+    .await
+}
+
+/// 후속 메일 초안을 새 메일 창으로 연다 (.eml, X-Unsent) → 메일 본문 (화면이 클립보드에도 넣는다 —
+/// 메일 앱이 .eml 을 읽기 전용으로 열거나 열지 못해도 새 메일에 붙여 넣을 수 있게)
+#[tauri::command]
+async fn open_mail_draft(app: AppHandle, id: String) -> CmdResult<String> {
+    off_main(move || {
+        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        let (subject, body) = share::email(&doc).ok_or_else(|| "요약이 없어요. 먼저 요약해 주세요".to_string())?;
+        let safe: String = doc.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        let path = std::env::temp_dir().join(format!("badasugi-mail-{safe}.eml"));
+        std::fs::write(&path, share::eml(&subject, &body)).map_err(err)?;
+        log::info!("후속 메일 초안 열기: {}", path.display());
+        if let Err(e) = app.opener().open_path(path.display().to_string(), None::<&str>) {
+            log::warn!("메일 초안을 열지 못함: {e}");
+        }
+        Ok(body)
+    })
+    .await
+}
+
+/// 기한이 있는 할 일 → 일정 파일(.ics) → 넣은 할 일 수
+#[tauri::command]
+async fn export_todos_ics(app: AppHandle, id: String, path: String) -> CmdResult<usize> {
+    off_main(move || {
+        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let (text, n) = share::ics(&doc, &now);
+        if n == 0 {
+            return Err("기한을 날짜로 읽을 수 있는 할 일이 없어요".into());
+        }
+        std::fs::write(path, text).map_err(err)?;
+        Ok(n)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn session_text(app: AppHandle, id: String, format: String) -> CmdResult<String> {
     off_main(move || {
@@ -2047,6 +2111,10 @@ fn main() {
             undo_refinement,
             delete_session,
             export_session,
+            share_info,
+            share_messenger,
+            open_mail_draft,
+            export_todos_ics,
             session_text,
             summarize,
             cancel_summary,
