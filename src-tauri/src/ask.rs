@@ -68,8 +68,10 @@ fn grams(s: &str) -> HashSet<String> {
 }
 
 /// 녹취록 문단 중 실을 것 (시간 순 번호). 질문과 겹치는 말이 많은(드문 말일수록 무겁게) 문단 → 그 앞뒤 →
-/// 남는 자리는 회의 전체에서 고르게. 다 합쳐 `budget` 글자 안쪽
-fn pick(lines: &[&str], query: &str, budget: usize) -> Vec<usize> {
+/// 남는 자리는 회의 전체에서 고르게. 다 합쳐 `budget` 글자 안쪽.
+/// `keep_end` 면 맨 먼저 끝(가장 최근 말)부터 자리의 절반까지 이어서 싣는다 — 따라잡기는 답의 첫 줄이 "지금 무슨
+/// 이야기 중"이라, 고르게 솎다가 마지막 말이 빠지면 지금 바뀐 주제 · 방금 정한 것을 놓친다
+fn pick(lines: &[&str], query: &str, budget: usize, keep_end: bool) -> Vec<usize> {
     let n = lines.len();
     let sets: Vec<HashSet<String>> = lines.iter().map(|l| grams(l)).collect();
     let q = grams(query);
@@ -95,6 +97,17 @@ fn pick(lines: &[&str], query: &str, budget: usize) -> Vec<usize> {
         used += len(i);
         true
     };
+    if keep_end {
+        let mut start = n;
+        let mut tail = 0;
+        while start > 0 && tail + len(start - 1) <= budget / 2 {
+            start -= 1;
+            tail += len(start);
+        }
+        for i in start..n {
+            take(i, &mut chosen);
+        }
+    }
     let mut order: Vec<usize> = (0..n).filter(|&i| score[i] > 1e-9).collect();
     order.sort_by(|&a, &b| score[b].total_cmp(&score[a]).then(a.cmp(&b)));
     for i in order {
@@ -169,9 +182,20 @@ fn catch_up(doc: &SessionDoc, mins: u32) -> Result<CatchUp> {
     Ok(CatchUp { doc: d, from, text: prompts::catch_up().replace("{범위}", &range) })
 }
 
-/// 회의 기록 덩어리. 다 실으면 `budget` 글자를 넘을 때 녹취록은 골라 싣는다.
-/// `from` 이 있으면 녹취록이 그 시각부터라고 밝힌다 (따라잡기 — 앞부분은 일부러 뺐다)
-fn context(doc: &SessionDoc, query: &str, budget: usize, from: Option<u64>) -> Context {
+/// 녹취록이 길어 골라 실을 때 무엇에 맞추나
+enum Focus<'a> {
+    /// 질문 — 질문과 겹치는 말이 많은 곳과 그 앞뒤 위주로
+    Question(&'a str),
+    /// 따라잡기 — 끝(가장 최근 말)을 먼저. `from` 이 있으면 녹취록이 그 시각부터라고 밝힌다(앞부분은 일부러 뺐다)
+    Recent { from: Option<u64> },
+}
+
+/// 회의 기록 덩어리. 다 실으면 `budget` 글자를 넘을 때 녹취록은 `focus` 에 맞춰 골라 싣는다
+fn context(doc: &SessionDoc, focus: &Focus, budget: usize) -> Context {
+    let (query, from, recent) = match *focus {
+        Focus::Question(q) => (q, None, false),
+        Focus::Recent { from } => ("", from, true),
+    };
     let mut head = format!("회의 제목: {}\n일시: {}", doc.title, doc.started_at);
     if doc.duration_ms > 0 {
         head.push_str(&format!(" · 길이 {}", fmt_time(doc.duration_ms)));
@@ -212,7 +236,7 @@ fn context(doc: &SessionDoc, query: &str, budget: usize, from: Option<u64>) -> C
     // 자리보다 크면 통째로 빠져 녹취록이 하나도 실리지 않는다
     let owned = units(doc, (room / 4).max(MIN_UNIT));
     let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let keep = pick(&lines, query, room);
+    let keep = pick(&lines, query, room, recent);
     let mut body = String::new();
     let mut next = 0;
     for &i in &keep {
@@ -226,10 +250,17 @@ fn context(doc: &SessionDoc, query: &str, budget: usize, from: Option<u64>) -> C
     if next < lines.len() {
         body.push_str("…\n");
     }
-    let title = match &since {
-        Some(s) => format!("## 녹취록 ({s}, 그 가운데 일부 — 길어서 고르게 골라 실었어요. '…' 줄은 건너뛴 곳)"),
-        None => "## 녹취록 (일부 — 회의가 길어 질문과 관련 있어 보이는 부분 위주로 골라 실었어요. '…' 줄은 건너뛴 곳)"
-            .to_string(),
+    let title = match (&since, recent) {
+        (Some(s), _) => format!(
+            "## 녹취록 ({s}, 그 가운데 일부 — 길어서 가장 최근 말을 먼저, 나머지는 고르게 골라 실었어요. '…' 줄은 건너뛴 곳)"
+        ),
+        (None, true) => {
+            "## 녹취록 (일부 — 길어서 가장 최근 말을 먼저, 나머지는 고르게 골라 실었어요. '…' 줄은 건너뛴 곳)".to_string()
+        }
+        (None, false) => {
+            "## 녹취록 (일부 — 회의가 길어 질문과 관련 있어 보이는 부분 위주로 골라 실었어요. '…' 줄은 건너뛴 곳)"
+                .to_string()
+        }
     };
     Context { text: format!("{head}{title}\n{body}"), partial: true }
 }
@@ -304,9 +335,9 @@ fn ask_with(
     // 따라잡기: 그 구간만 남긴 회의 기록 + 정리하라는 지시. 앞선 질문 · 답은 잇지 않는다 (따로 서는 정리 —
     // 보낼 글이 작아 빠르고 싸다)
     let catch = recent_mins.map(|m| catch_up(doc, m)).transpose()?;
-    let (doc, from, question) = match &catch {
-        Some(c) => (&c.doc, c.from, c.text.as_str()),
-        None => (doc, None, question),
+    let (doc, question) = match &catch {
+        Some(c) => (&c.doc, c.text.as_str()),
+        None => (doc, question),
     };
     // 앞선 질문 · 답 (최근 것) — "그건 누가 하기로 했어?" 처럼 이어 묻는 말을 알아듣게
     let all_past: Vec<(String, String)> = if catch.is_some() {
@@ -318,11 +349,14 @@ fn ask_with(
             .map(|x| (clip(&x.q, HISTORY_QUESTION_CHARS), clip(&x.a, HISTORY_ANSWER_CHARS)))
             .collect()
     };
-    // 녹취록을 고를 때는 바로 앞 질문도 함께 본다. 따라잡기는 고를 말 없이 구간에서 고르게
-    let query = match (&catch, all_past.last()) {
-        (Some(_), _) => String::new(),
-        (None, Some((q, _))) => format!("{question}\n{q}"),
-        (None, None) => question.to_string(),
+    // 녹취록이 길면: 질문은 바로 앞 질문도 함께 보고 겹치는 곳 위주로, 따라잡기는 가장 최근 말부터
+    let query = match all_past.last() {
+        Some((q, _)) => format!("{question}\n{q}"),
+        None => question.to_string(),
+    };
+    let focus = match &catch {
+        Some(c) => Focus::Recent { from: c.from },
+        None => Focus::Question(&query),
     };
     let mut waits = 0;
     loop {
@@ -334,7 +368,7 @@ fn ask_with(
         let past = recent_within(&all_past, budget / 3);
         let talk = past.iter().map(|(q, a)| q.chars().count() + a.chars().count()).sum::<usize>()
             + question.chars().count();
-        let ctx = context(doc, &query, budget.saturating_sub(talk).max(budget / 4), from);
+        let ctx = context(doc, &focus, budget.saturating_sub(talk).max(budget / 4));
         let head = format!("다음은 이 회의의 기록입니다.\n\n{}", ctx.text);
         // 따라잡기 구간은 다시 쓸 일이 드물어 캐시에 두지 않는다 (캐시에 쓰는 값이 더 든다)
         let mut turns = vec![Turn { user: true, text: &head, cache: catch.is_none() }];
@@ -420,7 +454,7 @@ mod tests {
     #[test]
     fn short_meetings_are_sent_whole() {
         let d = meeting();
-        let c = context(&d, "VPN 비용", 1_000_000, None);
+        let c = context(&d, &Focus::Question("VPN 비용"), 1_000_000);
         assert!(!c.partial);
         assert!(c.text.contains("화자: 김성현 매니저, 이낙원 실장님") || c.text.contains("화자: 이낙원 실장님, 김성현 매니저"));
         assert!(c.text.contains("[08:20] 김성현 매니저: VPN 은 월 12만 원"));
@@ -430,7 +464,7 @@ mod tests {
     #[test]
     fn long_meetings_keep_the_lines_that_match_the_question() {
         let d = meeting();
-        let c = context(&d, "VPN 비용이 얼마였지?", 600, None);
+        let c = context(&d, &Focus::Question("VPN 비용이 얼마였지?"), 600);
         assert!(c.partial);
         assert!(c.text.contains("VPN 은 월 12만 원"), "{}", c.text);
         // 바로 뒤 문단(답하는 말)도 함께
@@ -448,12 +482,12 @@ mod tests {
         d.summary = Some("요약 ".repeat(3_000));
         d.notes = "메모 ".repeat(3_000);
         for budget in [4_000, 2_000] {
-            let n = context(&d, "VPN", budget, None).text.chars().count();
+            let n = context(&d, &Focus::Question("VPN"), budget).text.chars().count();
             assert!(n <= budget + 300, "{budget}: {n}");
         }
         let mut only_notes = doc(&[]);
         only_notes.notes = "메모 ".repeat(3_000);
-        let c = context(&only_notes, "VPN", 2_000, None);
+        let c = context(&only_notes, &Focus::Question("VPN"), 2_000);
         assert!(c.text.chars().count() <= 2_000 && c.text.contains("메모 메모"), "{}", c.text.chars().count());
     }
 
@@ -467,14 +501,14 @@ mod tests {
         v[40] = (200, 0, "VPN 은 월 12만 원에 도입했습니다");
         let d = doc(&v);
         assert_eq!(d.to_text().lines().count(), 1, "문단 하나로 묶인다");
-        let c = context(&d, "VPN 비용은?", 800, None);
+        let c = context(&d, &Focus::Question("VPN 비용은?"), 800);
         assert!(c.partial);
         assert!(c.text.contains("[03:20] 이낙원 실장님: VPN 은 월 12만 원"), "{}", c.text);
 
         // 나뉘지 않은 아주 긴 발화 하나도 잘라서, 질문과 맞는 조각을 싣는다
         let long = format!("{}VPN 은 월 12만 원{}", "가".repeat(3000), "나".repeat(3000));
         let d = doc(&[(0, 0, long.as_str())]);
-        let c = context(&d, "VPN 비용은?", 800, None);
+        let c = context(&d, &Focus::Question("VPN 비용은?"), 800);
         let body = c.text.split("## 녹취록").nth(1).unwrap();
         assert!(body.contains("VP"), "{body}");
         assert!(body.contains("(이어서)"));
@@ -486,14 +520,28 @@ mod tests {
         let lines: Vec<String> = (0..20).map(|i| format!("[00:{i:02}] 화자: 일반 이야기 {i}")).collect();
         let mut lines: Vec<&str> = lines.iter().map(String::as_str).collect();
         lines[10] = "[00:10] 화자: 예산 승인은 금요일까지";
-        let keep = pick(&lines, "예산 승인 언제?", 140);
+        let keep = pick(&lines, "예산 승인 언제?", 140, false);
         assert!(keep.windows(2).all(|w| w[0] < w[1]));
         assert!(keep.contains(&10) && keep.contains(&9) && keep.contains(&11), "{keep:?}");
         let used: usize = keep.iter().map(|&i| lines[i].chars().count() + 1).sum();
         assert!(used <= 140);
         // 맞는 말이 없어도 처음 몇 줄만이 아니라 회의 전체에서 고른다
-        let keep = pick(&lines, "zzz", 100);
+        let keep = pick(&lines, "zzz", 100, false);
         assert!(keep.first() == Some(&0) && *keep.last().unwrap() >= 10, "{keep:?}");
+    }
+
+    /// 따라잡기: 자리가 모자라면 가장 최근 말부터 자리의 절반을 이어서 싣고, 남는 자리는 앞에서 고르게
+    #[test]
+    fn catch_up_keeps_the_latest_lines_when_short_of_room() {
+        let lines: Vec<String> = (0..30).map(|i| format!("[00:{i:02}] 화자: 같은 길이의 이야기")).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let each = lines[0].chars().count() + 1;
+        // 고르게만 솎으면 0, 2, …, 28 이 남아 마지막 말(29)이 빠진다
+        assert!(!pick(&lines, "", each * 15, false).contains(&29));
+        let keep = pick(&lines, "", each * 15, true);
+        assert!((23..30).all(|i| keep.contains(&i)), "끝 일곱 줄이 이어서 {keep:?}");
+        assert!(keep.contains(&0) && keep.len() == 15, "남는 자리는 앞에서 고르게 {keep:?}");
+        assert!(keep.windows(2).all(|w| w[0] < w[1]));
     }
 
     fn reply(text: &str) -> Result<Reply> {
@@ -664,6 +712,20 @@ mod tests {
             .unwrap();
         assert!(seen.borrow()[0].0.contains("## 녹취록\n[00:00] 이낙원 실장님: 시작할게요"), "{}", seen.borrow()[0].0);
         assert!(seen.borrow()[1].0.contains("회의 처음부터 지금까지 오간"), "{}", seen.borrow()[1].0);
+
+        // 지난 10분이 한 번에 보낼 크기(Groq 4천 자)보다 길어도 마지막 말은 꼭 실린다
+        let mut v = Vec::new();
+        for i in 0..400u64 {
+            v.push((i * 2, (i % 2) as u32, "오늘은 리포트 화면 배치와 일정 이야기를 이어서 했습니다"));
+        }
+        v[399] = (798, 1, "방금 정했어요 배포는 다음 주 화요일로 미룹니다");
+        let long = doc(&v);
+        ask_with(&mut chat, "groq", 4_000, &long, "지난 10분 정리", Some(10), &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
+            .unwrap();
+        let record = seen.borrow()[0].0.clone();
+        assert!(record.contains("[13:18] 김성현 매니저: 방금 정했어요 배포는 다음 주 화요일로"), "{record}");
+        assert!(record.contains("[03:20]부터, 그 가운데 일부 — 길어서 가장 최근 말을 먼저"), "{record}");
+        assert!(record.chars().count() < 4_000 + 300, "{}", record.chars().count());
 
         // 받아 적은 말 없이 메모만 있으면 보내지 않고 알린다
         let mut memo_only = doc(&[]);
