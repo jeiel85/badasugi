@@ -173,6 +173,8 @@ struct StateDto {
 fn get_state(app: AppHandle) -> StateDto {
     let st = app.state::<AppState>();
     let models_dir = &st.paths.models;
+    // 다른 잠금을 쥐기 전에 (녹음 폴더 지켜보기는 자기 잠금을 쥔 채 설정을 본다)
+    let watch_job = watch::job_name(&app);
     let dto = StateDto {
         settings: st.settings.lock().clone(),
         rec: *st.rec.lock(),
@@ -215,7 +217,7 @@ fn get_state(app: AppHandle) -> StateDto {
         hotkey_error: st.hotkey_error.lock().take(),
         audio_exts: badasugi_core::decode::AUDIO_EXTENSIONS,
         demo: std::env::var("BADASUGI_DEMO").is_ok(),
-        watch_job: watch::job_name(&app),
+        watch_job,
     };
     dto
 }
@@ -740,7 +742,10 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
         }
         Event::Warning { message } => log::warn!("{message}"),
         Event::Failed { id, message, retry } => {
-            log::warn!("발화 {id} 인식 실패{}: {message}", if *retry { " (녹음 뒤 다시 시도)" } else { "" })
+            log::warn!("발화 {id} 인식 실패{}: {message}", if *retry { " (녹음 뒤 다시 시도)" } else { "" });
+            if !*retry {
+                watch::on_utterance(app, Some(message));
+            }
         }
         Event::Status { message } => log::info!("{message}"),
         _ => {}
@@ -761,6 +766,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 let _ = app.emit("bd://event", &Event::Discarded { id: *id });
                 return;
             }
+            watch::on_utterance(app, None);
             let mut store = st.store.lock();
             if let Some(doc) = store.current.as_mut() {
                 let speaker = doc.resolve(*speaker);

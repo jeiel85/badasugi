@@ -291,8 +291,29 @@ struct Job {
     stopped: bool,
     /// 오류로 멈춤 (연결이 계속 안 됨 · 엔진을 못 엶 등) → 잠시 뒤 다시
     error: Option<String>,
+    /// 받아 적은 문장 수 · 다시 시도하지 않고 실패한 문장 수 (잘못된 API 키처럼 문장마다 실패하면 오류로 본다)
+    ok: usize,
+    failed: usize,
+    /// 처음 실패한 까닭
+    fail_msg: Option<String>,
     /// 받아쓰기가 끝났다 (`Stopped`)
     ended: bool,
+}
+
+impl Job {
+    /// 오류로 볼 까닭 — 받아쓰기가 오류로 멈췄거나, 문장의 10% 넘게 받아 적지 못했다 (빈 기록 · 구멍 난 기록으로 끝내지 않게)
+    fn failure(&self) -> Option<String> {
+        self.error.clone().or_else(|| {
+            failed_too_many(self.ok, self.failed).then(|| {
+                format!("문장 {}개 중 {}개를 받아 적지 못했어요 — {}", self.ok + self.failed, self.failed, self.fail_msg.clone().unwrap_or_default())
+            })
+        })
+    }
+}
+
+/// 받아 적지 못한 문장이 10% 넘으면 그 파일은 다시 받아 적는다
+pub fn failed_too_many(ok: usize, failed: usize) -> bool {
+    failed > 0 && failed * 10 > ok + failed
 }
 
 /// 받아쓰기가 끝난 뒤 할 일
@@ -458,6 +479,24 @@ pub fn on_error(app: &AppHandle, message: &str) {
     if let Some(w) = app.try_state::<Watch>() {
         if let Some(j) = w.inner.lock().job.as_mut().filter(|j| !j.ended) {
             j.error.get_or_insert_with(|| message.to_string());
+        }
+    }
+}
+
+/// 문장 하나를 받아 적었다 · 받아 적지 못했다 (다시 시도하지 않는 실패) — 받아 적는 중인 녹음 폴더 파일만 센다
+pub fn on_utterance(app: &AppHandle, failed: Option<&str>) {
+    if let Some(w) = app.try_state::<Watch>() {
+        if !w.busy.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(j) = w.inner.lock().job.as_mut().filter(|j| !j.ended) {
+            match failed {
+                None => j.ok += 1,
+                Some(m) => {
+                    j.failed += 1;
+                    j.fail_msg.get_or_insert_with(|| m.to_string());
+                }
+            }
         }
     }
 }
@@ -638,6 +677,13 @@ fn tick(app: &AppHandle, can_start: bool) {
         }
     };
     let now = Instant::now();
+    // 다른 잠금(설정 · 녹음 상태)은 이 잠금을 쥐기 전에 본다 — 화면의 get_state 는 설정을 쥔 채 이 잠금을 잡는다
+    let any_todo = {
+        let i = w.inner.lock();
+        found.iter().any(|f| i.book.wants(&f.key()))
+    };
+    let engine = if any_todo { crate::engine_problem(app).map(|e| format!("받아 적지 못하고 기다리는 중 — {e}")) } else { None };
+    let busy = st.quit_after_stop.load(Ordering::SeqCst) || *st.rec.lock() != RecState::Idle;
     let mut i = w.inner.lock();
     i.on = true;
     if !i.book.armed || !same_dir(&i.book.dir, &dir_s) {
@@ -667,11 +713,8 @@ fn tick(app: &AppHandle, can_start: bool) {
         return;
     }
     // 설정 문제(모델 · API 키 없음)는 파일 탓이 아니다 — 실패로 세지 않고 고칠 때까지 기다린다
-    i.problem = crate::engine_problem(app).map(|e| format!("받아 적지 못하고 기다리는 중 — {e}"));
-    if !can_start || i.job.is_some() || i.hold || i.problem.is_some() {
-        return;
-    }
-    if st.quit_after_stop.load(Ordering::SeqCst) || *st.rec.lock() != RecState::Idle {
+    i.problem = engine;
+    if !can_start || busy || i.job.is_some() || i.hold || i.problem.is_some() {
         return;
     }
     let Some(f) = ready.into_iter().find(|f| writer_gone(&f.path)).cloned() else {
@@ -740,10 +783,11 @@ fn finish_job(app: &AppHandle) {
         .doc
         .as_deref()
         .is_some_and(|id| app.state::<AppState>().store.lock().load(id).is_ok());
+    let failure = job.failure();
     let (tries, out) = {
         let i = w.inner.lock();
-        let tries = i.book.tries(&job.key) + u32::from(job.error.is_some() && !job.yielded && !job.stopped);
-        (tries, outcome(job.yielded, job.stopped, job.error.is_some(), saved, tries))
+        let tries = i.book.tries(&job.key) + u32::from(failure.is_some() && !job.yielded && !job.stopped);
+        (tries, outcome(job.yielded, job.stopped, failure.is_some(), saved, tries))
     };
     log::info!("녹음 폴더 파일 받아쓰기 끝: {out:?}");
     // 다시 할 파일은 받아 적던 기록을 지운다 (다음에 처음부터 받아 적으면 두 개가 되지 않게)
@@ -777,8 +821,8 @@ fn finish_job(app: &AppHandle) {
     let kept = job.doc.as_ref().filter(|_| saved);
     let ev = match out {
         Outcome::Requeue => serde_json::json!({ "kind": "requeued", "file": job.name }),
-        Outcome::Retry => serde_json::json!({ "kind": "retry", "file": job.name, "message": job.error }),
-        Outcome::Failed => serde_json::json!({ "kind": "failed", "file": job.name, "message": job.error, "id": kept }),
+        Outcome::Retry => serde_json::json!({ "kind": "retry", "file": job.name, "message": failure }),
+        Outcome::Failed => serde_json::json!({ "kind": "failed", "file": job.name, "message": failure, "id": kept }),
         Outcome::Stopped => serde_json::json!({ "kind": "stopped", "file": job.name, "id": kept }),
         Outcome::Empty => serde_json::json!({ "kind": "empty", "file": job.name }),
         Outcome::Done => serde_json::json!({ "kind": "done", "file": job.name, "id": job.doc, "summarize": summarize }),
@@ -919,6 +963,20 @@ mod tests {
         assert_eq!(outcome(false, false, true, true, 3), Outcome::Failed);
         assert_eq!(outcome(false, false, false, true, 0), Outcome::Done);
         assert_eq!(outcome(false, false, false, false, 0), Outcome::Empty);
+    }
+
+    #[test]
+    fn many_failed_sentences_count_as_an_error() {
+        assert!(!failed_too_many(30, 0));
+        // 한두 문장 실패는 그대로 받아 적은 것으로
+        assert!(!failed_too_many(30, 3));
+        assert!(failed_too_many(30, 4));
+        // 잘못된 API 키: 모든 문장이 실패
+        assert!(failed_too_many(0, 5));
+        let j = Job { ok: 0, failed: 5, fail_msg: Some("HTTP 401".into()), ..Default::default() };
+        assert!(j.failure().is_some_and(|m| m.contains("401")));
+        let j = Job { ok: 40, failed: 1, ..Default::default() };
+        assert_eq!(j.failure(), None);
     }
 
     #[test]
