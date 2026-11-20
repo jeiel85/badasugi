@@ -6,7 +6,9 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const T = window.__TAURI__;
 // 기록을 읽고 쓰는 명령은 앱이 작업 스레드에서 처리한다 — 보낸 순서대로 끝나도록 하나씩 보낸다
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
-const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa']);
+// (요약 보내기도 기록을 읽는다 — 요약을 고치고 바로 보내도 고친 요약으로)
+const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
+  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
 const AFTER_CMDS = new Set(['summarize', 'ask_meeting']);
 let orderedChain = Promise.resolve();

@@ -313,12 +313,19 @@ pub fn due_date(text: &str, base: NaiveDate) -> Option<NaiveDate> {
             }
         }
     }
-    // 11월 25일
+    // 11월 25일 · 2027년 11월 25일 (연도가 적혀 있으면 그 해 — 27년은 2027년)
     if let Some(i) = compact.find('월') {
-        let start = compact[..i].rfind(|c: char| !c.is_ascii_digit()).map_or(0, |j| j + compact[j..].chars().next().unwrap().len_utf8());
-        if let (Some((m, _)), Some((d, rest))) = (number(&compact[start..i]), number(&compact[i + '월'.len_utf8()..])) {
+        let digits_before = |end: usize| -> Option<u32> {
+            let start = compact[..end].rfind(|c: char| !c.is_ascii_digit()).map_or(0, |j| j + compact[j..].chars().next().unwrap().len_utf8());
+            number(&compact[start..end]).map(|(n, _)| n)
+        };
+        if let (Some(m), Some((d, rest))) = (digits_before(i), number(&compact[i + '월'.len_utf8()..])) {
             if rest.starts_with('일') {
-                return month_day(base, m, d);
+                let year = compact[..i].find('년').and_then(|y| digits_before(y)).map(|y| if y < 100 { 2000 + y } else { y });
+                return match year {
+                    Some(y) => NaiveDate::from_ymd_opt(y as i32, m, d),
+                    None => month_day(base, m, d),
+                };
             }
         }
     }
@@ -534,6 +541,9 @@ mod tests {
             ("11월 25일", "2026-11-25"),
             ("11월 25일(화) 오전", "2026-11-25"),
             ("1월 5일", "2027-01-05"),
+            ("2027년 11월 25일", "2027-11-25"),
+            ("2026년 12월 1일까지", "2026-12-01"),
+            ("27년 1월 5일", "2027-01-05"),
             ("12/3", "2026-12-03"),
             ("2026-12-10", "2026-12-10"),
             ("2027.01.04", "2027-01-04"),
