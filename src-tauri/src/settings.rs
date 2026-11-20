@@ -44,6 +44,12 @@ pub struct Settings {
     pub meeting_alert: bool,
     /// 회의 시작 알림이 지켜볼 앱 (meeting::MATCHERS 의 id)
     pub meeting_apps: Vec<String>,
+    /// 녹음 폴더 지켜보기 — 폴더에 새로 생긴 녹음 파일을 알아서 받아 적는다 (watch.rs)
+    pub watch_folder: bool,
+    /// 지켜볼 폴더 (휴대폰 녹음 · 녹음기 파일이 쌓이는 OneDrive 폴더 등)
+    pub watch_dir: String,
+    /// 받아 적은 뒤 요약까지 (설정 › 요약의 AI 로)
+    pub watch_summarize: bool,
     /// "system" | "light" | "dark"
     pub theme: String,
     /// 새 버전을 백그라운드에서 받아 두었다가, 녹음 중이 아니고 창이 숨겨져 있을 때 조용히 설치
@@ -138,6 +144,9 @@ impl Default for Settings {
             always_on_top: false,
             meeting_alert: false,
             meeting_apps: crate::meeting::default_apps(),
+            watch_folder: false,
+            watch_dir: String::new(),
+            watch_summarize: true,
             theme: "system".into(),
             auto_update: true,
             last_version: String::new(),
@@ -266,6 +275,15 @@ mod tests {
         assert_eq!(none.hotkey, Settings::default().hotkey);
         assert!(!dir.join("none.json.bad").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_watch_is_off_until_chosen() {
+        // 녹음 폴더 지켜보기가 생기기 전의 설정 파일: 꺼져 있고, 켜면 요약까지
+        let s: Settings = serde_json::from_str(r#"{ "hotkey": "Ctrl+Alt+R" }"#).unwrap();
+        assert!(!s.watch_folder);
+        assert!(s.watch_dir.is_empty());
+        assert!(s.watch_summarize);
     }
 
     #[test]

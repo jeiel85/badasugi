@@ -22,6 +22,7 @@ mod update;
 mod pricing;
 mod usage_book;
 mod voices;
+mod watch;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -164,6 +165,8 @@ struct StateDto {
     hotkey_error: Option<String>,
     audio_exts: &'static [&'static str],
     demo: bool,
+    /// 지금 받아 적는 녹음 폴더 파일 (녹음 폴더 지켜보기)
+    watch_job: Option<String>,
 }
 
 #[tauri::command]
@@ -212,6 +215,7 @@ fn get_state(app: AppHandle) -> StateDto {
         hotkey_error: st.hotkey_error.lock().take(),
         audio_exts: badasugi_core::decode::AUDIO_EXTENSIONS,
         demo: std::env::var("BADASUGI_DEMO").is_ok(),
+        watch_job: watch::job_name(&app),
     };
     dto
 }
@@ -254,6 +258,8 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
         let _ = w.set_always_on_top(settings.always_on_top || settings.mini_mode);
     }
     *st.settings.lock() = settings;
+    // 녹음 폴더 지켜보기를 켰거나 폴더를 바꿨으면 바로 기준점을 잡게
+    watch::wake(&app);
     hotkey_err.map_or(Ok(()), Err)
 }
 
@@ -340,6 +346,19 @@ fn build_engine(s: &Settings, paths: &Paths) -> Result<EngineConfig, String> {
             beam_size: s.beam_size,
         },
     })
+}
+
+/// 지금 설정으로 받아 적을 수 있나 — 안 되면 그 까닭 (녹음 폴더 지켜보기가 설정 문제를 파일 실패로 세지 않게 먼저 본다)
+pub(crate) fn engine_problem(app: &AppHandle) -> Option<String> {
+    let st = app.state::<AppState>();
+    let s = st.settings.lock().clone();
+    match build_engine(&s, &st.paths) {
+        Err(e) => Some(e),
+        Ok(EngineConfig::Local { model_path, .. }) if !model_path.exists() => {
+            Some("로컬 음성 인식 모델이 없어요. 설정 › 녹음에서 내려받아 주세요.".into())
+        }
+        Ok(_) => None,
+    }
 }
 
 /// 용어집 낱말 (쉼표 · 줄바꿈 · 세미콜론으로 구분)
@@ -468,7 +487,8 @@ fn delete_model(app: AppHandle, id: String) -> CmdResult<()> {
 fn set_rec(app: &AppHandle, state: RecState) {
     let st = app.state::<AppState>();
     *st.rec.lock() = state;
-    let recording = matches!(state, RecState::Recording | RecState::Starting);
+    // 녹음 폴더 파일을 받아 적는 중이면 트레이의 녹음 단추는 '녹음 시작' (누르면 녹음을 먼저 한다)
+    let recording = matches!(state, RecState::Recording | RecState::Starting) && !watch::job_running(app);
     status::refresh(app);
     let item = st.tray_toggle.lock().clone();
     if let Some(item) = item {
@@ -556,6 +576,8 @@ fn start_recording_inner(app: &AppHandle) -> CmdResult<()> {
 /// 녹음(마이크·시스템 소리) 또는 파일 받아쓰기를 시작한다. `source` 를 주면 설정 대신 그 소리를 받는다(회의 시작 알림)
 pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option<SourceKind>) -> CmdResult<()> {
     let st = app.state::<AppState>();
+    // 녹음 폴더 파일을 받아 적는 중이면 멈추고 녹음을 먼저 (그 파일은 녹음 뒤 다시) — 시작이 끝날 때까지 새 파일은 미룬다
+    let _way = if file.is_none() { Some(watch::make_way(app)?) } else { None };
     {
         let mut rec = st.rec.lock();
         if *rec != RecState::Idle {
@@ -655,6 +677,7 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
 
 pub(crate) fn stop_recording_inner(app: &AppHandle) {
     let st = app.state::<AppState>();
+    watch::on_stop(app);
     let p = st.pipeline.lock().take();
     if let Some(p) = p {
         set_rec(app, RecState::Stopping);
@@ -666,6 +689,8 @@ fn toggle_recording_inner(app: &AppHandle) -> CmdResult<()> {
     let state = *app.state::<AppState>().rec.lock();
     match state {
         RecState::Idle => start_recording_inner(app),
+        // 녹음 폴더 파일을 받아 적는 중이면 녹음을 먼저 (그 파일은 녹음을 마친 뒤 다시)
+        _ if watch::job_running(app) => start_recording_inner(app),
         RecState::Recording => {
             stop_recording_inner(app);
             Ok(())
@@ -709,7 +734,10 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             engine,
             diarization,
         } => log::info!("녹음 시작됨: 엔진 {engine}, 마이크 {mic:?}, 시스템/파일 {system:?}, 화자 구분 {diarization}"),
-        Event::Error { message } => log::error!("{message}"),
+        Event::Error { message } => {
+            log::error!("{message}");
+            watch::on_error(app, message);
+        }
         Event::Warning { message } => log::warn!("{message}"),
         Event::Failed { id, message, retry } => {
             log::warn!("발화 {id} 인식 실패{}: {message}", if *retry { " (녹음 뒤 다시 시도)" } else { "" })
@@ -813,6 +841,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
         Event::Stopped => {
             // 파일 받아쓰기는 끝까지 가면 저절로 멈춘다
             drop(st.pipeline.lock().take());
+            let ended_id = st.store.lock().current.as_ref().map(|d| d.id.clone());
             *st.speaker_hints.lock() = None;
             st.file_mode.store(false, Ordering::SeqCst);
             {
@@ -879,6 +908,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                 badasugi_core::asr::whisper::unload();
             }
             badasugi_core::perf::restore_power_throttling();
+            watch::job_ended(app, ended_id.as_deref());
             set_rec(app, RecState::Idle);
             if st.quit_after_stop.load(Ordering::SeqCst) {
                 app.exit(0);
@@ -1298,12 +1328,12 @@ async fn session_text(app: AppHandle, id: String, format: String) -> CmdResult<S
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SummaryDto {
-    text: String,
+pub(crate) struct SummaryDto {
+    pub text: String,
     /// 자동 제목이었다면 AI 가 붙인 새 제목
-    title: Option<String>,
+    pub title: Option<String>,
     /// 쓴 요약 틀 id
-    template: String,
+    pub template: String,
 }
 
 struct BusyGuard<'a>(&'a AtomicUsize);
@@ -1316,6 +1346,11 @@ impl Drop for BusyGuard<'_> {
 #[tauri::command]
 /// `template` 은 쓸 요약 틀 — 없으면 이 회의에 마지막으로 쓴 틀, 그것도 없으면 설정의 기본 틀
 async fn summarize(app: AppHandle, id: String, token: u64, template: Option<String>) -> CmdResult<SummaryDto> {
+    summarize_doc(&app, id, token, template).await
+}
+
+/// 회의를 요약해 기록에 얹는다 (화면의 요약 · 녹음 폴더 지켜보기의 자동 요약)
+pub(crate) async fn summarize_doc(app: &AppHandle, id: String, token: u64, template: Option<String>) -> CmdResult<SummaryDto> {
     let st = app.state::<AppState>();
     st.busy_ops.fetch_add(1, Ordering::SeqCst);
     let _busy = BusyGuard(&st.busy_ops);
@@ -1848,7 +1883,8 @@ fn request_quit(app: &AppHandle) {
         let _ = st.store.lock().flush();
         app.exit(0);
     } else {
-        // 남은 발화를 마저 인식하고 저장한 뒤 종료
+        // 남은 발화를 마저 인식하고 저장한 뒤 종료 (녹음 폴더 파일이면 다음에 켤 때 처음부터 다시)
+        watch::interrupt(app);
         stop_recording_inner(app);
     }
 }
@@ -2145,6 +2181,7 @@ fn main() {
             app.manage(VoiceBook::load(config_dir_for_usage.join("voices.json")));
             app.manage(usage_book::UsageBook::load(config_dir_for_usage.join("usage.json")));
             app.manage(status::Status::new(tray_base));
+            app.manage(watch::Watch::load(config_dir_for_usage.join("watch.json")));
             log::info!(
                 "받아쓰기 {} 시작 — 엔진 {}, 모델 {}, 언어 {}, 입력 {:?}, 화자 구분 {}, 녹음 저장 {}, 미니 창 {}{}",
                 app.package_info().version,
@@ -2190,6 +2227,7 @@ fn main() {
             update::spawn_background(handle.clone());
             status::spawn_ticker(handle.clone());
             meeting::spawn(handle.clone());
+            watch::spawn(handle.clone());
             if let Some(file) = audio_arg(&std::env::args().collect::<Vec<_>>()) {
                 open_file_from_cli(handle.clone(), file);
             }
@@ -2251,6 +2289,7 @@ fn main() {
             meeting::meet_state,
             meeting::meet_ready,
             meeting::meet_answer,
+            watch::watch_status,
             get_usage,
             list_voices,
             forget_voice,

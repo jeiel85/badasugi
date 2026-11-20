@@ -920,6 +920,14 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 
 /* 설정 › 회의 시작 알림: 지켜볼 앱 */
 .meet-apps { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 녹음 폴더 지켜보기 */
+.watch-dir { display: flex; align-items: center; gap: 8px; }
+.watch-path { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watch-path.none { color: var(--muted); }
+.watch-dir .btn.ghost { flex: none; margin: 0; }
+.watch-status b { color: var(--text-2); font-weight: 600; }
+.watch-status .warn { color: var(--warn); }
+.watch-stop { flex: none; font-size: 12px; }
 .meet-apps .chip-btn { color: var(--text-2); }
 .meet-apps .chip-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 

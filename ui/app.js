@@ -78,6 +78,8 @@ const S = {
   summarizing: false,
   paused: false,
   fileMode: false,
+  // 지금 받아 적는 녹음 폴더 파일 이름 (녹음 폴더 지켜보기 — 뒤에서 하는 일이라 녹음 단추는 '녹음 시작')
+  watchJob: null,
   progress: null,
   update: null,
   updateDismissed: false,
@@ -607,7 +609,8 @@ function renderBanners(has) {
   // 회의를 다시 보는 중(지난 회의 · 마친 회의)에는 녹음 도크를 한 줄로 줄인다
   const review = S.rec === 'idle' && (!!v || ended);
   $('#app').classList.toggle('review', review);
-  $('#btn-rec').title = review ? '새 회의 녹음 시작' : '녹음 시작/중지';
+  $('#btn-rec').title = watching() ? '녹음 시작 — 받아 적던 녹음 폴더 파일은 녹음을 마친 뒤 다시 받아 적어요'
+    : review ? '새 회의 녹음 시작' : '녹음 시작/중지';
   renderNoAudio();
 }
 
@@ -683,11 +686,14 @@ function renderSetup() {
 }
 
 /* ───────────── 도크 ───────────── */
+// 녹음 폴더 파일을 뒤에서 받아 적는 중 — 녹음 단추는 그대로 '녹음 시작'(누르면 그 파일은 녹음 뒤 다시)
+const watching = () => !!S.watchJob && S.rec !== 'idle';
 function renderDock() {
   const app = $('#app');
-  const rec = S.rec === 'recording';
+  const bg = watching();
+  const rec = S.rec === 'recording' && !bg;
   app.classList.toggle('recording', rec);
-  app.classList.toggle('busy', S.rec === 'starting' || S.rec === 'stopping');
+  app.classList.toggle('busy', (S.rec === 'starting' || S.rec === 'stopping') && !bg);
   app.classList.toggle('paused', rec && S.paused);
   app.classList.toggle('filemode', S.rec !== 'idle' && S.fileMode);
   // 녹음 중이면 이번 녹음이 실제로 받는 소리 (회의 시작 알림에서 시작하면 설정과 다를 수 있다)
@@ -708,13 +714,14 @@ function renderDock() {
   $('#paused-tag').hidden = !(rec && S.paused);
   $('#paused-tag').textContent = S.sleepPaused ? '절전으로 멈춤' : '일시정지';
   $('#fprog').hidden = !(S.fileMode && S.rec !== 'idle');
+  $('#btn-watch-stop').hidden = !(bg && S.rec === 'recording');
   renderProgress();
   renderMiniCap();
   renderCatch();
   $('#btn-pin').classList.toggle('on', !!S.settings?.alwaysOnTop);
   $('#hotkey-hint').textContent = S.settings?.hotkey || '단축키 없음';
   const lbl = S.rec === 'stopping' ? '남은 발화를 정리하는 중…' : S.rec === 'starting' ? '준비하는 중…'
-    : S.fileMode && S.rec === 'recording' ? `파일 받아쓰기 · ${engineLabel()}` : engineLabel();
+    : S.fileMode && S.rec === 'recording' ? `${bg ? '녹음 폴더 받아 적는 중' : '파일 받아쓰기'} · ${engineLabel()}` : engineLabel();
   $('#engine-label').textContent = lbl;
   tickTimer();
 }
@@ -783,6 +790,7 @@ async function refreshState() {
   S.paused = !!S.app.paused;
   setMini(!!S.settings.miniMode);
   S.fileMode = !!S.app.fileMode;
+  S.watchJob = S.app.watchJob || null;
   S.recSource = S.app.recSource || null;
   if (S.app.update) S.update = S.app.update;
   applyTheme();
@@ -797,7 +805,12 @@ function onRec(state) {
   S.rec = state;
   if (state === 'starting' && prev === 'idle') {
     commitEdits();
-    S.live = true;
+    // 녹음 폴더 파일을 받아 적기 시작 — 보고 있던 회의(지난 회의 · 방금 마친 회의)는 그대로 두고 도크에 진행만 보인다
+    if (S.watchJob && (!S.live || hasContent(S.liveDoc))) {
+      if (S.live) { S.viewDoc = S.liveDoc; S.live = false; }
+    } else {
+      S.live = true;
+    }
     S.pending.clear();
     S.failed.clear();
     S.liveDoc = null;
@@ -822,7 +835,8 @@ function onRec(state) {
     S.speaking = false;
     S.paused = false;
     const note = S.refineMsg ? `\n${S.refineMsg}` : '';
-    if (S.fileMode && prev !== 'idle' && S.liveDoc?.utterances.length) toast(`파일 받아쓰기를 마쳤어요${note}`);
+    // 녹음 폴더 파일은 받아 적은 뒤 정리(bd://watch)에서 알린다
+    if (S.fileMode && prev !== 'idle' && S.liveDoc?.utterances.length && !S.watchJob) toast(`파일 받아쓰기를 마쳤어요${note}`);
     else if (note && prev !== 'idle') toast(S.refineMsg);
     S.refineMsg = '';
     S.fileMode = false;
@@ -998,6 +1012,86 @@ $('#btn-rec').addEventListener('click', async () => {
     if (/모델|API 키/.test(String(e))) openPanel('settings', 'record');
   }
 });
+
+// 녹음 폴더 파일 받아쓰기 멈추기 — 받아 적은 데까지 남기고 그 파일은 다시 받아 적지 않는다
+$('#btn-watch-stop').addEventListener('click', () => call('stop_recording'));
+
+/* ───────────── 녹음 폴더 지켜보기 ───────────── */
+const hasContent = (d) => !!(d && (d.utterances.length || String(d.notes || '').trim()));
+function refreshLists() {
+  if (!$('#panel-history').hidden) renderHistory();
+  if (!$('#empty').hidden) renderRecent();
+}
+// 뒤에서 요약한 회의를 보고 있으면 요약 칸에 바로 (직접 요약 · 요약 고치기 중이면 건드리지 않는다)
+function applyWatchSummary(e) {
+  for (const d of [S.liveDoc, S.viewDoc]) {
+    if (!d || d.id !== e.id || (S.summarizing && S.sumId === d.id) || S.sumEdit?.doc === d) continue;
+    d.summary = e.text;
+    d.summaryEdited = false;
+    d.summaryTemplate = e.template;
+    if (e.title && d.autoTitle) { d.title = e.title; d.autoTitle = false; }
+  }
+  if (doc()?.id === e.id) { renderMeta(); scheduleRender(); }
+}
+function onWatch(e) {
+  const end = () => {
+    S.watchJob = null;
+    // 다른 회의를 보던 중에 끝났으면 그 회의를 닫았을 때 빈 첫 화면으로 (받아 적은 회의는 기록에 있다)
+    if (!S.live && S.rec === 'idle' && S.liveDoc && S.liveDoc.id === e.id) S.liveDoc = null;
+  };
+  switch (e.kind) {
+    case 'start':
+      S.watchJob = e.file;
+      S.fileMode = true;
+      break;
+    case 'yield':
+      toast(`녹음을 먼저 할게요 — 받아 적던 '${e.file}'은(는) 녹음을 마친 뒤 다시 받아 적어요`, '', 5000);
+      break;
+    case 'done':
+      end();
+      toast(`녹음 폴더의 '${e.file}'을(를) 받아 적었어요${e.summarize ? ' · 요약하는 중…' : ''}`, '', 4000);
+      refreshLists();
+      break;
+    case 'summarized':
+      applyWatchSummary(e);
+      toast(`'${e.file}' 요약을 마쳤어요`);
+      refreshLists();
+      break;
+    case 'summaryFailed':
+      toast(`'${e.file}'은(는) 받아 적었지만 요약하지 못했어요\n${e.message}`, 'warn');
+      break;
+    case 'empty':
+      end();
+      toast(`녹음 폴더의 '${e.file}'에는 받아 적을 말이 없었어요`);
+      break;
+    case 'stopped':
+      end();
+      toast(`'${e.file}' 받아쓰기를 멈췄어요 — 받아 적은 데까지 기록에 남겼고, 이 파일은 다시 받아 적지 않아요`, '', 6000);
+      refreshLists();
+      break;
+    case 'requeued':
+      end();
+      break;
+    case 'retry':
+      end();
+      toast(`녹음 폴더의 '${e.file}'을(를) 받아 적지 못했어요 — 10분 뒤 다시 해 볼게요${e.message ? `\n${e.message}` : ''}`, 'warn');
+      break;
+    case 'failed':
+      end();
+      toast(`녹음 폴더의 '${e.file}'은(는) 세 번 해 봤지만 받아 적지 못했어요${e.message ? `\n${e.message}` : ''}`, 'error');
+      refreshLists();
+      break;
+    case 'removed':
+      // 다시 받아 적으려고 지운 기록 (받아 적다 만 것)
+      if (S.viewDoc?.id === e.id) { dropEdits(); S.viewDoc = null; S.live = true; }
+      if (S.liveDoc?.id === e.id && S.rec === 'idle') S.liveDoc = null;
+      renderDoc();
+      refreshLists();
+      break;
+  }
+  renderDock();
+  if (!$('#panel-settings').hidden && S.setTab === 'general') renderWatch();
+}
 
 $('#btn-min').addEventListener('click', () => api.win.minimize());
 $('#btn-close').addEventListener('click', () => api.invoke('hide_window'));
@@ -3965,6 +4059,9 @@ function renderSettings() {
   $('#opt-autoupdate').checked = s.autoUpdate;
   $('#opt-meet').checked = !!s.meetingAlert;
   renderMeetApps();
+  $('#opt-watch').checked = !!s.watchFolder;
+  $('#opt-watch-sum').checked = s.watchSummarize !== false;
+  renderWatch();
   setSeg('seg-theme', s.theme || 'system');
   renderAbout();
 }
@@ -3981,6 +4078,52 @@ function renderMeetApps() {
     b.setAttribute('aria-pressed', String(on.has(id)));
     return b;
   }));
+}
+// 설정 › 녹음 폴더 지켜보기: 폴더 · 지금 상태 (받아 적는 중 · 기다리는 파일 · 받아 적은 파일)
+const shortPath = (p) => {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return p.length > 44 && parts.length > 3 ? `${parts[0]}\\…\\${parts.slice(-2).join('\\')}` : p;
+};
+let watchReq = 0;
+async function renderWatch() {
+  const s = S.settings;
+  if (!s) return;
+  const on = !!s.watchFolder;
+  const dir = String(s.watchDir || '').trim();
+  $('#watch-dir-field').hidden = !on;
+  $('#watch-sum-row').hidden = !on;
+  const p = $('#watch-dir');
+  p.textContent = dir ? shortPath(dir) : '아직 고르지 않았어요';
+  p.title = dir;
+  p.classList.toggle('none', !dir);
+  const box = $('#watch-status');
+  const my = ++watchReq;
+  if (!on || !dir) { box.hidden = true; return; }
+  let st = null;
+  try { st = await api.invoke('watch_status'); } catch { /* 비움 */ }
+  if (my !== watchReq) return;
+  box.hidden = !st;
+  if (!st) return;
+  if (!st.on) { box.textContent = '폴더를 살펴보는 중…'; return; }
+  const lines = [];
+  if (st.problem) lines.push(`<span class="warn">${esc(st.problem)}</span>`);
+  if (st.working) lines.push(`지금 받아 적는 중: <b>${esc(st.working)}</b>`);
+  if (st.waiting) lines.push(`기다리는 파일 ${st.waiting}개 — 다 내려받아지고 녹음 중이 아닐 때 받아 적어요`);
+  const tally = [`받아 적은 파일 ${st.done}개`];
+  if (st.skipped) tally.push(`켤 때 있던 ${st.skipped}개는 건너뜀`);
+  if (st.stopped) tally.push(`멈춘 파일 ${st.stopped}개`);
+  if (st.failed) tally.push(`받아 적지 못한 파일 ${st.failed}개`);
+  lines.push(tally.join(' · '));
+  if (st.last) lines.push(`마지막: ${esc(st.last.name)} (${esc(String(st.last.at).slice(5))})`);
+  if (st.stopped || st.failed) lines.push('멈춘 · 받아 적지 못한 파일은 창에 끌어 놓으면 다시 받아 적어요.');
+  box.innerHTML = lines.join('<br>');
+}
+async function pickWatchDir() {
+  const r = await api.open({ directory: true, multiple: false, defaultPath: S.settings.watchDir || undefined });
+  const dir = Array.isArray(r) ? r[0] : r;
+  if (!dir) return null;
+  S.settings.watchDir = String(dir);
+  return S.settings.watchDir;
 }
 // 앱 정보 카드: 버전 + 업데이트 상태
 function renderAbout() {
@@ -4235,6 +4378,26 @@ bind('opt-meet', (t) => {
   renderMeetApps();
   if (t.checked) toast(`회의 앱이 마이크를 쓰기 시작하면 시계 위에서 물어볼게요${S.app?.autostart ? '' : '\n받아쓰기가 켜져 있어야 해요 — Windows 시작 시 실행도 켜 두면 놓치지 않아요'}`, '', 6000);
 });
+$('#opt-watch').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  // 처음 켤 때는 지켜볼 폴더부터 고른다 (고르지 않으면 켜지 않는다)
+  if (on && !String(S.settings.watchDir || '').trim() && !(await pickWatchDir())) { e.target.checked = false; return; }
+  S.settings.watchFolder = on;
+  saveSettings();
+  renderWatch();
+  if (on) toast(`이 폴더에 새로 생기는 녹음 파일을 받아 적어요 · 지금 있는 파일은 건너뛰어요${S.app?.autostart ? '' : '\n받아쓰기가 켜져 있어야 해요 — Windows 시작 시 실행도 켜 두면 놓치지 않아요'}`, '', 6000);
+  setTimeout(renderWatch, 900);
+});
+$('#btn-watch-dir').addEventListener('click', async () => {
+  const prev = S.settings.watchDir;
+  const dir = await pickWatchDir();
+  if (!dir || dir === prev) return;
+  saveSettings();
+  renderWatch();
+  if (S.settings.watchFolder) toast('새 폴더를 지켜봐요 — 지금 있는 파일은 건너뛰고 새 파일만 받아 적어요', '', 5000);
+  setTimeout(renderWatch, 900);
+});
+bind('opt-watch-sum', (t) => (S.settings.watchSummarize = t.checked));
 $('#meet-apps').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-app]');
   if (!b) return;
@@ -4419,6 +4582,7 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   // 중요 표시 ⭐ 전역 단축키 (다른 창을 보고 있어도)
   await api.listen('bd://star', () => addStar());
   await api.listen('bd://update', (e) => onUpdate(e.payload));
+  await api.listen('bd://watch', (e) => onWatch(e.payload || {}));
   await refreshState();
   loadTemplates();
   syncMaxed();
@@ -4580,6 +4744,7 @@ function createMock() {
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
       meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
+      watchFolder: false, watchDir: '', watchSummarize: true,
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '', template: 'meeting', templates: [] },
       usdKrw: 1360,
@@ -4630,6 +4795,7 @@ function createMock() {
       };
       if (cmd === 'session_audio') return demoWavUrl();
       if (cmd === 'list_voices') return mockVoices;
+      if (cmd === 'watch_status') return { on: st.settings.watchFolder, problem: null, working: null, waiting: 1, done: 3, skipped: 12, stopped: 0, failed: 0, last: { state: 'done', name: '음성 메모 2026-11-20 0930.m4a', at: '2026-11-20 10:02', doc: 's4' } };
       if (cmd === 'forget_voice') { mockVoices = mockVoices.filter((v) => v.name !== args.name); return; }
       if (cmd === 'forget_all_voices') { mockVoices = []; return; }
       if (cmd === 'set_mini') { st.settings.miniMode = args.mini; handlers['bd://mini'] && handlers['bd://mini']({ payload: args.mini }); return; }
@@ -4701,7 +4867,7 @@ function createMock() {
       onResized() {},
     },
     save: async () => null,
-    open: async () => null,
+    open: async (o) => (o?.directory ? 'C:\\Users\\me\\OneDrive\\녹음\\휴대폰 녹음' : null),
     ask: async (m) => confirm(m),
   };
 }

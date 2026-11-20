@@ -372,6 +372,8 @@ fn rec_now(app: &AppHandle) -> Rec {
     let rec = *st.rec.lock();
     match rec {
         RecState::Idle => Rec::Idle,
+        // 녹음 폴더 파일을 받아 적는 중이면 쉬는 것으로 본다 — 받아쓰기를 시작하면 그 파일은 비켜 준다
+        _ if crate::watch::job_running(app) => Rec::Idle,
         RecState::Recording if !st.file_mode.load(std::sync::atomic::Ordering::SeqCst) => Rec::Recording,
         _ => Rec::Busy,
     }
