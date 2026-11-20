@@ -1057,6 +1057,10 @@ function onWatch(e) {
       toast(`'${e.file}' 요약을 마쳤어요`);
       refreshLists();
       break;
+    case 'summaryKept':
+      // 요약하는 사이 직접 요약했거나 요약을 고쳤다 — 그것을 지켰다
+      toast(`'${e.file}'은(는) 그 사이 요약이 생겨 자동 요약을 넣지 않았어요`);
+      break;
     case 'summaryFailed':
       toast(`'${e.file}'은(는) 받아 적었지만 요약하지 못했어요\n${e.message}`, 'warn');
       break;

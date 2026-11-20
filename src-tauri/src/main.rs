@@ -600,6 +600,7 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
             _ => None,
         };
         let mut doc = SessionDoc::new(engine.label());
+        doc.id = st.store.lock().unique_id(&doc.id);
         if let Some(f) = file {
             let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("오디오 파일").to_string();
             let stem = f.file_stem().and_then(|n| n.to_str()).unwrap_or("오디오 파일");
@@ -1352,11 +1353,21 @@ impl Drop for BusyGuard<'_> {
 #[tauri::command]
 /// `template` 은 쓸 요약 틀 — 없으면 이 회의에 마지막으로 쓴 틀, 그것도 없으면 설정의 기본 틀
 async fn summarize(app: AppHandle, id: String, token: u64, template: Option<String>) -> CmdResult<SummaryDto> {
-    summarize_doc(&app, id, token, template).await
+    summarize_doc(&app, id, token, template, false).await
 }
 
-/// 회의를 요약해 기록에 얹는다 (화면의 요약 · 녹음 폴더 지켜보기의 자동 요약)
-pub(crate) async fn summarize_doc(app: &AppHandle, id: String, token: u64, template: Option<String>) -> CmdResult<SummaryDto> {
+/// 자동 요약을 넣지 않았다 — 그 사이 사람이 요약을 고쳤거나 직접 요약했다
+pub(crate) const SUMMARY_KEPT: &str = "그 사이 요약이 생겨 자동 요약은 넣지 않았어요";
+
+/// 회의를 요약해 기록에 얹는다 (화면의 요약 · 녹음 폴더 지켜보기의 자동 요약).
+/// `auto` 면 요약하는 사이 사람이 요약을 고쳐 저장했거나 직접 요약한 것을 덮어쓰지 않는다 ([`SUMMARY_KEPT`])
+pub(crate) async fn summarize_doc(
+    app: &AppHandle,
+    id: String,
+    token: u64,
+    template: Option<String>,
+    auto: bool,
+) -> CmdResult<SummaryDto> {
     let st = app.state::<AppState>();
     st.busy_ops.fetch_add(1, Ordering::SeqCst);
     let _busy = BusyGuard(&st.busy_ops);
@@ -1419,6 +1430,9 @@ pub(crate) async fn summarize_doc(app: &AppHandle, id: String, token: u64, templ
     // 요약하는 동안 바뀐 내용(이름 바꾸기 등)을 덮어쓰지 않도록 최신 기록에 요약만 얹는다
     let loaded = st.store.lock().load(&id);
     let mut latest = loaded.unwrap_or_else(|_| doc2.clone());
+    if auto && (latest.summary_edited || latest.summary.as_deref().is_some_and(|s| !s.trim().is_empty())) {
+        return Err(SUMMARY_KEPT.into());
+    }
     // 그 사이 화자에 이름을 붙였거나 합쳤으면 요약 속 "화자 3" 도 지금 이름으로
     let text = latest.carry_speaker_names(&sum.text, &doc2);
     latest.summary = Some(text.clone());

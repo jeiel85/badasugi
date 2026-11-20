@@ -840,13 +840,17 @@ fn summarize_later(app: AppHandle, id: String, name: String) {
     let _ = std::thread::Builder::new().name("bd-watch-sum".into()).spawn(move || {
         let token = SUMMARY_TOKEN_BASE + app.state::<Watch>().tokens.fetch_add(1, Ordering::SeqCst);
         let _ = app.emit("bd://watch", serde_json::json!({ "kind": "summarizing", "id": id, "file": name }));
-        match tauri::async_runtime::block_on(crate::summarize_doc(&app, id.clone(), token, None)) {
+        match tauri::async_runtime::block_on(crate::summarize_doc(&app, id.clone(), token, None, true)) {
             Ok(r) => {
                 log::info!("녹음 폴더 파일 요약 끝");
                 let _ = app.emit(
                     "bd://watch",
                     serde_json::json!({ "kind": "summarized", "id": id, "file": name, "text": r.text, "title": r.title, "template": r.template }),
                 );
+            }
+            Err(e) if e == crate::SUMMARY_KEPT => {
+                log::info!("녹음 폴더 파일 자동 요약은 넣지 않음 — 그 사이 요약이 생김");
+                let _ = app.emit("bd://watch", serde_json::json!({ "kind": "summaryKept", "id": id, "file": name }));
             }
             Err(e) => {
                 log::warn!("녹음 폴더 파일 요약 실패: {e}");
