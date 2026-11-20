@@ -79,6 +79,8 @@ pub(crate) struct AppState {
     /// 요약 번호 → 멈추라는 신호. 화면이 앞선 저장을 기다리느라 요약이 아직 시작되지 않았을 때 멈춰도
     /// 그 번호에 신호를 먼저 꽂아 두어, 요약이 시작되자마자 요청 없이 멈춘다
     summary_cancel: Mutex<BTreeMap<u64, Arc<AtomicBool>>>,
+    /// 번역 단추로 번역하고 있는 회의 id — 그동안 그 회의의 실시간 번역은 쉰다 (두 작업이 서로의 번역을 지우지 않게)
+    tr_busy: Mutex<BTreeSet<String>>,
     /// 지금 세션이 파일 받아쓰기인지
     pub file_mode: AtomicBool,
     /// 파일 받아쓰기 진행률 + 1 (0 = 모름)
@@ -1487,12 +1489,15 @@ fn translate_step(
     lang: &str,
     doc: &SessionDoc,
     todo: &[u64],
+    live: bool,
 ) -> anyhow::Result<Vec<u64>> {
     let b = translate::translate_batch(chat, lang, doc, todo)?;
     let book = app.state::<usage_book::UsageBook>();
     book.summary(provider, &b.reply.model, b.reply.in_tokens, b.reply.out_tokens, b.reply.cache_write, b.reply.cache_read);
     book.save();
-    if !b.items.is_empty() {
+    // 실시간 번역의 답이 오는 사이 번역 단추가 이 회의를 맡았으면 버린다 (다른 언어면 단추의 번역을 지우게 된다)
+    let yielded = live && app.state::<AppState>().tr_busy.lock().contains(&doc.id);
+    if !b.items.is_empty() && !yielded {
         let items: BTreeMap<u64, translate::TrItem> = b.items.iter().cloned().collect();
         app.state::<AppState>().store.lock().update_translation(&doc.id, |t| translate::merge(t, lang, b.items))?;
         let _ = app.emit("bd://translation", serde_json::json!({ "id": doc.id, "lang": lang, "items": items }));
@@ -1542,11 +1547,18 @@ fn spawn_live_translation(app: AppHandle, id: String) {
             if resume_at.is_some_and(|t| Instant::now() < t) {
                 continue;
             }
+            // 번역 단추가 이 회의를 번역하는 동안은 쉰다
+            if st.tr_busy.lock().contains(&id) {
+                continue;
+            }
             let Ok(doc) = doc_for_translation(&app, &id) else {
                 break;
             };
+            // 이 회의에 이미 번역이 있으면 그 언어로 (번역 단추로 다른 언어를 고른 회의를 설정 언어로 되돌리지 않게)
+            let lang =
+                doc.translation.as_ref().filter(|t| !t.items.is_empty()).map_or_else(|| tcfg.lang.clone(), |t| t.lang.clone());
             let todo: Vec<u64> =
-                translate::pending(&doc, &tcfg.lang).into_iter().filter(|u| misses.get(u).copied().unwrap_or(0) < 2).collect();
+                translate::pending(&doc, &lang).into_iter().filter(|u| misses.get(u).copied().unwrap_or(0) < 2).collect();
             if todo.is_empty() {
                 first_seen = None;
                 if ended {
@@ -1559,11 +1571,11 @@ fn spawn_live_translation(app: AppHandle, id: String) {
                 continue;
             }
             let step = summary::chat_caller(&cfg)
-                .and_then(|(provider, mut chat)| translate_step(&app, &mut chat, &provider, &tcfg.lang, &doc, &todo));
+                .and_then(|(provider, mut chat)| translate_step(&app, &mut chat, &provider, &lang, &doc, &todo, true));
             match step {
                 Ok(sent) => {
                     first_seen = None;
-                    count_misses(&app, &id, &tcfg.lang, sent, &mut misses);
+                    count_misses(&app, &id, &lang, sent, &mut misses);
                 }
                 Err(e) => {
                     if let Some(w) = summary::wait_for(&e) {
@@ -1600,6 +1612,17 @@ struct TranslateResult {
 #[tauri::command]
 async fn translate_session(app: AppHandle, id: String, lang: String, token: u64) -> CmdResult<TranslateResult> {
     let st = app.state::<AppState>();
+    // 회의마다 번역 단추 작업은 하나 — 그동안 그 회의의 실시간 번역은 쉰다
+    if !st.tr_busy.lock().insert(id.clone()) {
+        return Err("이 회의를 이미 번역하고 있어요".into());
+    }
+    struct TrGuard<'a>(&'a Mutex<BTreeSet<String>>, String);
+    impl Drop for TrGuard<'_> {
+        fn drop(&mut self) {
+            self.0.lock().remove(&self.1);
+        }
+    }
+    let _owner = TrGuard(&st.tr_busy, id.clone());
     st.busy_ops.fetch_add(1, Ordering::SeqCst);
     let _busy = BusyGuard(&st.busy_ops);
     let cfg = st.settings.lock().summary.clone();
@@ -1627,7 +1650,7 @@ async fn translate_session(app: AppHandle, id: String, lang: String, token: u64)
                 let translation = doc.translation.filter(|t| t.lang == lang);
                 return Ok(TranslateResult { translation, missed: left.len() });
             }
-            match translate_step(&app2, &mut chat, &provider, &lang, &doc, &todo) {
+            match translate_step(&app2, &mut chat, &provider, &lang, &doc, &todo, false) {
                 Ok(sent) => count_misses(&app2, &id2, &lang, sent, &mut misses),
                 Err(e) => {
                     let Some(w) = summary::wait_for(&e).filter(|w| *w <= summary::MAX_WAIT_SECS) else {
@@ -2365,6 +2388,7 @@ fn main() {
                 downloading: Mutex::new(None),
                 busy_ops: AtomicUsize::new(0),
                 summary_cancel: Mutex::new(BTreeMap::new()),
+                tr_busy: Mutex::new(BTreeSet::new()),
                 file_mode: AtomicBool::new(false),
                 file_pct: AtomicUsize::new(0),
                 save_warned: AtomicBool::new(false),

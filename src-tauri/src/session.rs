@@ -779,10 +779,25 @@ impl SessionDoc {
         self.utterances.iter().filter_map(|u| Some((u.id, t.get(u.id, &u.text)?))).collect()
     }
 
-    /// 문장들의 번역 — 번역된 문장만 빈칸으로 잇는다. 하나도 없으면 None
+    /// 문장들의 번역 — 번역된 문장만 빈칸으로 잇는다. 하나도 없으면 None ("둘 다" 의 문단 아래 줄)
     pub(crate) fn tr_join(map: &HashMap<u64, &str>, ids: &[u64]) -> Option<String> {
         let parts: Vec<&str> = ids.iter().filter_map(|id| map.get(id).copied()).filter(|t| !t.trim().is_empty()).collect();
         (!parts.is_empty()).then(|| parts.join(" "))
+    }
+
+    /// 문장 id → 원문
+    pub(crate) fn orig_map(&self) -> HashMap<u64, &str> {
+        self.utterances.iter().map(|u| (u.id, u.text.as_str())).collect()
+    }
+
+    /// "번역만" 의 문단 글 — 문장마다 번역, 번역이 없는 문장(멈춘 번역 · 빠진 번호 · 고친 문장)은 원문으로 채운다
+    pub(crate) fn tr_only(tr: &HashMap<u64, &str>, orig: &HashMap<u64, &str>, ids: &[u64]) -> String {
+        ids.iter()
+            .filter_map(|id| tr.get(id).copied().filter(|t| !t.trim().is_empty()).or_else(|| orig.get(id).copied()))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Markdown 회의록 — `mode`: 녹취록을 원문 · 번역 · 둘 다(문단 아래 🌐 번역)
@@ -816,10 +831,11 @@ impl SessionDoc {
         }
         s.push_str(&self.stats_markdown());
         s.push_str("## 녹취록\n\n");
+        let orig = self.orig_map();
         for (spk, start, _, text, ids) in self.paragraphs() {
             let t = Self::tr_join(&tr, &ids);
             let body = match (mode, &t) {
-                (TrMode::Tr, Some(t)) => t.clone(),
+                (TrMode::Tr, Some(_)) => Self::tr_only(&tr, &orig, &ids),
                 _ => text,
             };
             s.push_str(&format!("**{}** `{}`  \n{}\n\n", self.speaker_name(spk), fmt_time(start), body));
@@ -852,12 +868,13 @@ impl SessionDoc {
     /// 텍스트 녹취록 — `mode`: 원문 · 번역 · 둘 다(줄 아래 "  ↳ 번역")
     pub fn text(&self, mode: TrMode) -> String {
         let tr = if mode == TrMode::Orig { HashMap::new() } else { self.tr_map() };
+        let orig = self.orig_map();
         let mut s = String::new();
         for (spk, start, _, text, ids) in self.paragraphs() {
             let t = Self::tr_join(&tr, &ids);
             let body = match (mode, &t) {
-                (TrMode::Tr, Some(t)) => t.as_str(),
-                _ => text.as_str(),
+                (TrMode::Tr, Some(_)) => Self::tr_only(&tr, &orig, &ids),
+                _ => text,
             };
             s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), body));
             if let (TrMode::Both, Some(t)) = (mode, &t) {

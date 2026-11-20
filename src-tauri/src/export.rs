@@ -310,11 +310,13 @@ pub(crate) fn blocks(doc: &SessionDoc, tr: TrMode) -> Vec<Block> {
         out.push(Block::H1("녹취록".into()));
     }
     let trs = if tr == TrMode::Orig { Default::default() } else { doc.tr_map() };
+    let orig = doc.orig_map();
     for (spk, start, _, text, ids) in paras {
         let color = doc.resolve(spk).map_or(NO_SPEAKER, |n| COLORS[n as usize % COLORS.len()]);
         out.push(Block::Turn { name: doc.speaker_name(spk), color, time: fmt_time(start) });
         match (tr, SessionDoc::tr_join(&trs, &ids)) {
-            (TrMode::Tr, Some(t)) => out.push(Block::Speech(t)),
+            // 번역 안 된 문장은 원문으로 채운다 (문단 일부만 번역됐어도 문장이 빠지지 않게)
+            (TrMode::Tr, Some(_)) => out.push(Block::Speech(SessionDoc::tr_only(&trs, &orig, &ids))),
             (TrMode::Both, Some(t)) => {
                 out.push(Block::Speech(text));
                 out.push(Block::Translated(t));
@@ -976,14 +978,16 @@ mod tests {
         assert_eq!(both[0], Block::Speech("시작하겠습니다. 결제 모듈은 금요일까지.".into()));
         assert_eq!(both[1], Block::Translated("Let's begin.".into()));
         assert!(matches!(both[2], Block::Speech(_)), "번역이 없는 문단은 원문만");
+        // 번역만: 번역 안 된(낡은) 문장은 원문으로 채운다 — 문단 일부만 번역돼도 문장이 빠지지 않게
         let tr = speech(&blocks(&d, TrMode::Tr));
-        assert_eq!(tr[0], Block::Speech("Let's begin.".into()));
+        assert_eq!(tr[0], Block::Speech("Let's begin. 결제 모듈은 금요일까지.".into()));
         assert_eq!(tr.len(), 2);
-        assert!(html(&d, TrMode::Both).contains("<p class=\"pd-tr\">🌐 Let&#39;s begin.</p>") || html(&d, TrMode::Both).contains("<p class=\"pd-tr\">🌐 Let's begin.</p>"));
+        assert!(html(&d, TrMode::Both).contains("<p class=\"pd-tr\">🌐 Let's begin.</p>"));
         assert_eq!(speech(&blocks(&d, TrMode::Orig)).len(), 2, "원문만");
         // Markdown · 텍스트 · 자막도
         assert!(d.markdown(TrMode::Both).contains("시작하겠습니다. 결제 모듈은 금요일까지.\n\n🌐 Let's begin.\n\n"));
-        assert!(d.text(TrMode::Tr).starts_with("[00:01] 화자 1: Let's begin.\n"));
+        assert!(d.text(TrMode::Tr).starts_with("[00:01] 화자 1: Let's begin. 결제 모듈은 금요일까지.\n"));
+        assert!(d.markdown(TrMode::Tr).contains("  \nLet's begin. 결제 모듈은 금요일까지.\n\n"));
         assert!(d.srt(TrMode::Both).contains("화자 1: 시작하겠습니다.\nLet's begin.\n\n"));
         assert!(d.srt(TrMode::Both).contains("화자 1: 결제 모듈은 금요일까지.\n\n"), "낡은 번역은 싣지 않는다");
     }
