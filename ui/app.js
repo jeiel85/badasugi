@@ -8,7 +8,7 @@ const T = window.__TAURI__;
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
 // (요약 보내기도 기록을 읽는다 — 요약을 고치고 바로 보내도 고친 요약으로)
 const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
-  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics']);
+  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
 const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all']);
 let orderedChain = Promise.resolve();
@@ -2152,9 +2152,24 @@ $('#pop-save').addEventListener('click', async (e) => {
   const safe = (d.title || d.id).replace(/[\\/:*?"<>|]/g, '_');
   const path = await api.save({ defaultPath: `${safe}.${fmtName}`, filters: [{ name: fmtName.toUpperCase(), extensions: [fmtName] }] });
   if (!path) return;
-  await call('export_session', { id: d.id, format: fmtName, path });
+  if (fmtName === 'pdf') await exportPdf(d, path);
+  else await call('export_session', { id: d.id, format: fmtName, path });
   toast('저장했어요');
 });
+// PDF: 앱(export.rs)이 그린 회의록 HTML 을 인쇄용 칸에 넣고, 인쇄할 때 그 칸만 보이게 한 뒤(body.printing)
+// 화면을 PDF 로 (WebView2 PrintToPdf — 인쇄 대화상자 없이). 끝나면 칸을 비운다
+async function exportPdf(d, path) {
+  const box = $('#print-doc');
+  box.innerHTML = await call('export_html', { id: d.id });
+  document.body.classList.add('printing');
+  try {
+    await document.fonts.ready;
+    await call('print_pdf', { path, title: d.title || '' });
+  } finally {
+    document.body.classList.remove('printing');
+    box.innerHTML = '';
+  }
+}
 
 $('#btn-source').addEventListener('click', (e) => {
   if (S.mini) {
@@ -4636,6 +4651,12 @@ function createMock() {
       if (cmd === 'share_messenger') return '[앱 출시 일정 회의] 11/19(목) 회의 정리\n다음 달 15일 앱 출시 확정\n\n✅ 결정 사항\n• ⭐ 출시일 15일 확정\n\n📌 할 일\n• 결제 모듈 배포 — 이 개발 · 금요일까지';
       if (cmd === 'open_mail_draft') return '안녕하세요.\n11월 19일 앱 출시 일정 회의 내용을 정리해 공유드립니다.\n\n■ 결정 사항\n- ⭐ 출시일 15일 확정\n\n감사합니다.\n';
       if (cmd === 'export_todos_ics') return 2;
+      // PDF 내보내기: 앱(export.rs html)과 같은 모양의 짧은 예시
+      if (cmd === 'export_html') return '<article class="pd"><h1 class="pd-title">앱 출시 일정 회의</h1><table class="pd-meta"><tr><th>일시</th><td>2026-11-19 14:30</td></tr></table>'
+        + '<h2>요약</h2><h3>할 일</h3><table class="pd-tbl"><colgroup><col style="width:8%"><col style="width:70%"><col style="width:22%"></colgroup><thead><tr><th>확인</th><th>할 일</th><th>기한</th></tr></thead>'
+        + '<tbody><tr><td>☐</td><td>결제 모듈 배포 <span class="pd-t">[00:07]</span></td><td>금요일</td></tr></tbody></table>'
+        + '<h2>녹취록</h2><div class="pd-turn"><b style="color:#7c6cff">김 팀장</b><span class="pd-t">00:01</span></div><p class="pd-sp">시작하겠습니다.</p></article>';
+      if (cmd === 'print_pdf') { await new Promise((r) => setTimeout(r, 300)); return; }
       if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
       if (cmd === 'ask_meeting') return mockAsk(args);
       // 모든 회의에 묻기: 기록 두 개를 실은 척, 답을 조금씩 (?askfail 이면 오류)

@@ -936,3 +936,37 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .meet-x { flex: none; display: grid; place-items: center; width: 26px; height: 26px; margin-top: -4px; border-radius: 7px; color: var(--muted); }
 .meet-x:hover { background: var(--sunken); color: var(--text); }
 .meet-x svg { width: 14px; height: 14px; stroke-width: 2.2; }
+
+/* ───────────── PDF 내보내기 (export.rs 의 html → #print-doc → PrintToPdf) ─────────────
+   화면에는 보이지 않는다. 내보내는 동안(body.printing) 인쇄할 때만 이 칸만 보인다 — Ctrl+P 같은 보통 인쇄는 그대로.
+   테마와 상관없이 흰 종이 · 짙은 글씨 */
+#print-doc { display: none; }
+@media print {
+  html:has(body.printing), body.printing { height: auto !important; overflow: visible !important; background: #fff !important; }
+  body.printing > *:not(#print-doc) { display: none !important; }
+  body.printing #print-doc { display: block; }
+}
+.pd { color: #17171c; font-family: var(--font); font-size: 10pt; line-height: 1.62; letter-spacing: -0.005em; word-break: keep-all; overflow-wrap: anywhere; }
+.pd b { font-weight: 700; }
+.pd-title { font-size: 19pt; line-height: 1.3; margin: 0 0 10pt; font-weight: 800; }
+.pd h2 { font-size: 13pt; font-weight: 800; margin: 18pt 0 6pt; padding-bottom: 3pt; border-bottom: 1px solid #d5d5de; break-after: avoid; }
+.pd h3 { font-size: 11pt; font-weight: 700; color: #3a3a48; margin: 11pt 0 3pt; break-after: avoid; }
+.pd p { margin: 0 0 4pt; }
+.pd-meta, .pd-tbl { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 9pt; line-height: 1.45; margin: 3pt 0 8pt; }
+.pd-meta th, .pd-meta td, .pd-tbl th, .pd-tbl td { border: 1px solid #d5d5de; padding: 3.5pt 6pt; text-align: left; vertical-align: top; }
+.pd-meta th { width: 20%; background: #f4f4f7; color: #4a4a57; font-weight: 600; }
+.pd-tbl th { background: #f1f1f5; font-weight: 700; }
+.pd-tbl tr { break-inside: avoid; }
+.pd-tbl thead { display: table-header-group; }
+.pd-li { position: relative; margin: 0 0 2pt 13pt; }
+.pd-li::before { content: "•"; position: absolute; left: -10pt; color: #6a6a78; }
+.pd-li[data-d="1"] { margin-left: 27pt; } .pd-li[data-d="1"]::before { content: "◦"; }
+.pd-li[data-d="2"] { margin-left: 41pt; } .pd-li[data-d="2"]::before { content: "▪"; font-size: 8pt; }
+.pd-li[data-d="3"] { margin-left: 55pt; } .pd-li[data-d="3"]::before { content: "–"; }
+.pd-li.pd-chk::before { content: none; }
+.pd-box { position: absolute; left: -13pt; }
+.pd-t { color: #8a8a99; font-size: 8.5pt; font-variant-numeric: tabular-nums; }
+.pd-turn { margin: 9pt 0 1pt; break-after: avoid; }
+.pd-turn .pd-t { margin-left: 7pt; }
+.pd-sp { margin: 0 0 3pt; }
+.pd-note { margin: 0 0 4pt 6pt; padding: 1pt 0 1pt 7pt; border-left: 2.5px solid #c9c9d6; color: #4a4a57; font-size: 9pt; break-inside: avoid; }

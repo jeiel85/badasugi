@@ -4,6 +4,7 @@
 mod ant;
 mod ask;
 mod ask_all;
+mod export;
 mod logging;
 mod meeting;
 mod power;
@@ -1181,6 +1182,9 @@ async fn export_session(app: AppHandle, id: String, format: String, path: String
 
 fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String) -> CmdResult<()> {
     let doc = app.state::<AppState>().store.lock().load(id).map_err(err)?;
+    if format == "docx" {
+        return std::fs::write(path, export::docx(&doc)).map_err(err);
+    }
     let body = match format {
         "md" => doc.to_markdown(),
         "txt" => doc.to_text(),
@@ -1195,6 +1199,26 @@ fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String) -> 
     }
     bytes.extend_from_slice(body.as_bytes());
     std::fs::write(path, bytes).map_err(err)
+}
+
+/// PDF 로 낼 회의록 HTML — 화면이 인쇄용 칸(`#print-doc`)에 넣고 [`print_pdf`] 를 부른다
+#[tauri::command]
+async fn export_html(app: AppHandle, id: String) -> CmdResult<String> {
+    off_main(move || {
+        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        Ok(export::html(&doc))
+    })
+    .await
+}
+
+/// 화면의 인쇄용 칸을 PDF 파일로 (WebView2 PrintToPdf — 인쇄 대화상자 없이)
+#[tauri::command]
+async fn print_pdf(app: AppHandle, path: String, title: String) -> CmdResult<()> {
+    off_main(move || {
+        let w = app.get_webview_window("main").ok_or("창을 찾을 수 없어요")?;
+        export::print_pdf(&w, Path::new(&path), &title)
+    })
+    .await
 }
 
 /// 요약을 보내기 좋게 — 할 일 수 (전체, 기한을 날짜로 읽을 수 있는 것)
@@ -2202,6 +2226,8 @@ fn main() {
             undo_refinement,
             delete_session,
             export_session,
+            export_html,
+            print_pdf,
             share_info,
             share_messenger,
             open_mail_draft,
