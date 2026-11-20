@@ -71,6 +71,15 @@ pub fn pick(now: NaiveDateTime, items: &[(Item, bool)]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Outlook 에 물을 범위 — 오늘 하루에 고르는 여유(시작 15분 전 · 끝나고 5분)를 더한다
+/// (자정 근처에 시작한 녹음도 내일 0시 회의 · 방금 0시에 끝난 회의를 찾게)
+pub fn query_range(now: NaiveDateTime) -> (NaiveDateTime, NaiveDateTime) {
+    let day = now.date().and_hms_opt(0, 0, 0).unwrap_or(now);
+    let from = day.min(now - chrono::Duration::minutes(LATE + 1));
+    let to = (day + chrono::Duration::days(1)).max(now + chrono::Duration::minutes(EARLY + 1));
+    (from, to)
+}
+
 /// 다음 일정 (오늘 안, 지금 뒤에 시작)
 pub fn next_after(now: NaiveDateTime, items: &[(Item, bool)]) -> Option<usize> {
     items
@@ -407,8 +416,8 @@ pub(crate) fn read_now() -> Status {
             com::Outlook::App(a) => a,
         };
         let trusted = com::trusted(&app);
-        let day = now.date().and_hms_opt(0, 0, 0).unwrap_or(now);
-        match com::events(&app, day, day + chrono::Duration::days(1), trusted) {
+        let (from, to) = query_range(now);
+        match com::events(&app, from, to, trusted) {
             Ok(list) => {
                 let times: Vec<(Item, bool)> = list.iter().map(|(i, skip, _)| (*i, *skip)).collect();
                 let now_ev = pick(now, &times).map(|i| list[i].2.clone());
@@ -503,6 +512,20 @@ mod tests {
         println!("상태: {st:?} · Outlook 실행 {before} → {after}");
         assert!(st.is_some());
         assert!(before || !after, "꺼져 있던 Outlook 이 떴어요");
+    }
+
+    #[test]
+    fn query_covers_the_margins_around_midnight() {
+        let at = |d: u32, h: u32, m: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(h, m, 0).unwrap();
+        // 낮에는 오늘 하루
+        assert_eq!(query_range(at(20, 14, 0)), (at(20, 0, 0), at(21, 0, 0)));
+        // 23:50 → 내일 0시 회의도 (시작 15분 전)
+        let (_, to) = query_range(at(20, 23, 50));
+        assert!(to > at(21, 0, 0));
+        assert_eq!(pick(at(20, 23, 50), &[(Item { start: at(21, 0, 0), end: at(21, 1, 0) }, false)]), Some(0));
+        // 0:03 → 방금 0시에 끝난 회의도 (끝나고 5분)
+        let (from, _) = query_range(at(21, 0, 3));
+        assert!(from < at(21, 0, 0));
     }
 
     #[test]

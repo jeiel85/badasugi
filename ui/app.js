@@ -1043,11 +1043,14 @@ function applyWatchSummary(e) {
 function onCalendar(e) {
   const d = S.liveDoc;
   if (!d || d.id !== e.id) return;
-  d.title = e.title;
-  d.autoTitle = !!e.autoTitle;
+  // 기다리는 사이 사람이 제목을 고쳤으면(아직 저장 전이어도) 그 제목을 지킨다 — 참석자만 받는다
+  const keep = !d.autoTitle;
+  if (!keep) { d.title = e.title; d.autoTitle = !!e.autoTitle; }
   d.attendees = e.attendees || [];
   renderMeta();
-  toast(`일정 '${e.subject}'에서 제목을 가져왔어요${d.attendees.length ? ` · 화자 이름을 바꿀 때 참석자 ${d.attendees.length}명 중에서 고를 수 있어요` : ''}`, '', 5000);
+  const who = d.attendees.length ? `화자 이름을 바꿀 때 참석자 ${d.attendees.length}명 중에서 고를 수 있어요` : '';
+  if (!keep) toast(`일정 '${e.subject}'에서 제목을 가져왔어요${who ? ` · ${who}` : ''}`, '', 5000);
+  else if (who) toast(`일정 '${e.subject}'의 참석자를 가져왔어요 · ${who}`, '', 5000);
 }
 function onWatch(e) {
   const end = () => {
