@@ -2328,11 +2328,14 @@ function renderTrPop() {
   const lang = S.trLang || (hasTr(d) ? d.translation.lang : S.settings?.translate?.lang) || 'ko';
   sel.value = lang;
   const job = S.trJob && S.trJob.id === d.id ? S.trJob : null;
+  // 번역 단추 작업은 한 번에 하나 — 다른 회의를 번역하는 동안은 이 회의에서 시작하지 않는다
+  const elsewhere = S.trJob && S.trJob.id !== d.id ? S.trJob : null;
   const { done, total } = trCount(d, lang);
   const other = hasTr(d) && d.translation.lang !== lang;
   sel.disabled = !!job;
   $('#tr-status').textContent = job
     ? (job.waitSecs ? `요청 한도에 걸려 ${job.waitSecs}초 기다렸다 이어서 해요` : `번역하는 중… ${job.done} / ${job.total}문장`)
+    : elsewhere ? `다른 회의(${elsewhere.title || '제목 없음'})를 번역하는 중이에요 — 끝나거나 멈춘 뒤에 번역할 수 있어요`
     : !total ? '번역할 문장이 없어요'
       : other ? `${trLangName(d.translation.lang)} 번역이 있어요 — ${trLangName(lang)}로 번역하면 바꿔요`
         : done >= total ? `${total}문장 모두 번역했어요`
@@ -2345,7 +2348,7 @@ function renderTrPop() {
   $('#tr-clear').hidden = !!job || !hasTr(d);
   const go = $('#tr-go');
   go.textContent = job ? '멈추기' : done && !other ? '남은 문장 번역' : '번역하기';
-  go.disabled = !job && (!total || (done >= total && !other));
+  go.disabled = !job && (!!elsewhere || !total || (done >= total && !other));
   const p = S.settings?.summary?.provider;
   const name = $(`#seg-llm button[data-v="${p}"]`)?.textContent || '요약에 쓰는 AI';
   $('#tr-note').textContent = `${name}(설정 › 요약)로 번역해요 · ${S.settings?.translate?.live ? '녹음 중 실시간 번역 켜짐' : '녹음 중 실시간 번역은 설정 › 요약 › 번역에서 켜요'}`;
@@ -2369,12 +2372,17 @@ $('#tr-clear').addEventListener('click', async () => {
 $('#tr-go').addEventListener('click', async () => {
   const d = doc();
   if (!d) return;
-  if (S.trJob) { api.invoke('cancel_summary', { token: S.trJob.token }).catch(() => {}); return; }
+  // 멈추기는 이 회의의 번역만 — 다른 회의를 번역하는 중이면 시작도 멈추기도 하지 않는다
+  if (S.trJob) {
+    if (S.trJob.id === d.id) api.invoke('cancel_summary', { token: S.trJob.token }).catch(() => {});
+    else toast('다른 회의를 번역하는 중이에요 — 끝나거나 멈춘 뒤에 번역할 수 있어요');
+    return;
+  }
   const lang = $('#tr-lang').value;
   if (hasTr(d) && d.translation.lang !== lang
     && !(await api.ask(`${trLangName(d.translation.lang)} 번역을 지우고 ${trLangName(lang)}로 다시 번역할까요?`, { title: '번역', kind: 'warning' }))) return;
   const token = Date.now();
-  S.trJob = { id: d.id, token, done: 0, total: trCount(d, lang).total, waitSecs: null };
+  S.trJob = { id: d.id, title: d.title, token, done: 0, total: trCount(d, lang).total, waitSecs: null };
   S.trShow = true;
   renderTrPop();
   try {
