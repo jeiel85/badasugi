@@ -655,7 +655,7 @@ impl SessionDoc {
     }
 
     /// 연속된 같은 화자 발화를 한 문단으로 묶는다 (화자, 시작, 끝, 글, 문단에 든 발화 id)
-    fn paragraphs(&self) -> Vec<(Option<u32>, u64, u64, String, Vec<u64>)> {
+    pub(crate) fn paragraphs(&self) -> Vec<(Option<u32>, u64, u64, String, Vec<u64>)> {
         let mut out: Vec<(Option<u32>, u64, u64, String, Vec<u64>)> = Vec::new();
         for u in &self.utterances {
             if let Some(last) = out.last_mut() {
@@ -719,17 +719,20 @@ impl SessionDoc {
         }
     }
 
-    pub fn to_markdown(&self) -> String {
-        let mut s = format!("# {}\n\n", self.title);
-        // 문장에 붙는 코멘트는 녹취록 그 문단 아래에만 — 메모 칸에는 나머지 줄만 (같은 글이 두 번 나오지 않게)
-        let comments = self.anchored_comments();
-        let mut by_id: HashMap<u64, Vec<&NoteComment>> = HashMap::new();
+    /// 회의록(Markdown · Word · PDF)에 싣는 메모와 코멘트: 문장에 붙는 코멘트는 녹취록 그 문장 아래에만 —
+    /// 메모 칸에는 나머지 줄만 (같은 글이 두 번 나오지 않게). 코멘트는 문장 id → 그 문장에 붙는 코멘트
+    /// (메모에 적힌 시각 · 메모 순서대로).
+    pub(crate) fn memo_and_comments(&self) -> (String, HashMap<u64, Vec<NoteComment>>) {
+        let mut by_id: HashMap<u64, Vec<NoteComment>> = HashMap::new();
         let mut taken = vec![false; self.notes.split('\n').count()];
-        for (c, at) in &comments {
+        for (c, at) in self.anchored_comments() {
             if let Some(id) = at {
-                by_id.entry(*id).or_default().push(c);
                 taken[c.from..c.to].iter_mut().for_each(|t| *t = true);
+                by_id.entry(id).or_default().push(c);
             }
+        }
+        for list in by_id.values_mut() {
+            list.sort_by_key(|c| (c.ms, c.from));
         }
         let mut memo: Vec<&str> = Vec::new();
         for (line, _) in self.notes.split('\n').zip(&taken).filter(|(_, t)| !**t) {
@@ -739,7 +742,12 @@ impl SessionDoc {
             }
             memo.push(line);
         }
-        let memo = memo.join("\n");
+        (memo.join("\n"), by_id)
+    }
+
+    pub fn to_markdown(&self) -> String {
+        let mut s = format!("# {}\n\n", self.title);
+        let (memo, by_id) = self.memo_and_comments();
         s.push_str(&format!(
             "- 일시: {}\n- 길이: {}\n- 참석(화자): {}\n- 엔진: {}\n\n",
             self.started_at,
@@ -770,11 +778,10 @@ impl SessionDoc {
             s.push_str(&format!("**{}** `{}`  \n{}\n\n", self.speaker_name(spk), fmt_time(start), text));
             // 문단 안 문장에 붙는 코멘트는 문단 바로 아래 인용으로 (메모에 적힌 시각을 붙여, 문장 순서 · 시각 순으로)
             for id in ids {
-                let Some(list) = by_id.get_mut(&id) else {
+                let Some(list) = by_id.get(&id) else {
                     continue;
                 };
-                list.sort_by_key(|c| (c.ms, c.from));
-                for c in list.iter() {
+                for c in list {
                     let (icon, text) = match star_note(&c.text) {
                         Some("") => ("⭐", "중요 표시"),
                         Some(note) => ("⭐", note),

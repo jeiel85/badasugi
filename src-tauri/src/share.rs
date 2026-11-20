@@ -33,7 +33,7 @@ struct Line {
 
 /// 섹션 종류 (요약 틀마다 이름이 달라 이름으로 어림한다)
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     OneLine,
     Decision,
     Todo,
@@ -42,7 +42,7 @@ enum Kind {
     Body,
 }
 
-fn kind(name: &str) -> Kind {
+pub(crate) fn kind(name: &str) -> Kind {
     let has = |w: &[&str]| w.iter().any(|w| name.contains(w));
     if name == "한 줄 요약" {
         Kind::OneLine
@@ -60,7 +60,7 @@ fn kind(name: &str) -> Kind {
 }
 
 /// 근거 시각 `[12:34]` · `[1:02:03]` · 굵게 `**` 를 빼고 빈칸을 하나로
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('[') {
@@ -81,7 +81,7 @@ fn clean(s: &str) -> String {
 }
 
 /// "없음" · "없음." 처럼 내용이 없다는 줄
-fn is_none(text: &str) -> bool {
+pub(crate) fn is_none(text: &str) -> bool {
     let t = text.trim_end_matches(['.', '。']).trim();
     t == "없음" || t == "해당 없음" || t == "-"
 }
@@ -131,7 +131,7 @@ pub struct Todo {
 }
 
 /// "할 일 — 담당: 이 개발 / 기한: 금요일" → 할 일 · 담당 · 기한 ("(화자)" · "미정" · "(언급된 경우)" 같은 빈 값은 없음)
-fn todo_of(text: &str) -> Todo {
+pub(crate) fn todo_of(text: &str) -> Todo {
     let field = |key: &str| -> Option<String> {
         let i = text.find(key)?;
         let v = text[i + key.len()..].split(" / ").next().unwrap_or("").trim().trim_end_matches(['.', ',']).trim();

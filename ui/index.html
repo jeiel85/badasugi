@@ -262,6 +262,8 @@
     </div>
     <div class="popover" id="pop-save" hidden>
       <button data-fmt="md"><b>Markdown</b><small>.md · 회의록 (요약 · 메모 · 코멘트 포함)</small></button>
+      <button data-fmt="docx"><b>Word</b><small>.docx · 결재 · 공유용 (요약 · 할 일 표 · 녹취록)</small></button>
+      <button data-fmt="pdf"><b>PDF</b><small>.pdf · 인쇄용 (화면과 같은 글꼴)</small></button>
       <button data-fmt="txt"><b>텍스트</b><small>.txt · 메모장</small></button>
       <button data-fmt="srt"><b>자막</b><small>.srt · 영상 자막</small></button>
       <button data-fmt="json"><b>JSON</b><small>.json · 원본 데이터</small></button>
@@ -621,6 +623,9 @@
       <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8l-1.3 4.4a.5.5 0 0 0 .6.6l4.4-1.3a2 2 0 0 0 .8-.5z"/></symbol>
     </defs>
   </svg>
+
+  <!-- PDF 로 낼 회의록 (export.rs 가 그린 HTML) — 화면에는 보이지 않고 인쇄 때만 이 칸이 보인다 -->
+  <div id="print-doc" aria-hidden="true"></div>
 
   <script src="app.js"></script>
 </body>

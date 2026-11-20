@@ -28,6 +28,9 @@ keyring = "4"
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "http2", "json", "blocking", "system-proxy"] }
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
+# Word(.docx) 내보내기: zip 묶기 (deflate · crc32)
+flate2 = "1"
+crc32fast = "1"
 
 [features]
 vulkan = ["badasugi-core/vulkan"]
@@ -36,3 +39,5 @@ vulkan = ["badasugi-core/vulkan"]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_HiDpi", "Win32_System_Power", "Win32_System_Registry"] }
 # 회의 시작 알림: 입력 장치의 오디오 세션 → 마이크를 쓰는 프로세스 (cpal 과 같은 판)
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_Storage_Packaging_Appx"] }
+# PDF 내보내기: WebView2 PrintToPdf (tauri 의 wry 와 같은 판)
+webview2-com = "0.39"

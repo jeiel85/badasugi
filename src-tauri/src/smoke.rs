@@ -134,6 +134,37 @@ fn probe_playback(app: &AppHandle, id: &str) -> Result<f64, String> {
     Err("화면이 응답하지 않아요".into())
 }
 
+/// 화면의 PDF 저장(app.js `exportPdf` — 저장 메뉴의 PDF 와 같은 함수)으로 기록을 PDF 로 내고 파일 내용을 돌려준다
+fn probe_pdf(app: &AppHandle, id: &str, path: &Path) -> Result<Vec<u8>, String> {
+    let w = app.get_webview_window("main").ok_or("창이 없어요")?;
+    *PROBE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let js = format!(
+        r#"(async () => {{
+  let r;
+  try {{
+    await exportPdf({{ id: {id}, title: '점검 회의' }}, {path});
+    const left = document.body.classList.contains('printing') || document.getElementById('print-doc').innerHTML !== '';
+    r = left ? {{ ok: false, duration: 0, detail: '인쇄용 칸이 비워지지 않았어요' }} : {{ ok: true, duration: 0, detail: '' }};
+  }} catch (e) {{
+    r = {{ ok: false, duration: 0, detail: String((e && e.message) || e) }};
+  }}
+  await window.__TAURI__.core.invoke('smoke_probe', {{ result: r }});
+}})();"#,
+        id = serde_json::to_string(id).unwrap_or_default(),
+        path = serde_json::to_string(&path.to_string_lossy()).unwrap_or_default()
+    );
+    w.eval(&js).map_err(|e| e.to_string())?;
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(60) {
+        let got = PROBE.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(p) = got {
+            return if p.ok { std::fs::read(path).map_err(|e| format!("PDF 파일을 읽을 수 없어요: {e}")) } else { Err(p.detail) };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("화면이 응답하지 않아요".into())
+}
+
 fn wait_idle(app: &AppHandle, timeout: Duration) -> bool {
     let t = Instant::now();
     while t.elapsed() < timeout {
@@ -301,6 +332,20 @@ fn run(app: &AppHandle, c: &mut Checks) {
             format!("화면에서 {d:.1}초로 열림 (녹음 {rec_secs:.1}초)"),
         ),
         Err(e) => c.add("다시 듣기", false, e),
+    };
+
+    // ── 1-1. 회의록 내보내기: Word(.docx) 는 앱이 직접, PDF 는 화면과 같은 길(인쇄용 칸 → PrintToPdf)로 ──
+    let out = home().unwrap_or_else(std::env::temp_dir);
+    let word = out.join("smoke-export.docx");
+    let saved = std::fs::write(&word, crate::export::docx(&live)).map(|_| std::fs::read(&word).unwrap_or_default());
+    match saved {
+        Ok(b) => c.add("Word 내보내기", b.starts_with(b"PK\x03\x04") && b.len() > 2000, format!("{} KB", b.len() / 1024)),
+        Err(e) => c.add("Word 내보내기", false, e.to_string()),
+    };
+    let pdf = out.join("smoke-export.pdf");
+    match probe_pdf(app, &live.id, &pdf) {
+        Ok(b) => c.add("PDF 내보내기", b.starts_with(b"%PDF") && b.len() > 5000, format!("{} KB", b.len() / 1024)),
+        Err(e) => c.add("PDF 내보내기", false, e),
     };
 
     // ── 1-2. 회의 후 화자 다시 정리 → 이름 붙이기 → 목소리 기억 ──
