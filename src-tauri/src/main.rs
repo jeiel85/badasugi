@@ -13,6 +13,7 @@ mod smoke;
 mod snap;
 mod status;
 mod summary;
+mod templates;
 mod update;
 mod pricing;
 mod usage_book;
@@ -1211,6 +1212,8 @@ struct SummaryDto {
     text: String,
     /// 자동 제목이었다면 AI 가 붙인 새 제목
     title: Option<String>,
+    /// 쓴 요약 틀 id
+    template: String,
 }
 
 struct BusyGuard<'a>(&'a AtomicUsize);
@@ -1221,7 +1224,8 @@ impl Drop for BusyGuard<'_> {
 }
 
 #[tauri::command]
-async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryDto> {
+/// `template` 은 쓸 요약 틀 — 없으면 이 회의에 마지막으로 쓴 틀, 그것도 없으면 설정의 기본 틀
+async fn summarize(app: AppHandle, id: String, token: u64, template: Option<String>) -> CmdResult<SummaryDto> {
     let st = app.state::<AppState>();
     st.busy_ops.fetch_add(1, Ordering::SeqCst);
     let _busy = BusyGuard(&st.busy_ops);
@@ -1230,6 +1234,9 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
         let doc = st.store.lock().load(&id).map_err(err)?;
         (cfg, doc)
     };
+    let tpl = templates::resolve(&cfg, template.as_deref().or(doc.summary_template.as_deref()));
+    log::info!("요약 틀: {} ({})", tpl.name, tpl.id);
+    let tpl_id = tpl.id.clone();
     let doc2 = doc.clone();
     let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     // 진행을 화면에 알린다 (답을 쓰는 섹션 · 긴 회의는 구간까지).
@@ -1259,7 +1266,7 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     {
         let cancel = cancel.clone();
         let _ = std::thread::Builder::new().name("bd-summary".into()).spawn(move || {
-            let _ = tx.send(summary::summarize(&cfg, &doc, &progress, &on_usage, &cancel));
+            let _ = tx.send(summary::summarize(&cfg, &tpl, &doc, &progress, &on_usage, &cancel));
         });
     }
     let res = tauri::async_runtime::spawn_blocking(move || loop {
@@ -1285,6 +1292,7 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     let text = latest.carry_speaker_names(&sum.text, &doc2);
     latest.summary = Some(text.clone());
     latest.summary_edited = false;
+    latest.summary_template = Some(tpl_id.clone());
     let title = sum.title.filter(|_| latest.auto_title);
     if let Some(t) = &title {
         latest.title = t.clone();
@@ -1292,7 +1300,14 @@ async fn summarize(app: AppHandle, id: String, token: u64) -> CmdResult<SummaryD
     }
     let saved = st.store.lock().save_doc(latest);
     saved.map_err(err)?;
-    Ok(SummaryDto { text, title })
+    Ok(SummaryDto { text, title, template: tpl_id })
+}
+
+/// 고를 수 있는 요약 틀 (기본 틀 + 설정의 내 틀)
+#[tauri::command]
+fn summary_templates(app: AppHandle) -> Vec<templates::TemplateInfo> {
+    let cfg = app.state::<AppState>().settings.lock().summary.clone();
+    templates::list(&cfg)
 }
 
 /// 그 번호의 요약을 멈춘다 — 아직 시작 전이면(화면이 앞선 저장을 기다리는 중) 시작하자마자 멈추게 신호를 먼저 꽂아 둔다
@@ -2037,6 +2052,7 @@ fn main() {
             cancel_summary,
             ask_meeting,
             cancel_ask,
+            summary_templates,
             delete_qa,
             list_llm_models,
             check_update,

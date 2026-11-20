@@ -4,7 +4,8 @@ LLM 에게 보내는 지시문입니다. 빌드할 때 실행 파일에 들어�
 
 | 파일 | 쓰는 곳 |
 | --- | --- |
-| `summary.md` | 회의록 — 짧은 회의는 녹취록을 한 번에, 긴 회의는 구간 메모를 합칠 때 |
+| `summary.md` | 회의록 — 짧은 회의는 녹취록을 한 번에, 긴 회의는 구간 메모를 합칠 때. `{형식}` 자리는 고른 요약 틀의 형식, `{남은 질문 기준}` 은 그 틀에 "남은 질문" 섹션이 있을 때만 `rules/open_questions.md` 로 (`src/prompts.rs` 의 `summary_with`) |
+| `templates/*.md` | 요약 틀의 회의록 형식 — "### 제목" 뒤의 섹션 목록 (meeting = 일반 회의 · one_on_one = 1:1 면담 · interview = 면접 · 인터뷰 · lecture = 강의 · 세미나 · customer = 고객 미팅 · ideas = 아이디어 회의). 이름 · 설명은 `src/templates.rs` 의 `BUILTIN` |
 | `summary_part.md` | 긴 회의의 구간 메모 (구간 메모 · 메모 합치기 · 줄이기) |
 | `merge_final.md` | 구간 메모를 모두 합쳐 회의록으로 만들라는 지시 (사용자 글 앞머리) |
 | `merge_notes.md` | 메모 묶음을 하나의 메모로 합치라는 지시 (사용자 글 앞머리) |
@@ -18,4 +19,5 @@ LLM 에게 보내는 지시문입니다. 빌드할 때 실행 파일에 들어�
 - **파일 내용이 그대로 모델에게 갑니다.** 메모 · 바꾼 이유는 여기에 쓰지 말고 `src/prompts.rs` 주석이나 이 README 에 남기세요. (이 README 는 보내지 않습니다)
 - `{{rules/style.md}}` 처럼 쓴 자리는 그 파일 내용으로 바뀝니다. 새 파일을 만들면 `src/prompts.rs` 의 `FILES` 에도 넣으세요.
 - 파일 끝의 줄바꿈 · 빈 줄은 떼고 보냅니다. 문단 사이 빈 줄 · 줄바꿈은 그대로 갑니다(마크다운 줄 맞춤으로 문단을 접지 마세요).
-- `summary.md` · `summary_part.md` 의 `### 섹션` 이름은 코드가 진행 막대와 제목 뽑기에 씁니다. 섹션을 바꾸면 `src/summary.rs` 의 `FINAL_SECTIONS` · `PART_SECTIONS` 도 같이 바꾸세요 (테스트가 둘이 다르면 알려 줍니다).
+- 진행 막대는 지시의 `### 섹션` 줄을 따라갑니다(제목 뽑기는 `### 제목`). 섹션 이름은 자유롭게 바꿔도 되지만, 아주 길거나 짧은 섹션이면 `src/summary.rs` 의 `SECTION_LENS` 에 보통 길이를 넣으면 막대가 고르게 움직입니다.
+- 새 기본 틀은 `templates/` 에 형식 파일을 만들고 `src/prompts.rs` 의 `FILES` · `src/templates.rs` 의 `BUILTIN` 에 넣으세요. 첫 섹션은 "한 줄 요약", 제목은 넣지 않습니다 (테스트가 확인합니다).

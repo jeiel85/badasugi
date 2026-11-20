@@ -523,7 +523,7 @@ function renderSummary() {
   // 같은 기록을 앱이 다시 읽어 준 사본으로 바뀌었으면 고치던 요약을 새 사본에 이어 붙인다 (입력 칸을 덮지 않게)
   if (S.sumEdit && d && S.sumEdit.doc !== d && S.sumEdit.doc.id === d.id) S.sumEdit.doc = d;
   // 고치는 중이면 입력 칸을 그대로 둔다
-  if (S.sumEdit && d && S.sumEdit.doc === d) { card.hidden = false; empty.hidden = true; return; }
+  if (S.sumEdit && d && S.sumEdit.doc === d) { card.hidden = false; empty.hidden = true; renderTplNames(); return; }
   $('#btn-edit-summary').hidden = false;
   // 요약하는 동안 다른 기록으로 옮겨 가도, 그 기록에 '정리하는 중'을 띄우지 않는다
   if (S.summarizing && d && d.id === S.sumId) {
@@ -540,9 +540,11 @@ function renderSummary() {
         + '</div>';
     }
     renderSumProgress();
+    renderTplNames();
     return;
   }
   card.hidden = !(d && d.summary);
+  renderTplNames();
   // 노트의 요약 탭: 요약이 없으면 AI 로 요약 · 직접 쓰기
   empty.hidden = !card.hidden;
   $('#btn-summary-ai').disabled = !(d && d.utterances.length);
@@ -2087,7 +2089,7 @@ function hidePopovers() {
   if (S.cmt) closeComment(true); // 쓰던 코멘트는 바깥을 눌러도 저장
   $$('.popover').forEach((p) => (p.hidden = true));
 }
-document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name, #btn-spk-stats')) hidePopovers(); });
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name, #btn-spk-stats, .sum-tpl')) hidePopovers(); });
 
 $('#btn-save').addEventListener('click', (e) => showPopover($('#pop-save'), e.currentTarget, 'right'));
 $('#pop-save').addEventListener('click', async (e) => {
@@ -2126,10 +2128,130 @@ $('#pop-source').addEventListener('click', (e) => {
   else if (b.dataset.source === 'both') toast('스피커 소리가 마이크로 다시 들어가면 중복될 수 있어요. 헤드셋을 권장해요.');
 });
 
+/* ───────────── 요약 틀 ───────────── */
+// 회의 종류에 맞춘 회의록 형식 — 기본 틀(앱) + 내 틀(설정 › 요약). 회의마다 마지막으로 쓴 틀을 기억한다(d.summaryTemplate).
+// S.templates: [{ id, name, desc, sections, custom }] · S.tplPick: 요약 전에 고른 틀 { 회의 id: 틀 id }
+const DEFAULT_TPL = 'meeting';
+async function loadTemplates() {
+  try { S.templates = (await api.invoke('summary_templates')) || []; } catch { S.templates ||= []; }
+  renderTplNames();
+  renderTplSettings();
+}
+const tplOf = (id) => (S.templates || []).find((t) => t.id === id);
+const tplName = (id) => tplOf(id)?.name || (id === DEFAULT_TPL ? '일반 회의' : '지운 틀');
+// 다음에 요약할 틀: 요약 전에 고른 것 → 이 회의에 마지막으로 쓴 것 → 설정의 기본 틀 (없어진 틀이면 기본 틀 → 일반 회의)
+function nextTpl(d) {
+  const def = tplOf(S.settings?.summary?.template) ? S.settings.summary.template : DEFAULT_TPL;
+  const want = (d && S.tplPick?.[d.id]) || d?.summaryTemplate || def;
+  return tplOf(want) ? want : def;
+}
+// 요약 칸 머리: 지금 요약을 만든 틀(틀이 생기기 전 요약은 일반 회의, 요약하는 중이면 그 틀) · 요약이 없을 때: 다음에 쓸 틀
+function renderTplNames() {
+  const d = doc();
+  const cur = S.summarizing && d && d.id === S.sumId ? S.sumTpl : (d?.summaryTemplate || DEFAULT_TPL);
+  $('#sum-tpl-name').textContent = tplName(cur);
+  $('#btn-sum-tpl').disabled = !!S.summarizing || (!!S.sumEdit && S.sumEdit.doc === d);
+  $('#sum-tpl-empty-name').textContent = tplName(nextTpl(d));
+}
+// mode: 'redo' (요약 칸 — 고르면 그 틀로 다시 요약) · 'pick' (요약 전 — 고르기만, AI 로 요약하면 그 틀로)
+function openTplPop(anchor, mode) {
+  const d = doc();
+  const pop = $('#pop-tpl');
+  if (!d || !S.templates?.length) return;
+  if (!pop.hidden && pop.dataset.mode === mode) { hidePopovers(); return; }
+  const cur = mode === 'redo' ? (d.summaryTemplate || DEFAULT_TPL) : nextTpl(d);
+  pop.dataset.mode = mode;
+  pop.innerHTML = `<div class="pt-head">${mode === 'redo' ? '다른 틀로 다시 요약' : '요약 틀 고르기'}</div>`
+    + S.templates.map((t) => `<button data-tpl="${esc(t.id)}" class="${t.id === cur ? 'on' : ''}" title="${esc(t.sections.join(' · '))}">`
+      + `<svg class="pt-check"><use href="#i-check"/></svg><div><b>${esc(t.name)}</b><small>${esc(t.desc || t.sections.join(' · '))}</small></div></button>`).join('')
+    + '<div class="pt-sep"></div><button class="pt-manage" data-tpl-manage><svg class="pt-check" style="visibility:visible"><use href="#i-settings"/></svg>내 틀 만들기 · 기본 틀 정하기</button>';
+  showPopover(pop, anchor, 'left', true);
+}
+$('#btn-sum-tpl').addEventListener('click', (e) => { e.stopPropagation(); openTplPop(e.currentTarget, 'redo'); });
+$('#btn-sum-tpl-empty').addEventListener('click', (e) => openTplPop(e.currentTarget, 'pick'));
+$('#pop-tpl').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  const d = doc();
+  if (!b || !d) return;
+  const mode = $('#pop-tpl').dataset.mode;
+  hidePopovers();
+  if (b.hasAttribute('data-tpl-manage')) { openPanel('settings', 'summary'); return; }
+  if (mode === 'redo') { runSummary(b.dataset.tpl); return; }
+  (S.tplPick ||= {})[d.id] = b.dataset.tpl;
+  renderTplNames();
+});
+// 설정 › 요약 › 요약 틀: 기본 틀 · 내 틀 목록
+function renderTplSettings() {
+  const s = S.settings?.summary;
+  if (!s) return;
+  const sel = $('#opt-sum-template');
+  const opts = (S.templates || []).map((t) => `<option value="${esc(t.id)}">${esc(t.name)}${t.custom ? ' (내 틀)' : ''}</option>`).join('');
+  if (sel.innerHTML !== opts) sel.innerHTML = opts;
+  sel.value = tplOf(s.template) ? s.template : DEFAULT_TPL;
+  $('#tpl-list').innerHTML = (S.templates || []).filter((t) => t.custom).map((t) => `<div class="tpl-item" data-id="${esc(t.id)}">`
+    + `<div><b>${esc(t.name)}</b><small title="${esc(t.sections.join(' · '))}">${esc(t.sections.join(' · '))}</small></div>`
+    + '<button class="link" data-act="edit">고치기</button><button class="link del" data-act="del">지우기</button></div>').join('');
+}
+// 고치는 내 틀 id (새로 만들면 '', 닫혀 있으면 null)
+let tplEditing = null;
+function openTplEdit(id) {
+  const t = id ? (S.settings.summary.templates || []).find((x) => x.id === id) : null;
+  tplEditing = t ? id : '';
+  $('#tpl-name').value = t?.name || '';
+  $('#tpl-sections').value = t?.sections || '';
+  $('#tpl-edit').hidden = false;
+  $('#btn-tpl-add').hidden = true;
+  $('#tpl-name').focus();
+}
+function closeTplEdit() {
+  tplEditing = null;
+  $('#tpl-edit').hidden = true;
+  $('#btn-tpl-add').hidden = false;
+}
+// 내 틀 · 기본 틀은 바로 저장하고 목록을 다시 받는다 (앱이 섹션 줄을 읽어 섹션 이름을 알려 준다)
+async function saveTemplates() {
+  saveSettings.cancel();
+  try { await api.invoke('save_settings', { settings: S.settings }); } catch (e) { toast(String(e), 'error'); }
+  await loadTemplates();
+}
+$('#btn-tpl-add').addEventListener('click', () => openTplEdit(''));
+$('#btn-tpl-cancel').addEventListener('click', closeTplEdit);
+$('#btn-tpl-save').addEventListener('click', async () => {
+  const name = $('#tpl-name').value.trim();
+  const sections = $('#tpl-sections').value.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+  if (!name) { toast('틀 이름을 적어 주세요', 'warn'); $('#tpl-name').focus(); return; }
+  if (!sections) { toast('섹션을 한 줄에 하나씩 적어 주세요', 'warn'); $('#tpl-sections').focus(); return; }
+  const list = (S.settings.summary.templates ||= []);
+  const t = tplEditing ? list.find((x) => x.id === tplEditing) : null;
+  if (t) Object.assign(t, { name, sections });
+  else list.push({ id: `my-${Date.now().toString(36)}`, name, sections });
+  closeTplEdit();
+  await saveTemplates();
+  toast(t ? `'${name}' 틀을 고쳤어요` : `'${name}' 틀을 만들었어요 — 요약 칸의 틀 이름을 눌러 골라요`);
+});
+$('#tpl-list').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]');
+  const id = b?.closest('.tpl-item')?.dataset.id;
+  const list = S.settings.summary.templates || [];
+  const t = list.find((x) => x.id === id);
+  if (!t) return;
+  if (b.dataset.act === 'edit') { openTplEdit(id); return; }
+  if (!(await api.ask(`'${t.name}' 틀을 지울까요?\n이 틀로 만든 요약은 그대로 남아요.`, { title: '받아쓰기', kind: 'warning' }))) return;
+  S.settings.summary.templates = list.filter((x) => x.id !== id);
+  if (S.settings.summary.template === id) S.settings.summary.template = DEFAULT_TPL;
+  if (tplEditing === id) closeTplEdit();
+  await saveTemplates();
+});
+$('#opt-sum-template').addEventListener('change', (e) => {
+  S.settings.summary.template = e.target.value;
+  saveTemplates();
+});
+
 // 요약
 $('#btn-summary').addEventListener('click', () => runSummary());
 $('#btn-summary-ai').addEventListener('click', () => runSummary());
-async function runSummary() {
+// tplId: 쓸 요약 틀 (없으면 다음에 쓸 틀 — 요약 전에 고른 것 · 이 회의에 마지막으로 쓴 것 · 기본 틀)
+async function runSummary(tplId) {
   const d = doc();
   if (!d || S.summarizing) return;
   if (S.sumEdit?.doc === d) { toast('요약을 고치는 중이에요. 저장하거나 취소한 뒤에 AI 로 요약할 수 있어요', 'warn'); return; }
@@ -2149,6 +2271,7 @@ async function runSummary() {
   clearInterval(S.sumTimer);
   S.sumTimer = setInterval(renderSumProgress, 1000);
   S.sumId = d.id;
+  S.sumTpl = tplId || nextTpl(d);
   // 요약마다 번호 — 앞선 저장을 기다리는 동안 멈춰도 앱이 그 요약을 알아보고 시작하자마자 멈춘다
   S.sumToken = Date.now();
   $('#summary-card').classList.remove('folded');
@@ -2163,9 +2286,11 @@ async function runSummary() {
     body.scrollTop = 0;
   }
   try {
-    const r = await api.invoke('summarize', { id: d.id, token: S.sumToken });
+    const r = await api.invoke('summarize', { id: d.id, token: S.sumToken, template: S.sumTpl });
     d.summary = r.text;
     d.summaryEdited = false;
+    d.summaryTemplate = r.template || S.sumTpl;
+    if (S.tplPick) delete S.tplPick[d.id];
     if (r.title) { d.title = r.title; d.autoTitle = false; renderMeta(); }
   } catch (e) {
     // 사람이 멈춘 것은 오류가 아니다
@@ -3580,6 +3705,7 @@ function renderSettings() {
   $('#opt-anthropic-model').value = s.summary.anthropicModel;
   $('#opt-llm-custom-url').value = s.summary.customUrl;
   $('#opt-llm-custom-model').value = s.summary.customModel;
+  renderTplSettings();
 
   renderHotkey();
   $('#opt-top').checked = s.alwaysOnTop;
@@ -4035,6 +4161,7 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://star', () => addStar());
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await refreshState();
+  loadTemplates();
   syncMaxed();
   $('#drop-exts').textContent = exts().join(' · ');
   renderUpdate();
@@ -4128,16 +4255,40 @@ function createMock() {
   const handlers = {};
   let mockSumCancel = null;
   // 브라우저 미리보기: 앱처럼 녹취록을 읽은 뒤 섹션을 차례로 쓰며 진행을 보낸다 (?sumslow 면 느리게)
-  async function mockSummarize({ id, token }) {
+  // 요약 틀 (앱의 templates.rs 기본 틀과 같은 이름 · 섹션) + 설정의 내 틀
+  const MOCK_TPLS = [
+    ['meeting', '일반 회의', '안건을 논의하고 정하는 회의', ['한 줄 요약', '주요 논의', '결정 사항', '할 일', '남은 질문']],
+    ['one_on_one', '1:1 면담', '팀장 · 팀원 면담, 코칭', ['한 줄 요약', '근황 · 진행 상황', '고민 · 어려움', '피드백', '합의한 것', '할 일', '다음에 이어 볼 것']],
+    ['interview', '면접 · 인터뷰', '채용 면접, 사용자 · 전문가 인터뷰', ['한 줄 요약', '질문과 답', '눈에 띈 점', '우려 · 더 확인할 것', '다음 단계']],
+    ['lecture', '강의 · 세미나', '교육 · 발표 · 세미나 — 배운 것 위주', ['한 줄 요약', '핵심 내용', '용어 · 개념', '예시 · 사례', '질의응답', '더 볼 것']],
+    ['customer', '고객 미팅', '영업 · 고객 상담 · 협력사 미팅', ['한 줄 요약', '고객 상황 · 요구', '우리가 제안 · 설명한 것', '고객 반응 · 우려', '합의한 것', '할 일', '다음 단계']],
+    ['ideas', '아이디어 회의', '브레인스토밍 — 나온 아이디어를 빠짐없이', ['한 줄 요약', '나온 아이디어', '반응이 좋았던 것', '우려 · 반대 의견', '정한 것', '할 일', '더 알아볼 것']],
+  ];
+  const mockTemplates = () => [
+    ...MOCK_TPLS.map(([id, name, desc, sections]) => ({ id, name, desc, sections, custom: false })),
+    ...(st.settings.summary.templates || []).map((t) => ({
+      id: t.id, name: t.name.trim() || '내 틀', desc: '', custom: true,
+      sections: [...new Set(t.sections.split('\n').map((l) => l.trim().replace(/^#+\s*|^[-*]\s+|^\d+\.\s+/g, '').split(/—| - |:|：/)[0].trim()).filter((n) => n && n !== '제목'))].slice(0, 12),
+    })),
+  ];
+  // 브라우저 미리보기: 앱처럼 녹취록을 읽은 뒤 섹션을 차례로 쓰며 진행을 보낸다 (?sumslow 면 느리게)
+  async function mockSummarize({ id, token, template }) {
     const slow = new URLSearchParams(location.search).has('sumslow') ? 4 : 1;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms * slow));
     const send = (p) => handlers['bd://summary-progress'] && handlers['bd://summary-progress']({ payload: { id, token, done: 0, total: 1, waitSecs: 0, ...p } });
     const check = () => { if (mockSumCancel === token) throw '요약을 멈췄어요'; };
+    const tpl = mockTemplates().find((t) => t.id === template) || mockTemplates()[0];
     await wait(1500); check();
-    const steps = [['제목', 0.0], ['제목', 0.01], ['한 줄 요약', 0.02], ['주요 논의', 0.08], ['주요 논의', 0.3], ['주요 논의', 0.45], ['결정 사항', 0.53], ['결정 사항', 0.62], ['할 일', 0.68], ['할 일', 0.85], ['남은 질문', 0.9], ['남은 질문', 0.97]];
-    for (const [section, frac] of steps) { send({ writing: true, section, frac }); await wait(450); check(); }
+    const names = ['제목', ...tpl.sections];
+    for (const [i, section] of names.entries()) { send({ writing: true, section, frac: i / names.length }); await wait(450); check(); }
+    if (tpl.id === 'lecture') {
+      return { template: tpl.id, title: null, text: '### 한 줄 요약\n키오스크 응답 속도 개선 사례 공유\n\n### 핵심 내용\n- **응답 속도**\n  - 인덱스 추가로 평균 2초 → 0.4초 (이 개발) [00:34]\n\n### 용어 · 개념\n- **인덱스** — 조회를 빠르게 하는 목록 [00:34]\n\n### 예시 · 사례\n- 피크 시간대 수치는 따로 받기로 함 [00:40]\n\n### 질의응답\n- **Q.** 피크 시간대도 0.4초인지 — **A.** 확인 예정 (김 팀장) [00:40]\n\n### 더 볼 것\n- 없음' };
+    }
+    if (tpl.id !== 'meeting') {
+      return { template: tpl.id, title: null, text: tpl.sections.map((s, i) => `### ${s}\n${i === 0 ? '15일 출시 확정' : `- ${s} 예시 요점 (김 팀장) [00:25]`}`).join('\n\n') };
+    }
     // 근거 시각: [00:34] 는 녹취록으로 가는 단추, 회의(1분) 뒤인 [12:00] 은 지어낸 값이라 글자 그대로
-    return { text: '### 한 줄 요약\n15일 출시 확정\n\n### 주요 논의\n- **출시 일정**\n  - ⭐ 15일 출시, 목요일 점검 (김 팀장) [00:25]\n- **키오스크 응답 속도**\n  - 인덱스 추가로 2초 → 0.4초 (이 개발) [00:34]\n\n### 결정 사항\n- 15일 출시 [00:25]\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일 [12:00]\n\n### 남은 질문\n- 없음', title: null };
+    return { template: tpl.id, text: '### 한 줄 요약\n15일 출시 확정\n\n### 주요 논의\n- **출시 일정**\n  - ⭐ 15일 출시, 목요일 점검 (김 팀장) [00:25]\n- **키오스크 응답 속도**\n  - 인덱스 추가로 2초 → 0.4초 (이 개발) [00:34]\n\n### 결정 사항\n- 15일 출시 [00:25]\n\n### 할 일\n- [ ] 공지 — 담당: 박 디자인 / 기한: 14일 [12:00]\n\n### 남은 질문\n- 없음', title: null };
   }
   // 브라우저 미리보기: 읽는 척 잠깐 쉬었다가 답을 조금씩 보낸다 (?askslow 면 느리게 · ?askfail 이면 오류)
   const mockQa = {};
@@ -4171,7 +4322,7 @@ function createMock() {
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
       meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
-      summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '' },
+      summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '', template: 'meeting', templates: [] },
       usdKrw: 1360,
     },
     rec: 'idle',
@@ -4232,6 +4383,7 @@ function createMock() {
       }
       if (cmd === 'session_text') return '데모';
       if (cmd === 'summarize') return mockSummarize(args);
+      if (cmd === 'summary_templates') return mockTemplates();
       if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
       if (cmd === 'ask_meeting') return mockAsk(args);
       if (cmd === 'cancel_ask') { mockAskCancel = args.token; return; }
