@@ -1529,6 +1529,9 @@ fn count_misses(app: &AppHandle, id: &str, lang: &str, sent: Vec<u64>, misses: &
 fn spawn_live_translation(app: AppHandle, id: String) {
     let _ = std::thread::Builder::new().name("bd-translate".into()).spawn(move || {
         let st = app.state::<AppState>();
+        // 녹음이 끝난 뒤 남은 문장을 번역하는 동안 업데이트 설치(앱 종료)가 기다리게 — 번역 단추와 같이 바쁨으로 센다
+        st.busy_ops.fetch_add(1, Ordering::SeqCst);
+        let _busy = BusyGuard(&st.busy_ops);
         let mut misses = std::collections::HashMap::new();
         let mut first_seen: Option<Instant> = None;
         let mut resume_at: Option<Instant> = None;
