@@ -42,7 +42,8 @@ enum Kind {
     Keep,
     /// 한 줄 요약 — 목록 줄이 아니어도, 꼬리 모두 + 방향 · 수립
     OneLine,
-    /// 할 일 · 남은 질문 · 다음 단계처럼 할 것 · 챙길 것 — 할 일 낱말([`ACTS`] · [`SETTLED`])은 남긴다
+    /// 할 일 · 남은 질문 · 다음 단계 · 더 알아볼 것 · 우려 · 더 확인할 것처럼 할 것 · 챙길 것 —
+    /// 할 일 낱말([`ACTS`] · [`SETTLED`])은 남긴다
     Todo,
     /// 결정 사항 · 합의한 것 · 정한 것 — 정한 내용이 될 수 있는 [`ACTS`] 는 남긴다
     Decided,
@@ -56,7 +57,7 @@ fn kind_of(section: &str) -> Kind {
         Kind::Keep
     } else if s == "한 줄 요약" {
         Kind::OneLine
-    } else if s.contains("할 일") || s.contains("남은 질문") || s.starts_with("다음") || s.starts_with("더 ") {
+    } else if s.contains("할 일") || s.contains("남은 질문") || s.starts_with("다음") || s.contains("더 ") {
         Kind::Todo
     } else if s.contains("결정") || s.contains("합의") || s.contains("정한") {
         Kind::Decided
@@ -203,7 +204,11 @@ fn cut_words(core: &str, kind: Kind) -> Option<String> {
         if !kind.cuts(word) {
             break;
         }
-        let rest = rest.trim_end_matches([' ', ',', '·', '/', '—', '–', '-']);
+        let rest = rest.trim_end();
+        // 나열의 한 항목("등급 : 상 / 중" · "검토 · 논의")이면 꼬리가 아니라 내용이다
+        if rest.ends_with([',', '·', '/', '—', '–', '-']) {
+            break;
+        }
         if rest.is_empty() || rest.ends_with(':') || rest.ends_with('：') {
             return None;
         }
@@ -267,6 +272,10 @@ mod tests {
             // 낱말 가운데 · 붙여 쓴 꼬리는 낱말이 아니다
             "  - 로그 : 재논의 [10:00]",
             "  - 로그 : 검토·논의 [10:00]",
+            // 나열의 한 항목
+            "  - 후보 등급 : 상 / 중 [03:10]",
+            "  - 로그 : 검토 · 논의 [10:00]",
+            "  - 진행 : 완료, 중 [10:00]",
         ] {
             assert_eq!(cut("주요 논의", line), line);
         }
@@ -306,6 +315,9 @@ mod tests {
         }
         assert_eq!(cut("남은 질문", "- 가격 정책 : 영업팀 논의 필요 [10:00]"), "- 가격 정책 : 영업팀 논의 [10:00]");
         assert_eq!(cut("다음 단계", "- 데모 : 다음 주 공유 [10:00]"), "- 데모 : 다음 주 공유 [10:00]");
+        // 면접 틀의 "우려 · 더 확인할 것" 도 챙길 것
+        assert_eq!(cut("우려 · 더 확인할 것", "- 처우 : 입사일 확정 필요 [03:10]"), "- 처우 : 입사일 확정 [03:10]");
+        assert_eq!(cut("더 알아볼 것", "- 단가 : 협력사 논의 [05:00]"), "- 단가 : 협력사 논의 [05:00]");
     }
 
     #[test]
