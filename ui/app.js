@@ -6,7 +6,9 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const T = window.__TAURI__;
 // 기록을 읽고 쓰는 명령은 앱이 작업 스레드에서 처리한다 — 보낸 순서대로 끝나도록 하나씩 보낸다
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
-const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa']);
+// (요약 보내기도 기록을 읽는다 — 요약을 고치고 바로 보내도 고친 요약으로)
+const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
+  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
 const AFTER_CMDS = new Set(['summarize', 'ask_meeting']);
 let orderedChain = Promise.resolve();
@@ -525,11 +527,13 @@ function renderSummary() {
   // 고치는 중이면 입력 칸을 그대로 둔다
   if (S.sumEdit && d && S.sumEdit.doc === d) { card.hidden = false; empty.hidden = true; renderTplNames(); return; }
   $('#btn-edit-summary').hidden = false;
+  $('#btn-share-summary').hidden = false;
   // 요약하는 동안 다른 기록으로 옮겨 가도, 그 기록에 '정리하는 중'을 띄우지 않는다
   if (S.summarizing && d && d.id === S.sumId) {
     card.hidden = false;
     empty.hidden = true;
     $('#btn-edit-summary').hidden = true;
+    $('#btn-share-summary').hidden = true;
     $('#sum-mark').hidden = true;
     const box = $('#summary-body');
     // 진행은 1초에 몇 번씩 바뀌므로 틀은 한 번만 그리고 글자 · 막대만 바꾼다 (멈추기 버튼을 누르는 중에 다시 그려지지 않게)
@@ -2065,6 +2069,53 @@ $('#btn-copy-summary').addEventListener('click', async () => {
 });
 $('#btn-fold-summary').addEventListener('click', () => $('#summary-card').classList.toggle('folded'));
 
+// 요약 보내기 — 만든 요약을 다시 써서(AI 를 다시 부르지 않는다) 메신저용 짧은 정리 · 후속 메일 초안(새 메일 창) ·
+// 기한이 있는 할 일을 일정 파일(.ics)로. 앱이 저장된 기록을 읽으므로 기다리던 저장을 먼저 보낸다
+async function openShare(anchor) {
+  const d = doc();
+  const pop = $('#pop-share');
+  if (!pop.hidden) { hidePopovers(); return; }
+  // 요약하는 중인 그 회의 · 고치는 중인 요약만 막는다 (다른 회의를 요약하는 동안에도 이 회의는 보낼 수 있게)
+  if (!d?.summary || (S.summarizing && S.sumId === d.id) || S.sumEdit?.doc === d) return;
+  flushSaves();
+  let info = { todos: 0, dated: 0 };
+  try { info = await api.invoke('share_info', { id: d.id }); } catch { /* 할 일 수만 모른다 */ }
+  if (doc() !== d) return;
+  const left = info.todos - info.dated;
+  const ics = info.dated
+    ? `.ics · 기한이 있는 할 일 ${info.dated}개${left ? ` (기한을 날짜로 읽지 못한 ${left}개는 빼요)` : ''}`
+    : info.todos ? '할 일의 기한을 날짜로 읽을 수 없어요' : '요약에 할 일이 없어요';
+  pop.innerHTML = '<button data-share="messenger"><svg><use href="#i-copy"/></svg><div><b>메신저용으로 복사</b><small>Teams · Slack · 카카오톡에 붙여 넣기 좋은 짧은 정리</small></div></button>'
+    + '<button data-share="mail"><svg><use href="#i-send"/></svg><div><b>후속 메일 초안</b><small>새 메일 창으로 열어요 · 본문은 클립보드에도 복사</small></div></button>'
+    + `<button data-share="ics"${info.dated ? '' : ' disabled'}><svg><use href="#i-clock"/></svg><div><b>할 일을 일정 파일로</b><small>${esc(ics)}</small></div></button>`;
+  showPopover(pop, anchor, 'right', true);
+}
+$('#btn-share-summary').addEventListener('click', (e) => openShare(e.currentTarget));
+$('#pop-share').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-share]');
+  const d = doc();
+  if (!b || b.disabled || !d) return;
+  hidePopovers();
+  try {
+    if (b.dataset.share === 'messenger') {
+      await navigator.clipboard.writeText(await api.invoke('share_messenger', { id: d.id }));
+      toast('메신저용 정리를 복사했어요 — 대화창에 붙여 넣으세요');
+    } else if (b.dataset.share === 'mail') {
+      const body = await api.invoke('open_mail_draft', { id: d.id });
+      await navigator.clipboard.writeText(body);
+      toast('후속 메일 초안을 새 메일 창으로 열었어요\n창이 뜨지 않거나 보낼 수 없게 열리면 새 메일에 붙여 넣으세요 (본문 복사됨)', '', 6500);
+    } else if (b.dataset.share === 'ics') {
+      const safe = (d.title || d.id).replace(/[\\/:*?"<>|]/g, '_');
+      const path = await api.save({ defaultPath: `${safe} 할 일.ics`, filters: [{ name: '일정 파일', extensions: ['ics'] }] });
+      if (!path) return;
+      const n = await api.invoke('export_todos_ics', { id: d.id, path });
+      toast(`할 일 ${n}개를 일정 파일로 저장했어요\n파일을 열거나 Outlook 일정으로 끌어다 놓으면 들어가요`, '', 6500);
+    }
+  } catch (err) {
+    toast(String(err), 'error');
+  }
+});
+
 function showPopover(pop, anchor, align = 'left', below = false) {
   hidePopovers();
   pop.style.maxHeight = '';
@@ -2089,7 +2140,7 @@ function hidePopovers() {
   if (S.cmt) closeComment(true); // 쓰던 코멘트는 바깥을 눌러도 저장
   $$('.popover').forEach((p) => (p.hidden = true));
 }
-document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name, #btn-spk-stats, .sum-tpl')) hidePopovers(); });
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name, #btn-spk-stats, .sum-tpl, #btn-share-summary')) hidePopovers(); });
 
 $('#btn-save').addEventListener('click', (e) => showPopover($('#pop-save'), e.currentTarget, 'right'));
 $('#pop-save').addEventListener('click', async (e) => {
@@ -4384,6 +4435,14 @@ function createMock() {
       if (cmd === 'session_text') return '데모';
       if (cmd === 'summarize') return mockSummarize(args);
       if (cmd === 'summary_templates') return mockTemplates();
+      // 요약 보내기: 앱(share.rs)과 같은 모양의 예시
+      if (cmd === 'share_info') {
+        const todos = (demoDoc().summary || '').split('\n').filter((l) => /^\s*- \[ \]/.test(l));
+        return { todos: todos.length, dated: todos.filter((l) => /기한: [^(]/.test(l)).length };
+      }
+      if (cmd === 'share_messenger') return '[앱 출시 일정 회의] 11/19(목) 회의 정리\n다음 달 15일 앱 출시 확정\n\n✅ 결정 사항\n• ⭐ 출시일 15일 확정\n\n📌 할 일\n• 결제 모듈 배포 — 이 개발 · 금요일까지';
+      if (cmd === 'open_mail_draft') return '안녕하세요.\n11월 19일 앱 출시 일정 회의 내용을 정리해 공유드립니다.\n\n■ 결정 사항\n- ⭐ 출시일 15일 확정\n\n감사합니다.\n';
+      if (cmd === 'export_todos_ics') return 2;
       if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
       if (cmd === 'ask_meeting') return mockAsk(args);
       if (cmd === 'cancel_ask') { mockAskCancel = args.token; return; }
