@@ -88,8 +88,8 @@ struct Session {
     spoke: bool,
     quiet_since: Option<Instant>,
     error: Option<String>,
-    /// 받아 적지 못한 발화 수 (일부만 받아 적었으면 넣고 나서 알린다)
-    failed: usize,
+    /// 끝내 받아 적지 못한 발화 id (일부만 받아 적었으면 넣고 나서 알린다). 다시 시도로 받아 적히면 뺀다
+    failed: std::collections::BTreeSet<u64>,
     /// 회의 녹음이 마이크를 가져갔다 — 들은 것을 넣지 않고 버린다
     discard: bool,
     /// API 엔진이면 (공급자, 모델) — 사용량
@@ -162,7 +162,7 @@ pub fn press(app: &AppHandle) {
             spoke: false,
             quiet_since: None,
             error: None,
-            failed: 0,
+            failed: Default::default(),
             discard: false,
             api: None,
         });
@@ -338,6 +338,7 @@ fn on_event(app: &AppHandle, id: u64, ev: Event) {
         }
         Event::Transcript { id: uid, text, .. } => {
             if let Some(s) = d.cur.lock().as_mut().filter(|s| s.id == id) {
+                s.failed.remove(&uid);
                 s.texts.insert(uid, text);
             }
         }
@@ -347,9 +348,12 @@ fn on_event(app: &AppHandle, id: u64, ev: Event) {
                 s.error.get_or_insert(message);
             }
         }
-        Event::Failed { message, .. } => {
+        // 다시 시도할 실패(연결 문제 — 멈춘 뒤 한 번 더 받아 적는다)는 세지 않고, 끝내 못 받아 적은 것만
+        Event::Failed { id: uid, message, retry } => {
             if let Some(s) = d.cur.lock().as_mut().filter(|s| s.id == id) {
-                s.failed += 1;
+                if !retry && !s.texts.contains_key(&uid) {
+                    s.failed.insert(uid);
+                }
                 s.error.get_or_insert(format!("받아 적지 못했어요 — {message}"));
             }
         }
@@ -427,16 +431,16 @@ fn finish(app: &AppHandle, s: Session) {
     log::info!("말로 입력: {chars}자 ({secs:.1}초){}", if polish { " · AI 다듬기" } else { "" });
     if crate::smoke::enabled() {
         *app.state::<Dictate>().smoke_out.lock() = Some(text);
-        show(app, View::Done { chars, missed: s.failed });
+        show(app, View::Done { chars, missed: s.failed.len() });
         hide_later(app, Duration::from_millis(900));
         return;
     }
     // 알림 창을 먼저 닫지 않는다 — 포커스를 가져가지 않으므로 지금 창에 그대로 들어간다
     match inject::insert(&text, mode) {
         // 일부 발화를 받아 적지 못했으면 넣은 뒤에 알린다 (녹음을 남기지 않으므로 다시 말해야 한다)
-        Ok(()) if s.failed > 0 => {
-            log::warn!("말로 입력: 발화 {}개를 받아 적지 못한 채 넣음", s.failed);
-            show(app, View::Done { chars, missed: s.failed });
+        Ok(()) if !s.failed.is_empty() => {
+            log::warn!("말로 입력: 발화 {}개를 받아 적지 못한 채 넣음", s.failed.len());
+            show(app, View::Done { chars, missed: s.failed.len() });
             hide_later(app, Duration::from_secs(4));
         }
         Ok(()) => {

@@ -65,8 +65,8 @@ mod imp {
     use super::*;
     use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
     use windows_sys::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
-        SetClipboardData,
+        CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
+        RegisterClipboardFormatW, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
     use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
@@ -308,12 +308,21 @@ mod imp {
             keep_out_of_history();
         }
         unsafe { CloseClipboard() };
+        // 우리가 넣은 뒤의 클립보드 번호 — 기다리는 사이 누가 복사하면 바뀐다
+        let ours = unsafe { GetClipboardSequenceNumber() };
 
         // 글을 넣지 못했으면 Ctrl+V 를 보내지 않는다 (원래 클립보드를 붙여 넣게 된다)
         let r = if put { press() } else { Err("클립보드에 글을 넣지 못했어요".into()) };
         // 받는 앱이 클립보드를 읽을 틈을 주고 되돌린다
         std::thread::sleep(Duration::from_millis(if r.is_ok() { 350 } else { 0 }));
         if open(&owner) {
+            // 그 사이 사람이나 다른 앱이 새로 복사했으면 그것을 지우지 않게 그대로 둔다 — 번호가 바뀌었어도 아직 우리 글이면
+            // (원격 데스크톱 rdpclip 처럼 같은 내용을 다시 알린 것) 되돌린다
+            let changed = unsafe { GetClipboardSequenceNumber() } != ours;
+            if put && changed && current_text().as_deref() != Some(text) {
+                unsafe { CloseClipboard() };
+                return r;
+            }
             unsafe { EmptyClipboard() };
             for (fmt, bytes) in &saved {
                 set(*fmt, bytes);
@@ -326,6 +335,26 @@ mod imp {
         r
     }
 
+    /// 지금 클립보드의 글 (클립보드를 연 채로 부른다)
+    fn current_text() -> Option<String> {
+        let h = unsafe { GetClipboardData(CF_UNICODETEXT as u32) } as HGLOBAL;
+        if h.is_null() {
+            return None;
+        }
+        unsafe {
+            let p = GlobalLock(h) as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let n = GlobalSize(h) / 2;
+            let w = std::slice::from_raw_parts(p, n);
+            let end = w.iter().position(|&c| c == 0).unwrap_or(n);
+            let s = String::from_utf16_lossy(&w[..end]);
+            GlobalUnlock(h);
+            Some(s)
+        }
+    }
+
     /// 지금 클립보드의 글 (시험용)
     #[cfg(test)]
     pub fn read_text() -> Option<String> {
@@ -333,16 +362,7 @@ mod imp {
         if !open(&owner) {
             return None;
         }
-        let h = unsafe { GetClipboardData(CF_UNICODETEXT as u32) } as HGLOBAL;
-        let out = (!h.is_null()).then(|| unsafe {
-            let p = GlobalLock(h) as *const u16;
-            let n = GlobalSize(h) / 2;
-            let w = std::slice::from_raw_parts(p, n);
-            let end = w.iter().position(|&c| c == 0).unwrap_or(n);
-            let s = String::from_utf16_lossy(&w[..end]);
-            GlobalUnlock(h);
-            s
-        });
+        let out = current_text();
         unsafe { CloseClipboard() };
         out
     }
@@ -354,10 +374,15 @@ mod tests {
 
     /// 실제 클립보드로: 붙여넣는 동안은 받아 적은 글, 끝나면 원래 글로 돌아온다 (키는 보내지 않는다).
     /// `cargo test -p badasugi inject::tests::paste_restores_the_clipboard -- --ignored` (쓰던 클립보드는 되돌려 놓는다)
+    /// 클립보드 시험은 하나씩 (같은 클립보드를 쓰므로 함께 돌면 서로 덮는다)
+    #[cfg(windows)]
+    static CLIPBOARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(windows)]
     #[test]
     #[ignore]
     fn paste_restores_the_clipboard() {
+        let _one = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen = None;
         // 바깥 붙여넣기가 시험 전 클립보드(그림 등 무엇이든)를 지켜 두었다가 시험 뒤에 되돌린다
         imp::paste_with("시험 준비", || {
@@ -374,6 +399,23 @@ mod tests {
         let (during, after) = seen.unwrap();
         assert_eq!(during.as_deref(), Some("받아 적은 글\r\n둘째 줄"));
         assert_eq!(after.as_deref(), Some("원래 클립보드 글 🙂"));
+    }
+
+    /// 붙여 넣은 뒤 기다리는 사이 다른 앱이 복사하면 그것을 지우지 않는다 (원래 클립보드로 되돌리지 않음)
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn paste_keeps_a_copy_made_meanwhile() {
+        let _one = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+        let mut after = None;
+        imp::paste_with("시험 준비", || {
+            imp::copy("원래 클립보드 글")?;
+            imp::paste_with("받아 적은 글", || imp::copy("그 사이 복사한 글"))?;
+            after = imp::read_text();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(after.as_deref(), Some("그 사이 복사한 글"));
     }
 
     #[test]
