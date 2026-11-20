@@ -527,6 +527,22 @@
           </section>
 
           <section>
+            <h4>말로 입력</h4>
+            <div class="set-group">
+              <label class="row"><span>어디서나 말로 입력하기<small>단축키를 누른 채 말하고 떼면 지금 커서가 있는 곳(메일 · 메신저 · 문서)에 글자가 들어가요</small></span><input type="checkbox" class="switch" id="opt-dictate" /></label>
+              <div class="row" id="dictate-hotkey-row" hidden><span>말로 입력 단축키<small id="dictate-hotkey-desc">누른 채 말하기 · 톡 누르면 손을 떼고 말해도 돼요</small></span><button type="button" class="keycap" id="opt-dictate-hotkey" title="눌러서 바꾸기"></button></div>
+              <label class="row" id="dictate-insert-row" hidden><span>넣는 방법<small>붙여넣기는 빠르고 원래 클립보드를 되돌려 놓아요 · 한 글자씩은 클립보드를 건드리지 않아요</small></span>
+                <select id="opt-dictate-insert" class="compact">
+                  <option value="paste">붙여넣기</option>
+                  <option value="type">한 글자씩</option>
+                </select>
+              </label>
+              <label class="row" id="dictate-polish-row" hidden><span>AI 로 다듬기<small>설정 › 요약의 AI 로 맞춤법 · 띄어쓰기를 다듬어요 · 조금 늦어지고, 받아 적은 글이 그 AI 로 가요</small></span><input type="checkbox" class="switch" id="opt-dictate-polish" /></label>
+            </div>
+            <p class="desc" id="dictate-desc" hidden>음 · 어 같은 군말과 되풀이는 빼고, "쉼표" · "마침표" · "물음표" · "줄 바꿈"이라고 말하면 그 문장부호로 바꿔요. 회의를 받아 적는 동안 마이크를 쓰고 있으면 쉬어요 — 내 말이 회의 기록에 섞이지 않게.</p>
+          </section>
+
+          <section>
             <h4>회의 시작 알림</h4>
             <div class="set-group">
               <label class="row"><span>회의가 시작되면 알려 주기<small>회의 앱이 마이크를 쓰기 시작하면 시계 위에서 받아쓸지 묻고, 마이크를 놓으면 멈출지 물어요 · 녹음을 저절로 시작하지는 않아요</small></span><input type="checkbox" class="switch" id="opt-meet" /></label>

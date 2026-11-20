@@ -16,6 +16,9 @@ const FILES: &[(&str, &str)] = &[
     ("merge_final.md", include_str!("../prompts/merge_final.md")),
     ("shrink_note.md", include_str!("../prompts/shrink_note.md")),
     ("ask.md", include_str!("../prompts/ask.md")),
+    // 말로 입력의 AI 다듬기 (설정에서 켰을 때만) — 받아 적은 짧은 글의 맞춤법 · 띄어쓰기 · 문장부호만.
+    // 뜻을 바꾸거나 말을 보태지 않게, 다듬은 글만 돌려받는다 (dictate::polished 가 길이가 너무 달라진 답은 버린다)
+    ("dictate.md", include_str!("../prompts/dictate.md")),
     // 모든 회의에 묻기 — 여러 회의를 번호로 실어 보낸다. 근거는 [회의 2 · 12:34] (화면이 그 회의의 그 문장으로)
     ("ask_all.md", include_str!("../prompts/ask_all.md")),
     // 지금까지 따라잡기 — 녹음 중 "지난 10분"만 실어 묻는 지시 (사용자 글). `{범위}` 자리는 ask.rs 가

@@ -50,6 +50,14 @@ pub struct Settings {
     pub watch_dir: String,
     /// 받아 적은 뒤 요약까지 (설정 › 요약의 AI 로)
     pub watch_summarize: bool,
+    /// 받아쓰기 입력 모드 — 단축키를 누른 채 말하면 지금 커서가 있는 창에 글자가 들어간다 (dictate.rs)
+    pub dictation: bool,
+    /// 말로 입력 단축키 (누른 채 말하기 · 톡 누르면 말이 끝날 때까지)
+    pub dictation_hotkey: String,
+    /// "paste" = 클립보드 붙여넣기(원래 클립보드는 되돌림) · "type" = 한 글자씩
+    pub dictation_insert: String,
+    /// AI 로 다듬기 (설정 › 요약의 AI — 맞춤법 · 띄어쓰기)
+    pub dictation_polish: bool,
     /// "system" | "light" | "dark"
     pub theme: String,
     /// 새 버전을 백그라운드에서 받아 두었다가, 녹음 중이 아니고 창이 숨겨져 있을 때 조용히 설치
@@ -165,6 +173,10 @@ impl Default for Settings {
             watch_folder: false,
             watch_dir: String::new(),
             watch_summarize: true,
+            dictation: false,
+            dictation_hotkey: "Ctrl+Alt+Space".into(),
+            dictation_insert: "paste".into(),
+            dictation_polish: false,
             theme: "system".into(),
             auto_update: true,
             last_version: String::new(),
@@ -224,6 +236,10 @@ impl Settings {
         // 녹음 단축키를 지키고 중요 표시는 비운다 (설정 › 일반에서 다른 조합으로 정한다)
         if same_hotkey(&self.hotkey, &self.star_hotkey) {
             self.star_hotkey.clear();
+        }
+        // 말로 입력 단축키가 다른 단축키와 겹치면 말로 입력 쪽을 비운다 (설정 › 일반에서 다시 정한다)
+        if same_hotkey(&self.dictation_hotkey, &self.hotkey) || same_hotkey(&self.dictation_hotkey, &self.star_hotkey) {
+            self.dictation_hotkey.clear();
         }
     }
 
@@ -293,6 +309,22 @@ mod tests {
         let none: Settings = load_json_or_default(&dir.join("none.json"));
         assert_eq!(none.hotkey, Settings::default().hotkey);
         assert!(!dir.join("none.json.bad").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dictation_is_off_and_does_not_steal_a_hotkey() {
+        let s: Settings = serde_json::from_str(r#"{ "hotkey": "Ctrl+Alt+R" }"#).unwrap();
+        assert!(!s.dictation);
+        assert_eq!((s.dictation_hotkey.as_str(), s.dictation_insert.as_str()), ("Ctrl+Alt+Space", "paste"));
+        assert!(!s.dictation_polish);
+        // 녹음 단축키를 이미 Ctrl+Alt+Space 로 쓰던 설정: 녹음 단축키를 지키고 말로 입력은 비운다
+        let dir = std::env::temp_dir().join(format!("bd-settings-dict-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, br#"{ "hotkey": "ctrl+alt+space" }"#).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!((s.hotkey.as_str(), s.dictation_hotkey.as_str()), ("ctrl+alt+space", ""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

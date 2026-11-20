@@ -209,6 +209,36 @@ fn read_all(p: &Path) -> anyhow::Result<Vec<f32>> {
     Ok(out)
 }
 
+/// 말로 입력: 단축키를 누른 채 말하고 떼면 받아 적어 넣을 글이 나온다 (점검 모드는 넣지 않고 남긴다).
+/// 회의 녹음이 마이크를 쓰는 동안은 쉰다
+fn dictate_check(app: &AppHandle, c: &mut Checks, expect_first: Option<&str>) {
+    use crate::dictate::{self, Dictate, View};
+    let d = app.state::<Dictate>();
+    *d.smoke_out.lock() = None;
+    // 테스트 음성을 마이크 대신 — 처음 5초 남짓을 누른 채 말한 것처럼
+    dictate::press(app);
+    std::thread::sleep(Duration::from_millis(5500));
+    dictate::release(app);
+    let got = wait_for(Duration::from_secs(120), || d.smoke_out.lock().is_some());
+    let text = d.smoke_out.lock().clone().unwrap_or_default();
+    let has = expect_first.is_none_or(|w| text.contains(w));
+    c.add(
+        "말로 입력: 누른 채 말하고 떼면 글",
+        got && !text.trim().is_empty() && has,
+        if got { format!("{}자{}", text.chars().count(), expect_first.map(|w| if has { format!(" · '{w}' 있음") } else { format!(" · '{w}' 없음") }).unwrap_or_default()) } else { "2분 안에 글이 나오지 않았어요".into() },
+    );
+    // 회의 녹음 중에는 쉰다
+    if crate::start_recording_inner(app).is_ok() {
+        std::thread::sleep(Duration::from_secs(1));
+        dictate::press(app);
+        let busy = wait_for(Duration::from_secs(5), || matches!(d.view(), View::Error { .. }));
+        dictate::release(app);
+        c.add("말로 입력: 회의 녹음 중에는 쉬기", busy, format!("{:?}", d.view()));
+        crate::stop_recording_inner(app);
+        wait_idle(app, Duration::from_secs(300));
+    }
+}
+
 /// 조건이 맞을 때까지 기다린다 (시간 안에 맞으면 true)
 fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
     let t = Instant::now();
@@ -545,6 +575,9 @@ fn run(app: &AppHandle, c: &mut Checks) {
 
     // ── 2-3. 녹음 폴더 지켜보기 ──
     watch_check(app, c, &wav_for_watch, &sessions);
+
+    // ── 2-4. 말로 입력 ──
+    dictate_check(app, c, expect.first().map(String::as_str));
 
     // ── 3. 진단 로그가 남는지 ──
     let logs = crate::logging::log_dir();

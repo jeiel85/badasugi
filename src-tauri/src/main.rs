@@ -4,6 +4,8 @@
 mod ant;
 mod ask;
 mod ask_all;
+mod dictate;
+mod inject;
 mod export;
 mod logging;
 mod meeting;
@@ -231,7 +233,7 @@ fn get_state(app: AppHandle) -> StateDto {
 fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
     let st = app.state::<AppState>();
     let mut settings = settings;
-    let (old_hotkey, old_star) = {
+    let (old_hotkey, old_star, old_dict) = {
         // 창 모드·위치·버전은 앱(백엔드)이 관리한다 — 화면이 들고 있던 옛 값으로 덮어쓰지 않게
         let cur = st.settings.lock();
         settings.mini_mode = cur.mini_mode;
@@ -239,21 +241,31 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
         settings.mini_docked = cur.mini_docked;
         settings.full_bounds = cur.full_bounds;
         settings.last_version = cur.last_version.clone();
-        (cur.hotkey.clone(), cur.star_hotkey.clone())
+        (cur.hotkey.clone(), cur.star_hotkey.clone(), dictation_key(&cur).to_string())
     };
     // 새 단축키부터 등록해 본다 — 다른 프로그램이 쓰는 조합이면 원래 단축키를 되살리고 그 값은 저장하지 않는다
     // (그대로 두면 단축키가 하나도 없게 되고, 켤 때마다 같은 오류가 난다)
     let mut hotkey_err = None;
-    if old_hotkey != settings.hotkey || old_star != settings.star_hotkey {
-        let res = if settings::same_hotkey(&settings.hotkey, &settings.star_hotkey) {
+    let new_dict = dictation_key(&settings).to_string();
+    if old_hotkey != settings.hotkey || old_star != settings.star_hotkey || old_dict != new_dict {
+        let same = |a: &str, b: &str| settings::same_hotkey(a, b);
+        let res = if same(&settings.hotkey, &settings.star_hotkey) {
             Err("녹음 단축키와 중요 표시 단축키를 다른 조합으로 골라 주세요.".to_string())
+        } else if same(&new_dict, &settings.hotkey) || same(&new_dict, &settings.star_hotkey) {
+            Err("말로 입력 단축키를 녹음 · 중요 표시 단축키와 다른 조합으로 골라 주세요.".to_string())
         } else {
-            register_hotkeys(&app, &settings.hotkey, &settings.star_hotkey)
+            register_hotkeys(&app, &settings.hotkey, &settings.star_hotkey, &new_dict)
         };
         if let Err(e) = res {
-            let _ = register_hotkeys(&app, &old_hotkey, &old_star);
+            let _ = register_hotkeys(&app, &old_hotkey, &old_star, &old_dict);
             settings.hotkey = old_hotkey;
             settings.star_hotkey = old_star;
+            // 말로 입력은 켜기 전 상태로 (단축키를 쓸 수 없으면 켜지 않는다)
+            if old_dict != new_dict {
+                let cur = st.settings.lock();
+                settings.dictation = cur.dictation;
+                settings.dictation_hotkey = cur.dictation_hotkey.clone();
+            }
             hotkey_err = Some(e);
         }
     }
@@ -291,12 +303,21 @@ fn list_devices() -> Vec<DeviceInfo> {
     badasugi_core::audio::list_input_devices()
 }
 
-/// 전역 단축키 두 개(녹음 · 중요 표시 ⭐)를 다시 등록한다. 하나가 실패해도 다른 하나는 등록해 두고 첫 오류를 돌려준다
-fn register_hotkeys(app: &AppHandle, rec: &str, star: &str) -> CmdResult<()> {
+/// 말로 입력 단축키 — 켰을 때만 (끄면 빈 값)
+fn dictation_key(s: &Settings) -> &str {
+    if s.dictation {
+        s.dictation_hotkey.trim()
+    } else {
+        ""
+    }
+}
+
+/// 전역 단축키(녹음 · 중요 표시 ⭐ · 말로 입력)를 다시 등록한다. 하나가 실패해도 나머지는 등록해 두고 첫 오류를 돌려준다
+fn register_hotkeys(app: &AppHandle, rec: &str, star: &str, dictate: &str) -> CmdResult<()> {
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
     let mut first_err = None;
-    for (key, what) in [(rec.trim(), "녹음"), (star.trim(), "중요 표시")] {
+    for (key, what) in [(rec.trim(), "녹음"), (star.trim(), "중요 표시"), (dictate.trim(), "말로 입력")] {
         if key.is_empty() {
             continue;
         }
@@ -307,6 +328,16 @@ fn register_hotkeys(app: &AppHandle, rec: &str, star: &str) -> CmdResult<()> {
         }
     }
     first_err.map_or(Ok(()), Err)
+}
+
+/// 눌린 전역 단축키가 말로 입력 단축키인지 (켰을 때만 · 녹음 · 중요 표시와 같은 조합이면 아니다)
+fn is_dictation_shortcut(app: &AppHandle, pressed: &Shortcut) -> bool {
+    app.try_state::<AppState>().is_some_and(|st| {
+        let s = st.settings.lock();
+        let id = |k: &str| k.trim().parse::<Shortcut>().ok().map(|s| s.id());
+        let dict = id(dictation_key(&s));
+        dict.is_some() && dict == Some(pressed.id()) && id(&s.hotkey) != dict && id(&s.star_hotkey) != dict
+    })
 }
 
 /// 눌린 전역 단축키가 중요 표시 ⭐ 단축키인지 (아니면 녹음 단축키).
@@ -2314,6 +2345,14 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
+                    // 말로 입력: 누른 채 말하고 떼면 입력 (톡 누르면 말이 끝날 때까지)
+                    if is_dictation_shortcut(app, shortcut) {
+                        match event.state() {
+                            ShortcutState::Pressed => dictate::press(app),
+                            ShortcutState::Released => dictate::release(app),
+                        }
+                        return;
+                    }
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
@@ -2431,6 +2470,7 @@ fn main() {
             app.manage(usage_book::UsageBook::load(config_dir_for_usage.join("usage.json")));
             app.manage(status::Status::new(tray_base));
             app.manage(watch::Watch::load(config_dir_for_usage.join("watch.json")));
+            app.manage(dictate::Dictate::new());
             log::info!(
                 "받아쓰기 {} 시작 — 엔진 {}, 모델 {}, 언어 {}, 입력 {:?}, 화자 구분 {}, 녹음 저장 {}, 미니 창 {}{}",
                 app.package_info().version,
@@ -2450,7 +2490,7 @@ fn main() {
             }
 
             setup_tray(&handle)?;
-            if let Err(e) = register_hotkeys(&handle, &settings.hotkey, &settings.star_hotkey) {
+            if let Err(e) = register_hotkeys(&handle, &settings.hotkey, &settings.star_hotkey, dictation_key(&settings)) {
                 log::warn!("{e}");
                 *app.state::<AppState>().hotkey_error.lock() =
                     Some(format!("{e}\n다른 프로그램이 쓰고 있을 수 있어요. 설정 › 일반에서 다른 조합으로 바꿔 주세요."));
@@ -2541,6 +2581,8 @@ fn main() {
             meeting::meet_ready,
             meeting::meet_answer,
             watch::watch_status,
+            dictate::dictate_state,
+            dictate::dictate_ready,
             get_usage,
             list_voices,
             forget_voice,
