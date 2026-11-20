@@ -1312,9 +1312,16 @@ fn cancel_token(app: &AppHandle, token: u64) {
 }
 
 /// 회의에 묻는다 → 받은 답 (기록의 묻고 답하기 목록 끝에 저장한 것).
-/// 답은 받는 대로 `bd://ask-progress` 로 알린다: { id, token, delta | restart | waitSecs }
+/// 답은 받는 대로 `bd://ask-progress` 로 알린다: { id, token, delta | restart | waitSecs }.
+/// `recent_mins` 가 있으면 지금까지 따라잡기 — 받아 적은 마지막 말에서 그 분 앞까지만 정리 (`question` 은 기록에 남길 이름)
 #[tauri::command]
-async fn ask_meeting(app: AppHandle, id: String, question: String, token: u64) -> CmdResult<session::QaItem> {
+async fn ask_meeting(
+    app: AppHandle,
+    id: String,
+    question: String,
+    token: u64,
+    recent_mins: Option<u32>,
+) -> CmdResult<session::QaItem> {
     let st = app.state::<AppState>();
     st.busy_ops.fetch_add(1, Ordering::SeqCst);
     let _busy = BusyGuard(&st.busy_ops);
@@ -1346,7 +1353,7 @@ async fn ask_meeting(app: AppHandle, id: String, question: String, token: u64) -
         let cancel = cancel.clone();
         let question = question.clone();
         let _ = std::thread::Builder::new().name("bd-ask".into()).spawn(move || {
-            let _ = tx.send(ask::ask(&cfg, &doc, &question, &mut on_event, &on_usage, &cancel));
+            let _ = tx.send(ask::ask(&cfg, &doc, &question, recent_mins, &mut on_event, &on_usage, &cancel));
         });
     }
     let res = tauri::async_runtime::spawn_blocking(move || loop {
