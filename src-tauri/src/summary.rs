@@ -709,6 +709,18 @@ pub fn summarize(
     on_usage: &dyn Fn(&str, &Reply),
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Summary> {
+    Ok(finish(&summarize_raw(cfg, tpl, doc, progress, on_usage, cancel)?))
+}
+
+/// 모델이 쓴 그대로의 회의록 (제목 섹션 · 말꼬리 그대로)
+fn summarize_raw(
+    cfg: &SummarySettings,
+    tpl: &Template,
+    doc: &SessionDoc,
+    progress: &dyn Fn(Progress),
+    on_usage: &dyn Fn(&str, &Reply),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<String> {
     if doc.utterances.is_empty() {
         bail!("요약할 내용이 없습니다");
     }
@@ -729,7 +741,19 @@ pub fn summarize(
     if raw.trim().is_empty() {
         bail!("요약 결과가 비어 있습니다");
     }
-    Ok(split_title(&raw))
+    Ok(raw)
+}
+
+/// 모델의 답 → 요약: 제목을 떼어 내고, 불릿 끝에 남은 말꼬리("~ 검토 필요 제기")를 뗀다 ([`tails`](crate::tails)).
+/// 요약하는 동안 화면에는 진행만 가므로 다 받은 뒤 한 번에 떼도 깜빡이지 않는다
+fn finish(raw: &str) -> Summary {
+    let mut s = split_title(raw);
+    let (text, n) = crate::tails::trim(&s.text);
+    if n > 0 {
+        log::info!("요약 말꼬리 {n}줄 뗌");
+    }
+    s.text = text;
+    s
 }
 
 /// 맨 앞 "### 제목" 섹션을 떼어 제목으로 쓴다
@@ -1396,6 +1420,16 @@ mod tests {
         assert!(s.title.is_none());
     }
 
+    #[test]
+    fn finished_summary_has_tails_cut_but_title_kept() {
+        let s = finish("### 제목\n결제 모듈 분리 논의\n\n### 주요 논의\n- **결제 모듈**\n  - 메일 : 발송 시각 변경 방안 검토 필요 제기 [14:07]\n\n### 할 일\n- [ ] 결제 모듈 : 분리 검토 필요 — 기한: 금요일 [14:20]");
+        assert_eq!(s.title.as_deref(), Some("결제 모듈 분리 논의"), "제목은 그대로");
+        assert_eq!(
+            s.text,
+            "### 주요 논의\n- **결제 모듈**\n  - 메일 : 발송 시각 변경 방안 검토 [14:07]\n\n### 할 일\n- [ ] 결제 모듈 : 분리 검토 — 기한: 금요일 [14:20]"
+        );
+    }
+
     /// "[mm:ss] 화자: …" 줄을 n 개 (각 줄 약 `width` 글자)
     fn transcript(n: usize, width: usize) -> String {
         (0..n)
@@ -1890,7 +1924,8 @@ mod tests {
 
     /// 저장된 회의 하나를 지금 설정(설정 › 요약)의 AI 로 요약해 본다 — 프롬프트를 고칠 때 같은 회의로 전 · 후를 비교하려고.
     /// 실제 API 를 불러 비용이 들므로 평소에는 돌지 않는다 (사용량 장부에도 남지 않는다):
-    /// `BD_SUMMARY_DOC=<기록.json> [BD_SUMMARY_OUT=<결과.md>] [BD_SUMMARY_TEMPLATE=<틀 id>] cargo test --release -p badasugi summarize_a_saved_meeting -- --ignored --nocapture`
+    /// `BD_SUMMARY_DOC=<기록.json> [BD_SUMMARY_OUT=<결과.md>] [BD_SUMMARY_RAW=<말꼬리 떼기 전.md>] [BD_SUMMARY_TEMPLATE=<틀 id>] cargo test --release -p badasugi summarize_a_saved_meeting -- --ignored --nocapture`
+    /// 코드로 뗀 말꼬리는 "말꼬리: 모델이 쓴 줄 → 뗀 줄" 로 알린다
     /// 설정 파일은 `BD_SETTINGS`, 없으면 `%APPDATA%\com.badasugi.desktop\settings.json`
     #[test]
     #[ignore]
@@ -1910,7 +1945,7 @@ mod tests {
         eprintln!("요약 틀: {} ({})", tpl.name, tpl.id);
         let started = std::time::Instant::now();
         let flag = std::sync::atomic::AtomicBool::new(false);
-        let s = summarize(
+        let raw = summarize_raw(
             &cfg,
             &tpl,
             &doc,
@@ -1922,10 +1957,19 @@ mod tests {
         )
         .unwrap();
         eprintln!("걸린 시간 {:.0}초", started.elapsed().as_secs_f32());
-        let out = format!("### 제목\n{}\n\n{}\n", s.title.unwrap_or_default(), s.text);
+        let s = finish(&raw);
+        let title = s.title.unwrap_or_default();
+        let before = split_title(&raw).text;
+        for (a, b) in before.lines().zip(s.text.lines()).filter(|(a, b)| a != b) {
+            eprintln!("말꼬리: {} → {}", a.trim(), b.trim());
+        }
+        let out = format!("### 제목\n{title}\n\n{}\n", s.text);
         println!("{out}");
         if let Some(p) = std::env::var_os("BD_SUMMARY_OUT") {
             std::fs::write(p, out).unwrap();
+        }
+        if let Some(p) = std::env::var_os("BD_SUMMARY_RAW") {
+            std::fs::write(p, format!("### 제목\n{title}\n\n{before}\n")).unwrap();
         }
     }
 }
