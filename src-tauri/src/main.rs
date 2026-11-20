@@ -1536,6 +1536,8 @@ fn spawn_live_translation(app: AppHandle, id: String) {
         let mut first_seen: Option<Instant> = None;
         let mut resume_at: Option<Instant> = None;
         let mut warned = false;
+        // 녹음이 끝난 뒤 요청 한도로 기다린 횟수
+        let mut ended_waits = 0;
         log::info!("실시간 번역 시작: {id}");
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -1581,19 +1583,30 @@ fn spawn_live_translation(app: AppHandle, id: String) {
                     count_misses(&app, &id, &lang, sent, &mut misses);
                 }
                 Err(e) => {
-                    if let Some(w) = summary::wait_for(&e) {
-                        resume_at = Some(Instant::now() + std::time::Duration::from_secs(w));
-                        continue;
+                    // 요청 한도(429): 짧게 기다리라면 기다렸다 다시. 다만 녹음이 끝난 뒤에는 몇 번까지만 —
+                    // 하루 한도처럼 오래 기다리라거나 계속 막히면 알리고 끝낸다 (업데이트를 끝없이 붙잡지 않게)
+                    let wait = summary::wait_for(&e);
+                    if let Some(w) = wait.filter(|w| *w <= summary::MAX_WAIT_SECS) {
+                        if ended {
+                            ended_waits += 1;
+                        }
+                        if ended_waits <= 3 {
+                            resume_at = Some(Instant::now() + std::time::Duration::from_secs(w));
+                            continue;
+                        }
                     }
                     log::warn!("실시간 번역 실패: {e:#}");
-                    if !warned {
+                    if !warned || ended {
                         warned = true;
-                        let _ = app.emit("bd://translate-error", serde_json::json!({ "id": id, "message": format!("{e:#}") }));
+                        let msg = if ended { format!("{e:#}\n남은 문장은 번역 단추로 이어서 할 수 있어요") } else { format!("{e:#}") };
+                        let _ = app.emit("bd://translate-error", serde_json::json!({ "id": id, "message": msg, "ended": ended }));
                     }
                     if ended {
                         break;
                     }
-                    resume_at = Some(Instant::now() + std::time::Duration::from_secs(30));
+                    // 오래 기다리라는 한도면 그만큼(10분까지), 그 밖의 오류는 30초 뒤 다시
+                    let secs = wait.map_or(30, |w| w.min(600));
+                    resume_at = Some(Instant::now() + std::time::Duration::from_secs(secs));
                 }
             }
         }

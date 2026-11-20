@@ -2381,6 +2381,9 @@ $('#tr-go').addEventListener('click', async () => {
   const lang = $('#tr-lang').value;
   if (hasTr(d) && d.translation.lang !== lang
     && !(await api.ask(`${trLangName(d.translation.lang)} 번역을 지우고 ${trLangName(lang)}로 다시 번역할까요?`, { title: '번역', kind: 'warning' }))) return;
+  if (S.trJob) return; // 묻는 동안 다른 번역이 시작됐으면
+  // 방금 고친 문장이 번역에 들어가게, 기다리던 저장을 먼저 보낸다 (번역은 그 저장이 끝난 뒤 기록을 읽는다 — 요약과 같게)
+  persistDoc.flush();
   const token = Date.now();
   S.trJob = { id: d.id, title: d.title, token, done: 0, total: trCount(d, lang).total, waitSecs: null };
   S.trShow = true;
@@ -4737,7 +4740,10 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
     Object.assign(S.trJob, { done: p.done, total: p.total, waitSecs: p.waitSecs || null });
     if (!$('#pop-tr').hidden) renderTrPop();
   });
-  await api.listen('bd://translate-error', (e) => toast(`실시간 번역을 하지 못했어요 — ${e.payload.message}\n30초 뒤 다시 해 볼게요 (녹음은 그대로 계속돼요)`, 'error', 8000));
+  // 녹음 중이면 잠시 뒤 다시 해 보고, 녹음이 끝난 뒤면 그만둔다 (남은 문장은 번역 단추로)
+  await api.listen('bd://translate-error', (e) => toast(e.payload.ended
+    ? `실시간 번역을 마치지 못했어요 — ${e.payload.message}`
+    : `실시간 번역을 하지 못했어요 — ${e.payload.message}\n잠시 뒤 다시 해 볼게요 (녹음은 그대로 계속돼요)`, 'error', 8000));
   await api.listen('bd://mini', (e) => setMini(!!e.payload));
   // 중요 표시 ⭐ 전역 단축키 (다른 창을 보고 있어도)
   await api.listen('bd://star', () => addStar());
