@@ -99,14 +99,15 @@ pub fn antivirus_good(states: &[u32]) -> bool {
 
 /// 참석자(주소록 정보)를 읽어도 Outlook 이 경고 창을 띄우지 않나 — Outlook 이 바깥 프로그램을 보는 기준 그대로:
 /// - 회사 정책(`AdminSecurityMode` = 3)이 주소 정보 접근(`PromptOOMAddressInformationAccess`)을 정했으면 그대로
-///   (1 = 묻지 않고 허용 · 3 = 백신 상태에 따라 · 0 묻기 · 2 거부 · 그 밖은 읽지 않음)
+///   (Microsoft 문서: 0 = 자동 거부 · 1 = 사용자에게 묻기(기본) · 2 = 자동 허용. 3 = 컴퓨터 보안 상태(백신)에 따라 —
+///   그룹 정책 서식의 넷째 선택. 그 밖은 읽지 않음)
 /// - 아니면 프로그래밍 방식 액세스 설정(`ObjectModelGuard`): 2 = 경고하지 않음 · 1 = 늘 경고 ·
 ///   0 이나 없음(기본) = 백신이 꺼졌거나 오래됐을 때만 경고
 /// 모르는 값은 읽지 않는 쪽으로
 pub fn people_allowed(policy_mode: Option<u32>, policy_prompt: Option<u32>, guard: Option<u32>, av_good: bool) -> bool {
     if policy_mode == Some(3) {
         match policy_prompt {
-            Some(1) => return true,
+            Some(2) => return true,
             Some(3) => return av_good,
             Some(_) => return false,
             None => {}
@@ -659,10 +660,10 @@ mod tests {
         // "경고하지 않음" · "늘 경고"
         assert!(people_allowed(None, None, Some(2), false));
         assert!(!people_allowed(None, None, Some(1), true));
-        // 회사 정책이 정해 두었으면 그대로 (정책을 쓰지 않으면 설정으로)
-        assert!(people_allowed(Some(3), Some(1), Some(1), false));
+        // 회사 정책이 정해 두었으면 그대로 (정책을 쓰지 않으면 설정으로) — 0 자동 거부 · 1 묻기 · 2 자동 허용
+        assert!(people_allowed(Some(3), Some(2), Some(1), false));
         assert!(!people_allowed(Some(3), Some(0), None, true));
-        assert!(!people_allowed(Some(3), Some(2), Some(2), true));
+        assert!(!people_allowed(Some(3), Some(1), Some(2), true));
         assert!(people_allowed(Some(3), Some(3), None, true));
         assert!(!people_allowed(Some(3), Some(3), None, false));
         assert!(people_allowed(Some(0), Some(0), None, true));
