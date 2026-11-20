@@ -614,6 +614,13 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
     let st = app.state::<AppState>();
     // 녹음 폴더 파일을 받아 적는 중이면 멈추고 녹음을 먼저 (그 파일은 녹음 뒤 다시) — 시작이 끝날 때까지 새 파일은 미룬다
     let _way = if file.is_none() { Some(watch::make_way(app)?) } else { None };
+    // 마이크를 받는 녹음이면 듣던 말로 입력을 멈춘다 (같은 마이크 — 말로 입력한 말이 회의 기록에 섞이지 않게)
+    if file.is_none() {
+        let mic = source.unwrap_or_else(|| st.settings.lock().source).uses_mic();
+        if mic {
+            dictate::stop_for_meeting(app);
+        }
+    }
     {
         let mut rec = st.rec.lock();
         if *rec != RecState::Idle {

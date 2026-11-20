@@ -53,15 +53,32 @@ pub enum View {
     Working,
     /// AI 로 다듬는 중
     Polishing,
-    /// 넣었다
-    Done { chars: usize },
+    /// 넣었다 (`missed` = 받아 적지 못한 발화 수)
+    Done { chars: usize, missed: usize },
     /// 넣지 못했다 · 말이 없었다 · 쉬는 중
     Error { message: String },
     Hidden,
 }
 
+/// 말로 입력이 듣기부터 넣기까지 도는 동안 업데이트 설치를 미룬다 (`busy_ops` — 세션이 없어지면 내린다)
+struct Busy(AppHandle);
+
+impl Busy {
+    fn new(app: &AppHandle) -> Busy {
+        app.state::<AppState>().busy_ops.fetch_add(1, Ordering::SeqCst);
+        Busy(app.clone())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.state::<AppState>().busy_ops.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct Session {
     id: u64,
+    _busy: Busy,
     pipeline: Option<Pipeline>,
     started: Instant,
     latched: bool,
@@ -71,6 +88,10 @@ struct Session {
     spoke: bool,
     quiet_since: Option<Instant>,
     error: Option<String>,
+    /// 받아 적지 못한 발화 수 (일부만 받아 적었으면 넣고 나서 알린다)
+    failed: usize,
+    /// 회의 녹음이 마이크를 가져갔다 — 들은 것을 넣지 않고 버린다
+    discard: bool,
     /// API 엔진이면 (공급자, 모델) — 사용량
     api: Option<(&'static str, String)>,
 }
@@ -132,6 +153,7 @@ pub fn press(app: &AppHandle) {
         let id = d.next.fetch_add(1, Ordering::SeqCst) + 1;
         *cur = Some(Session {
             id,
+            _busy: Busy::new(app),
             pipeline: None,
             started: Instant::now(),
             latched: false,
@@ -140,6 +162,8 @@ pub fn press(app: &AppHandle) {
             spoke: false,
             quiet_since: None,
             error: None,
+            failed: 0,
+            discard: false,
             api: None,
         });
         id
@@ -178,6 +202,32 @@ pub fn release(app: &AppHandle) {
     // 창은 잠금을 놓고 건드린다 (창 주인 스레드가 이 잠금을 기다리면 서로 멈춘다)
     drop(cur);
     show(app, if tap { View::Listening { latched: true } } else { View::Working });
+}
+
+/// 회의 녹음이 마이크를 쓰기 시작한다 — 듣던 말로 입력은 멈추고 들은 말은 버린다
+/// (같은 마이크라 받아쓰기로 한 말이 회의 기록에 섞이지 않게 · 반대 방향은 [`mic_busy`])
+pub fn stop_for_meeting(app: &AppHandle) {
+    let Some(d) = app.try_state::<Dictate>() else {
+        return;
+    };
+    let stopped = {
+        let mut cur = d.cur.lock();
+        match cur.as_mut() {
+            Some(s) => {
+                s.discard = true;
+                let was = s.stopping;
+                if !was {
+                    stop_locked(s);
+                }
+                !was
+            }
+            None => false,
+        }
+    };
+    if stopped {
+        log::info!("회의 녹음이 마이크를 써서 말로 입력을 멈춤");
+        show(app, View::Working);
+    }
 }
 
 /// 회의 녹음이 지금 마이크를 받고 있나
@@ -299,6 +349,7 @@ fn on_event(app: &AppHandle, id: u64, ev: Event) {
         }
         Event::Failed { message, .. } => {
             if let Some(s) = d.cur.lock().as_mut().filter(|s| s.id == id) {
+                s.failed += 1;
                 s.error.get_or_insert(format!("받아 적지 못했어요 — {message}"));
             }
         }
@@ -347,6 +398,12 @@ fn finish(app: &AppHandle, s: Session) {
     let mut text = tidy(&raw);
     let secs = s.started.elapsed().as_secs_f32();
     *app.state::<Dictate>().last_used.lock() = Some(Instant::now());
+    if s.discard {
+        log::info!("말로 입력: 회의 녹음이 시작돼 넣지 않고 버림");
+        show(app, View::Error { message: "회의 녹음을 시작해 말로 입력을 멈췄어요 — 들은 말은 넣지 않았어요".into() });
+        hide_later(app, Duration::from_secs(4));
+        return;
+    }
     if text.is_empty() {
         let message = s.error.unwrap_or_else(|| "받아 적을 말이 들리지 않았어요".into());
         show(app, View::Error { message });
@@ -370,14 +427,20 @@ fn finish(app: &AppHandle, s: Session) {
     log::info!("말로 입력: {chars}자 ({secs:.1}초){}", if polish { " · AI 다듬기" } else { "" });
     if crate::smoke::enabled() {
         *app.state::<Dictate>().smoke_out.lock() = Some(text);
-        show(app, View::Done { chars });
+        show(app, View::Done { chars, missed: s.failed });
         hide_later(app, Duration::from_millis(900));
         return;
     }
     // 알림 창을 먼저 닫지 않는다 — 포커스를 가져가지 않으므로 지금 창에 그대로 들어간다
     match inject::insert(&text, mode) {
+        // 일부 발화를 받아 적지 못했으면 넣은 뒤에 알린다 (녹음을 남기지 않으므로 다시 말해야 한다)
+        Ok(()) if s.failed > 0 => {
+            log::warn!("말로 입력: 발화 {}개를 받아 적지 못한 채 넣음", s.failed);
+            show(app, View::Done { chars, missed: s.failed });
+            hide_later(app, Duration::from_secs(4));
+        }
         Ok(()) => {
-            show(app, View::Done { chars });
+            show(app, View::Done { chars, missed: 0 });
             hide_later(app, Duration::from_millis(900));
         }
         Err(e) => {

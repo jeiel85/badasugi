@@ -227,11 +227,23 @@ fn dictate_check(app: &AppHandle, c: &mut Checks, expect_first: Option<&str>) {
         got && !text.trim().is_empty() && has,
         if got { format!("{}자{}", text.chars().count(), expect_first.map(|w| if has { format!(" · '{w}' 있음") } else { format!(" · '{w}' 없음") }).unwrap_or_default()) } else { "2분 안에 글이 나오지 않았어요".into() },
     );
-    // 회의 녹음 중에는 쉰다
+    // 마이크를 함께 쓰지 않는다: 톡 눌러 듣는 중에 회의 녹음을 시작하면 말로 입력을 멈추고 들은 말은 넣지 않는다
+    *d.smoke_out.lock() = None;
+    dictate::press(app);
+    std::thread::sleep(Duration::from_millis(150));
+    dictate::release(app);
+    std::thread::sleep(Duration::from_millis(1500));
     if crate::start_recording_inner(app).is_ok() {
+        let stopped = wait_for(Duration::from_secs(60), || matches!(d.view(), View::Error { ref message } if message.contains("멈췄어요")));
+        c.add(
+            "말로 입력: 듣는 중 회의 녹음을 시작하면 멈추기",
+            stopped && d.smoke_out.lock().is_none(),
+            format!("{:?}", d.view()),
+        );
+        // 회의 녹음 중에는 쉰다
         std::thread::sleep(Duration::from_secs(1));
         dictate::press(app);
-        let busy = wait_for(Duration::from_secs(5), || matches!(d.view(), View::Error { .. }));
+        let busy = wait_for(Duration::from_secs(5), || matches!(d.view(), View::Error { ref message } if message.contains("쉬어요")));
         dictate::release(app);
         c.add("말로 입력: 회의 녹음 중에는 쉬기", busy, format!("{:?}", d.view()));
         crate::stop_recording_inner(app);

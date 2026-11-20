@@ -17,7 +17,7 @@ const TEXT = {
   listening: (v) => (v.latched ? '듣는 중 · 다시 누르거나 말을 멈추면 입력해요' : '듣는 중 · 놓으면 입력해요'),
   working: () => '받아 적는 중…',
   polishing: () => 'AI 로 다듬는 중…',
-  done: (v) => `입력했어요 · ${v.chars}자`,
+  done: (v) => (v.missed ? `입력했어요 · ${v.chars}자 — 한 부분(${v.missed}곳)은 받아 적지 못했어요` : `입력했어요 · ${v.chars}자`),
   error: (v) => v.message,
 };
 
@@ -49,7 +49,7 @@ document.addEventListener('contextmenu', (e) => e.preventDefault());
 function mockApi() {
   const q = new URLSearchParams(location.search);
   const state = q.get('state') || 'listening';
-  const v = { state, latched: q.has('latched'), chars: 42, message: '회의를 받아 적는 중이라 말로 입력은 쉬어요 — 내 말이 회의 기록에 섞이지 않게' };
+  const v = { state, latched: q.has('latched'), chars: 42, missed: q.has('missed') ? 1 : 0, message: '회의를 받아 적는 중이라 말로 입력은 쉬어요 — 내 말이 회의 기록에 섞이지 않게' };
   let onLevel = null;
   setInterval(() => onLevel && state === 'listening' && onLevel({ payload: 0.02 + Math.random() * 0.12 }), 90);
   return {
