@@ -332,6 +332,24 @@ pub fn due_date(text: &str, base: NaiveDate) -> Option<NaiveDate> {
             }
         }
     }
+    // 이번 달 28일 · 다음 달 1일 · 다다음 달 5일
+    let months = if compact.contains("다다음달") {
+        Some(2)
+    } else if compact.contains("다음달") {
+        Some(1)
+    } else if compact.contains("이번달") {
+        Some(0)
+    } else {
+        None
+    };
+    if let (Some(k), Some(i)) = (months, compact.find('달')) {
+        if let Some((d, rest)) = number(&compact[i + '달'.len_utf8()..]) {
+            if rest.starts_with('일') {
+                let m0 = base.month0() + k;
+                return NaiveDate::from_ymd_opt(base.year() + (m0 / 12) as i32, m0 % 12 + 1, d);
+            }
+        }
+    }
     // 11/25 · 11.25
     for sep in ['/', '.'] {
         if let Some((a, b)) = compact.split_once(sep) {
@@ -390,6 +408,12 @@ pub fn due_date(text: &str, base: NaiveDate) -> Option<NaiveDate> {
         } else {
             last_day(base.year(), base.month())
         };
+    }
+    // 달 · 날짜가 적혀 있는데 위에서 다 읽지 못했으면("11월 셋째 주 금요일" · "다음 달 첫째 주 화요일") 요일만 보고
+    // 짐작하지 않는다 — 더 이른 날짜로 내보내느니 빼는 게 낫다
+    let has_day = compact.char_indices().any(|(i, c)| c == '일' && i > 0 && compact[..i].ends_with(|p: char| p.is_ascii_digit()));
+    if compact.contains('달') || compact.find('월').and_then(|i| digits_before(i)).is_some() || has_day {
+        return None;
     }
     // (이번 주 · 다음 주 · 다다음 주) 금요일 — 주는 월요일부터
     let monday = base - Duration::days(base.weekday().num_days_from_monday() as i64);
@@ -573,11 +597,14 @@ mod tests {
             ("1월 말일", "2027-01-31"),
             ("2027년 2월 말", "2027-02-28"),
             ("이번 달 말일", "2026-11-30"),
+            ("다음 달 1일(화요일)", "2026-12-01"),
+            ("이번 달 28일", "2026-11-28"),
+            ("다다음 달 5일", "2027-01-05"),
             ("이번 주말", "2026-11-21"),
         ] {
             assert_eq!(due_date(text, base), Some(d(want)), "{text}");
         }
-        for text in ["미정", "다음 주", "분기 내", "확인 후", "가능한 빨리"] {
+        for text in ["미정", "다음 주", "분기 내", "확인 후", "가능한 빨리", "11월 셋째 주 금요일", "다음 달 첫째 주 화요일"] {
             assert_eq!(due_date(text, base), None, "{text}");
         }
     }
