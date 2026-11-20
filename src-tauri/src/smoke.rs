@@ -209,6 +209,111 @@ fn read_all(p: &Path) -> anyhow::Result<Vec<f32>> {
     Ok(out)
 }
 
+/// 조건이 맞을 때까지 기다린다 (시간 안에 맞으면 true)
+fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
+    let t = Instant::now();
+    while t.elapsed() < timeout {
+        if ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    ok()
+}
+
+/// 녹음 폴더 지켜보기: 켤 때 있던 파일은 건너뛰고, 새 파일은 받아 적고, 받아 적는 중에 녹음을 시작하면 녹음이 먼저 —
+/// 그 파일은 녹음 뒤 처음부터 다시 받아 적어 기록이 하나만 남는다. (요약은 AI 없이 끈다)
+fn watch_check(app: &AppHandle, c: &mut Checks, src: &Path, sessions: &Path) {
+    use crate::watch::{self, Watch};
+    let Some(home) = home() else {
+        return;
+    };
+    let dir = home.join("watch");
+    let _ = std::fs::create_dir_all(&dir);
+    // 테스트 음성 앞 12초만 — 받아쓰기를 세 번 하므로 점검이 너무 길어지지 않게 (받아 적는 중에 녹음을 시작할 틈은 남긴다)
+    let clip = match badasugi_core::wav::read_16k_mono(src)
+        .and_then(|s| badasugi_core::wav::encode_pcm16(&s[..s.len().min(badasugi_core::SAMPLE_RATE as usize * 12)]))
+    {
+        Ok(b) => b,
+        Err(e) => {
+            c.add("녹음 폴더: 준비", false, format!("테스트 음성을 자르지 못함: {e}"));
+            return;
+        }
+    };
+    let name = |n: &str| format!("{n}.wav");
+    let copy = |n: &str| std::fs::write(dir.join(name(n)), &clip).is_ok();
+    copy("켜기 전 녹음");
+    {
+        let st = app.state::<AppState>();
+        let mut s = st.settings.lock();
+        s.watch_folder = true;
+        s.watch_dir = dir.display().to_string();
+        s.watch_summarize = false;
+    }
+    watch::spawn(app.clone());
+    watch::wake(app);
+    let status = || app.state::<Watch>().status();
+    let armed = wait_for(Duration::from_secs(10), || {
+        let s = status();
+        s.on && s.skipped == 1
+    });
+    if !c.add("녹음 폴더: 켤 때 있던 파일 건너뛰기", armed, format!("{:?}", status())) {
+        return;
+    }
+    let count = |n: &str| {
+        let n = name(n);
+        SessionStore::new(sessions.to_path_buf()).all_docs().iter().filter(|d| d.source_file.as_deref() == Some(n.as_str())).count()
+    };
+    let t = Instant::now();
+    copy("새 녹음 1");
+    let done = wait_for(Duration::from_secs(400), || status().done >= 1);
+    let (one, before) = (count("새 녹음 1"), count("켜기 전 녹음"));
+    c.add(
+        "녹음 폴더: 새 파일 받아 적기",
+        done && one == 1 && before == 0,
+        format!("{:.0}초 걸림 · 새 파일 기록 {one}개 · 켜기 전 파일 기록 {before}개", t.elapsed().as_secs_f64()),
+    );
+    // 다음 파일을 받아 적기 시작하면 바로 녹음을 시작한다 (단축키를 누른 것처럼)
+    copy("새 녹음 2");
+    let st = app.state::<AppState>();
+    let started = wait_for(Duration::from_secs(120), || {
+        watch::job_running(app) && *st.rec.lock() == RecState::Recording && st.pipeline.lock().is_some()
+    });
+    if !c.add("녹음 폴더: 다음 파일 받아쓰기 시작", started, format!("{:?}", status().working)) {
+        return;
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let was_running = watch::job_running(app);
+    let t = Instant::now();
+    let r = crate::toggle_recording_inner(app);
+    let live = r.is_ok() && *st.rec.lock() == RecState::Recording && !st.file_mode.load(std::sync::atomic::Ordering::SeqCst);
+    c.add(
+        "녹음 폴더: 받아 적는 중 녹음 단축키 → 녹음이 먼저",
+        live && was_running,
+        match &r {
+            Err(e) => format!("녹음을 시작하지 못함: {e}"),
+            Ok(()) if !was_running => "받아쓰기가 먼저 끝나 비켜 주기를 확인하지 못했어요".into(),
+            Ok(()) => format!("{:.1}초 만에 녹음 시작", t.elapsed().as_secs_f64()),
+        },
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    crate::stop_recording_inner(app);
+    if !wait_idle(app, Duration::from_secs(300)) {
+        c.add("녹음 폴더: 녹음 뒤 다시 받아 적기", false, "녹음이 끝나지 않았어요");
+        return;
+    }
+    let t = Instant::now();
+    let redone = wait_for(Duration::from_secs(400), || status().done >= 2);
+    let two = count("새 녹음 2");
+    c.add(
+        "녹음 폴더: 녹음 뒤 처음부터 다시 (기록 하나)",
+        redone && two == 1,
+        format!("{:.0}초 걸림 · 기록 {two}개", t.elapsed().as_secs_f64()),
+    );
+    st.settings.lock().watch_folder = false;
+    watch::wake(app);
+}
+
 fn run(app: &AppHandle, c: &mut Checks) {
     let expect: Vec<String> = std::env::var("BADASUGI_SMOKE_EXPECT")
         .unwrap_or_default()
@@ -387,6 +492,7 @@ fn run(app: &AppHandle, c: &mut Checks) {
     }
 
     // ── 2. 파일 받아쓰기 ──
+    let wav_for_watch = wav.clone();
     let file = std::env::var_os("BADASUGI_SMOKE_FILE").map(PathBuf::from).unwrap_or(wav);
     let t1 = Instant::now();
     if !c.add("파일 받아쓰기 시작", crate::start_session(app, Some(&file), None).is_ok(), file.display().to_string()) {
@@ -436,6 +542,9 @@ fn run(app: &AppHandle, c: &mut Checks) {
             if back { "잊은 목소리가 기록을 고치자 다시 기억됐어요".to_string() } else { "잊은 뒤 기록을 고쳐도 다시 기억하지 않음".to_string() },
         );
     }
+
+    // ── 2-3. 녹음 폴더 지켜보기 ──
+    watch_check(app, c, &wav_for_watch, &sessions);
 
     // ── 3. 진단 로그가 남는지 ──
     let logs = crate::logging::log_dir();

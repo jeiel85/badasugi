@@ -197,6 +197,7 @@
           <span class="meter" id="meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
           <span class="paused-tag" id="paused-tag" hidden>일시정지</span>
           <span class="fprog" id="fprog" hidden><i id="fprog-bar"></i></span>
+          <button class="link watch-stop" id="btn-watch-stop" hidden title="이 파일 받아쓰기를 멈춰요 — 받아 적은 데까지 기록에 남기고 다시 받아 적지 않아요">멈추기</button>
         </div>
         <button class="source" id="btn-source" title="입력 소리 선택">
           <svg><use href="#i-mic"/></svg><span id="source-label">마이크</span><svg class="chev"><use href="#i-chevron"/></svg>
@@ -510,6 +511,18 @@
                 <div class="meet-apps" id="meet-apps" role="group" aria-label="지켜볼 앱"></div>
               </div>
             </div>
+          </section>
+
+          <section>
+            <h4>녹음 폴더 지켜보기</h4>
+            <div class="set-group">
+              <label class="row"><span>새 녹음 파일을 알아서 받아 적기<small>휴대폰 · 녹음기 파일이 쌓이는 폴더(OneDrive 등)에 새 파일이 생기면 받아 적어요 · 녹음 중이면 끝난 뒤에 해요</small></span><input type="checkbox" class="switch" id="opt-watch" /></label>
+              <div class="field" id="watch-dir-field" hidden><span>지켜볼 폴더</span>
+                <div class="watch-dir"><span class="watch-path" id="watch-dir"></span><button type="button" class="btn ghost sm" id="btn-watch-dir">폴더 고르기</button></div>
+              </div>
+              <label class="row" id="watch-sum-row" hidden><span>요약까지<small>받아 적은 뒤 설정 › 요약의 AI 로 요약해요</small></span><input type="checkbox" class="switch" id="opt-watch-sum" /></label>
+            </div>
+            <p class="desc watch-status" id="watch-status" hidden></p>
           </section>
 
           <section>

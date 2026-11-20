@@ -993,6 +993,19 @@ impl SessionStore {
         self.dir.join(format!("{id}.opus"))
     }
 
+    /// 이미 있는 기록과 겹치지 않는 id — 겹치면 뒤에 -2, -3 … (기록 id 는 초 단위 시각이라, 같은 초에 이어 시작한
+    /// 받아쓰기(녹음 폴더의 짧은 파일들)가 앞 기록을 덮어쓰지 않게)
+    pub fn unique_id(&self, id: &str) -> String {
+        let taken = |x: &str| {
+            self.current.as_ref().is_some_and(|c| c.id == x)
+                || ["json", "opus", "wav", "md"].iter().any(|e| self.dir.join(format!("{x}.{e}")).exists())
+        };
+        if !taken(id) {
+            return id.to_string();
+        }
+        (2..).map(|n| format!("{id}-{n}")).find(|x| !taken(x)).unwrap_or_else(|| id.to_string())
+    }
+
     pub fn begin(&mut self, doc: SessionDoc) {
         self.current = Some(doc);
         self.dirty = true;
@@ -1389,6 +1402,23 @@ mod tests {
             embedding: e.iter().map(|x| x / n).collect(),
             dur_ms: 4000,
         }
+    }
+
+    #[test]
+    fn ids_started_in_the_same_second_do_not_collide() {
+        let dir = std::env::temp_dir().join(format!("bd-unique-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = SessionStore::new(dir.clone());
+        assert_eq!(store.unique_id("2026-11-20_160102"), "2026-11-20_160102");
+        std::fs::write(dir.join("2026-11-20_160102.json"), "{}").unwrap();
+        assert_eq!(store.unique_id("2026-11-20_160102"), "2026-11-20_160102-2");
+        // 녹음 중인 기록과도 겹치지 않게
+        let mut cur = SessionDoc::new("x".into());
+        cur.id = "2026-11-20_160102-2".into();
+        store.begin(cur);
+        assert_eq!(store.unique_id("2026-11-20_160102"), "2026-11-20_160102-3");
+        assert!(safe_id("2026-11-20_160102-3").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
