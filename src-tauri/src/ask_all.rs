@@ -118,23 +118,28 @@ fn scores(docs: &[SessionDoc], query: &str) -> Vec<f64> {
 /// `keep` 은 꼭 실을 회의(바로 앞 답에 실은 회의 — 이어 묻기)
 fn choose(docs: &[SessionDoc], query: &str, budget: usize, keep: &[&str]) -> (Vec<(usize, f64)>, bool) {
     let max = (budget / PER_MEETING).clamp(MIN_MEETINGS, MAX_MEETINGS);
-    let mut s = scores(docs, query);
-    let best = s.iter().cloned().fold(0.0, f64::max).max(1.0);
+    let s = scores(docs, query);
+    let top = s.iter().cloned().fold(0.0, f64::max);
+    // 질문과 맞는 회의가 먼저 (가장 높은 점수의 15% 아래는 빼고)
+    let mut order: Vec<usize> = if top < 1e-6 { Vec::new() } else { (0..docs.len()).filter(|&i| s[i] >= top * 0.15).collect() };
+    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]).then(a.cmp(&b)));
+    order.truncate(max);
+    let mut picked: Vec<(usize, f64)> = order.into_iter().map(|i| (i, s[i])).collect();
+    // 바로 앞 답에 실은 회의는 남는 자리에 — 새 질문과 맞는 회의를 밀어내지 않게 (자리 몫은 가장 낮은 맞는 회의만큼)
+    let floor = picked.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let floor = if floor.is_finite() { floor } else { 1.0 };
     for (i, d) in docs.iter().enumerate() {
-        if keep.contains(&d.id.as_str()) {
-            s[i] = s[i].max(best);
+        if picked.len() >= max {
+            break;
+        }
+        if keep.contains(&d.id.as_str()) && !picked.iter().any(|p| p.0 == i) {
+            picked.push((i, floor));
         }
     }
-    let top = s.iter().cloned().fold(0.0, f64::max);
-    let mut picked: Vec<(usize, f64)>;
-    let recent = top < 1e-6;
+    // 맞는 회의도 앞 답의 회의도 없으면 최근 회의부터
+    let recent = picked.is_empty();
     if recent {
         picked = (0..docs.len().min(max)).map(|i| (i, 1.0)).collect();
-    } else {
-        let mut order: Vec<usize> = (0..docs.len()).filter(|&i| s[i] >= top * 0.15).collect();
-        order.sort_by(|&a, &b| s[b].total_cmp(&s[a]).then(a.cmp(&b)));
-        order.truncate(max);
-        picked = order.into_iter().map(|i| (i, s[i])).collect();
     }
     // 날짜 순(오래된 것 먼저)으로 번호를 매긴다 — 답이 회의 순서대로 정리하기 쉽게
     picked.sort_by(|a, b| docs[a.0].started_at.cmp(&docs[b.0].started_at).then(b.0.cmp(&a.0)));
@@ -364,6 +369,24 @@ mod tests {
         let (picked, _) = choose(&d, "zzz", 4_000, &[]);
         let ids: Vec<&str> = picked.iter().map(|p| d[p.0].id.as_str()).collect();
         assert_eq!(ids, ["d3", "d4"]);
+    }
+
+    /// 앞 답에 실은 회의는 남는 자리에만 — 새 질문과 맞는 회의를 밀어내지 않는다 (Groq 는 두 자리)
+    #[test]
+    fn kept_meetings_never_push_out_new_matches() {
+        let d = docs();
+        // 앞 답이 최근 두 회의(d4 · d2)를 실었고, 이번엔 VPN — 맞는 d3 · d1 이 두 자리를 차지
+        let (picked, recent) = choose(&d, "VPN 비용", 4_000, &["d4", "d2"]);
+        let ids: Vec<&str> = picked.iter().map(|p| d[p.0].id.as_str()).collect();
+        assert!(!recent);
+        assert_eq!(ids, ["d1", "d3"]);
+        // 자리가 넉넉하면 앞 답의 회의도 함께
+        let (picked, _) = choose(&d, "VPN 비용", 40_000, &["d2"]);
+        assert!(picked.iter().any(|p| d[p.0].id == "d2") && picked.iter().any(|p| d[p.0].id == "d3"));
+        // 질문과 맞는 회의가 없으면("고마워") 앞 답의 회의만 — 최근 회의로 채우지 않는다
+        let (picked, recent) = choose(&d, "zzz", 40_000, &["d2"]);
+        assert!(!recent);
+        assert_eq!(picked.iter().map(|p| d[p.0].id.as_str()).collect::<Vec<_>>(), ["d2"]);
     }
 
     #[test]
