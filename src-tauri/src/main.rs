@@ -15,6 +15,7 @@ mod smoke;
 mod snap;
 mod status;
 mod summary;
+mod tails;
 mod templates;
 mod update;
 mod pricing;
