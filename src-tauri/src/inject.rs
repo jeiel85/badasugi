@@ -34,7 +34,10 @@ pub fn crlf(text: &str) -> String {
 
 #[cfg(windows)]
 pub fn insert(text: &str, mode: Mode) -> Result<(), String> {
-    imp::wait_keys_up(Duration::from_secs(2));
+    // 누른 채면 Ctrl+V 가 Ctrl+Alt+V 가 되고, 한 글자씩도 단축키처럼 들어간다
+    if !imp::wait_keys_up(Duration::from_secs(2)) {
+        return Err("단축키(Ctrl · Alt 등)를 아직 누르고 있어 넣지 않았어요".into());
+    }
     match mode {
         Mode::Paste => imp::paste(&crlf(text)),
         Mode::Type => imp::type_text(text),
@@ -71,18 +74,57 @@ mod imp {
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
         VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE};
 
-    /// 단축키의 보조 키를 다 뗄 때까지 (최대 `max`)
-    pub fn wait_keys_up(max: Duration) {
+    /// 단축키의 보조 키를 다 뗄 때까지 (최대 `max`) → 다 뗐으면 true
+    pub fn wait_keys_up(max: Duration) -> bool {
         let t = Instant::now();
-        while t.elapsed() < max {
+        loop {
             let held = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
                 .iter()
                 .any(|&k| unsafe { GetAsyncKeyState(k as i32) } as u16 & 0x8000 != 0);
             if !held {
-                return;
+                return true;
+            }
+            if t.elapsed() >= max {
+                return false;
             }
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// 클립보드 주인 창 (보이지 않는 메시지 전용 창) — 주인 없이 열고 비우면 SetClipboardData 가 실패할 수 있다
+    /// (OpenClipboard 문서). 이 스레드에서 만들고 다 쓰면 없앤다
+    struct Owner(windows_sys::Win32::Foundation::HWND);
+
+    impl Owner {
+        fn new() -> Owner {
+            let class: Vec<u16> = "STATIC".encode_utf16().chain(Some(0)).collect();
+            let h = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            Owner(h)
+        }
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { DestroyWindow(self.0) };
+            }
         }
     }
 
@@ -130,9 +172,9 @@ mod imp {
     }
 
     /// 클립보드를 연다 (다른 앱이 잠깐 쥐고 있으면 조금 기다린다)
-    fn open() -> bool {
+    fn open(owner: &Owner) -> bool {
         for _ in 0..25 {
-            if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
+            if unsafe { OpenClipboard(owner.0) } != 0 {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -182,23 +224,26 @@ mod imp {
         out
     }
 
-    fn set(fmt: u32, bytes: &[u8]) {
+    /// 클립보드에 한 형식을 넣는다 → 넣었으면 true
+    fn set(fmt: u32, bytes: &[u8]) -> bool {
         unsafe {
             let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1));
             if h.is_null() {
-                return;
+                return false;
             }
             let p = GlobalLock(h) as *mut u8;
             if p.is_null() {
                 GlobalFree(h);
-                return;
+                return false;
             }
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
             GlobalUnlock(h);
             // 성공하면 클립보드가 메모리를 가져간다
             if SetClipboardData(fmt, h as HANDLE).is_null() {
                 GlobalFree(h);
+                return false;
             }
+            true
         }
     }
 
@@ -221,21 +266,26 @@ mod imp {
         }
     }
 
-    fn set_text(text: &str) {
+    fn set_text(text: &str) -> bool {
         let mut w: Vec<u16> = text.encode_utf16().collect();
         w.push(0);
         let bytes: Vec<u8> = w.iter().flat_map(|u| u.to_le_bytes()).collect();
-        set(CF_UNICODETEXT as u32, &bytes);
+        set(CF_UNICODETEXT as u32, &bytes)
     }
 
     pub fn copy(text: &str) -> Result<(), String> {
-        if !open() {
+        let owner = Owner::new();
+        if !open(&owner) {
             return Err("클립보드를 쓸 수 없어요".into());
         }
         unsafe { EmptyClipboard() };
-        set_text(text);
+        let ok = set_text(text);
         unsafe { CloseClipboard() };
-        Ok(())
+        if ok {
+            Ok(())
+        } else {
+            Err("클립보드에 글을 넣지 못했어요".into())
+        }
     }
 
     pub fn paste(text: &str) -> Result<(), String> {
@@ -247,19 +297,23 @@ mod imp {
 
     /// 클립보드에 글을 넣고 `press`(Ctrl+V)를 부른 뒤 원래 클립보드를 되돌린다
     pub fn paste_with(text: &str, press: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
-        if !open() {
+        let owner = Owner::new();
+        if !open(&owner) {
             return Err("클립보드를 쓸 수 없어요 — 다른 프로그램이 쥐고 있어요".into());
         }
         let saved = save();
         unsafe { EmptyClipboard() };
-        set_text(text);
-        keep_out_of_history();
+        let put = set_text(text);
+        if put {
+            keep_out_of_history();
+        }
         unsafe { CloseClipboard() };
 
-        let r = press();
+        // 글을 넣지 못했으면 Ctrl+V 를 보내지 않는다 (원래 클립보드를 붙여 넣게 된다)
+        let r = if put { press() } else { Err("클립보드에 글을 넣지 못했어요".into()) };
         // 받는 앱이 클립보드를 읽을 틈을 주고 되돌린다
         std::thread::sleep(Duration::from_millis(if r.is_ok() { 350 } else { 0 }));
-        if open() {
+        if open(&owner) {
             unsafe { EmptyClipboard() };
             for (fmt, bytes) in &saved {
                 set(*fmt, bytes);
@@ -275,7 +329,8 @@ mod imp {
     /// 지금 클립보드의 글 (시험용)
     #[cfg(test)]
     pub fn read_text() -> Option<String> {
-        if !open() {
+        let owner = Owner::new();
+        if !open(&owner) {
             return None;
         }
         let h = unsafe { GetClipboardData(CF_UNICODETEXT as u32) } as HGLOBAL;

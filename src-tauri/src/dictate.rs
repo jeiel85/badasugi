@@ -15,7 +15,7 @@
 //!   듣는 중(소리 막대) · 받아 적는 중 · 입력함 · 문제.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -82,6 +82,8 @@ pub struct Dictate {
     /// 알림 창을 바꿀 때마다 1씩 (늦게 온 '닫기'가 새 알림을 닫지 않게)
     view_gen: AtomicU64,
     last_used: Mutex<Option<Instant>>,
+    /// 앞서 말한 글을 다듬고 넣는 중 — 끝날 때까지 새로 듣지 않는다 (넣는 순서가 뒤바뀌거나 클립보드를 서로 덮지 않게)
+    finishing: AtomicBool,
     /// 자동 점검: 넣지 않고 넣을 글을 남긴다
     pub smoke_out: Mutex<Option<String>>,
 }
@@ -94,6 +96,7 @@ impl Dictate {
             view: Mutex::new(View::Hidden),
             view_gen: AtomicU64::new(0),
             last_used: Mutex::new(None),
+            finishing: AtomicBool::new(false),
             smoke_out: Mutex::new(None),
         }
     }
@@ -108,6 +111,11 @@ impl Dictate {
 /// 단축키를 눌렀다 — 듣기 시작 (톡 눌러 듣는 중이면 입력)
 pub fn press(app: &AppHandle) {
     let d = app.state::<Dictate>();
+    if d.finishing.load(Ordering::SeqCst) {
+        show(app, View::Error { message: "앞서 말한 글을 넣는 중이에요 — 잠시 뒤 다시 눌러 주세요".into() });
+        hide_later(app, Duration::from_secs(2));
+        return;
+    }
     let id = {
         let mut cur = d.cur.lock();
         if let Some(s) = cur.as_mut() {
@@ -314,8 +322,19 @@ fn on_event(app: &AppHandle, id: u64, ev: Event) {
                 }
             };
             if let Some(s) = s {
+                d.finishing.store(true, Ordering::SeqCst);
                 let app = app.clone();
-                std::thread::spawn(move || finish(&app, s));
+                std::thread::spawn(move || {
+                    // 다듬기 · 넣기가 어떻게 끝나든(패닉 포함) 다시 들을 수 있게
+                    struct Done(AppHandle);
+                    impl Drop for Done {
+                        fn drop(&mut self) {
+                            self.0.state::<Dictate>().finishing.store(false, Ordering::SeqCst);
+                        }
+                    }
+                    let _done = Done(app.clone());
+                    finish(&app, s);
+                });
             }
         }
         _ => {}
