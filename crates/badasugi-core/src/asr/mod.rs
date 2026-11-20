@@ -1,5 +1,6 @@
 //! 음성 인식 엔진. 로컬(whisper.cpp) 과 OpenAI 호환 API(OpenAI · Groq · 자체 서버) 를 같은 인터페이스로 다룬다.
 
+pub mod gpu;
 pub mod openai;
 #[cfg(feature = "local-whisper")]
 pub mod whisper;
@@ -223,6 +224,18 @@ pub trait Transcriber: Send {
 /// 키 · 모델 이름 · 요청 형식 오류는 아니다. 응답 해석 실패 같은 그 밖의 오류도 한 번 더 해 볼 만하다.
 pub fn retryable(e: &anyhow::Error) -> bool {
     e.downcast_ref::<openai::ApiError>().is_none_or(|a| !a.is_fatal())
+}
+
+/// 로컬 엔진이 마지막으로 모델을 연 장치 ("GPU · …" / "CPU") — 아직 열지 않았거나 로컬 엔진이 없는 빌드면 없음
+pub fn local_device() -> Option<String> {
+    #[cfg(feature = "local-whisper")]
+    {
+        whisper::device()
+    }
+    #[cfg(not(feature = "local-whisper"))]
+    {
+        None
+    }
 }
 
 pub fn create(cfg: &EngineConfig) -> Result<Box<dyn Transcriber>> {

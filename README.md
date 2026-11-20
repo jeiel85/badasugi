@@ -57,7 +57,7 @@
 
 > **"Windows의 PC 보호" 경고가 뜨면** — 코드 서명 인증서가 없는 개인 오픈소스라 SmartScreen이 경고합니다. **추가 정보 → 실행** 을 누르세요. 걱정되면 [직접 빌드](#-직접-빌드하기)할 수 있습니다.
 
-**요구 사항**: Windows 10/11 64비트, AVX2 지원 CPU(2013년 이후 대부분), WebView2(Windows 11 기본 포함). GPU 불필요.
+**요구 사항**: Windows 10/11 64비트, AVX2 지원 CPU(2013년 이후 대부분), WebView2(Windows 11 기본 포함). GPU 는 없어도 되고, 있으면(내장 그래픽 포함 · Vulkan) 로컬 엔진이 저절로 써서 몇 배 빨라져요.
 
 ## 🚀 사용법
 
@@ -138,15 +138,18 @@ badasugi.exe 회의.m4a :: 녹음 파일 받아쓰기
 
 ### 성능 메모 (솔직하게)
 
-로컬 엔진 속도는 CPU에 크게 좌우됩니다. 개발 PC(Intel Core 5 210H, 8코어, GPU 미사용) 측정값:
+로컬 엔진 속도는 CPU · GPU 에 크게 좌우됩니다. 개발 PC(Intel Core 5 210H, 8코어 · 내장 그래픽, RAM 32GB) 측정값:
 
 | 모델 | 8.3초 발화 처리 | 비고 |
 |---|---|---|
+| large-v3-turbo q5 · **GPU(내장 그래픽, Vulkan)** | **약 1.2초** | 짧은 발화는 발화당 0.8~1.3초 · 40초 회의를 11.9초에 |
 | large-v3-turbo q5 (인코더 창 축소 적용) | 약 4.8초 | 짧은 발화는 발화당 약 5~6초 |
 | large-v3-turbo q5 (기본 30초 창) | 약 25초 | ← 받아쓰기가 피하는 방식 |
 | base q5 | 약 1.2초 | 빠르지만 한국어 정확도 낮음 |
 
-말이 끊임없이 이어지는 회의에서 CPU가 느리면 인식이 조금씩 밀릴 수 있습니다(앱이 알려줍니다). 그럴 땐 **Groq API**(초 단위 응답, 저렴)나 가벼운 모델을 권장합니다. GPU 가속(Vulkan) 빌드는 아래 "직접 빌드하기"를 참고하세요.
+말이 끊임없이 이어지는 회의에서 CPU가 느리면 인식이 조금씩 밀릴 수 있습니다(앱이 알려줍니다). 그럴 땐 **Groq API**(초 단위 응답, 저렴)나 가벼운 모델을 권장합니다.
+
+**GPU 가속**: 배포본은 Vulkan 과 함께 빌드되어, 녹음을 시작할 때 GPU(내장 그래픽 포함)를 찾아 있으면 저절로 씁니다. GPU 가 없거나 · 그래픽 드라이버에 Vulkan 이 없거나 · 열거나 돌리다 실패하면 CPU 로 다시 열어요(설정 › 녹음 › **GPU 가속**에서 끌 수도 있고, 시작 알림에 어느 장치로 열었는지 나와요). 처음 계산할 때 GPU 연산을 준비하느라 몇 초 걸려, 모델을 열 때 1초 무음으로 미리 한 번 돌려 둡니다.
 
 ## ✍️ AI 요약 고르기
 
@@ -281,9 +284,10 @@ cd src-tauri; cargo tauri build            # 설치 파일: target\release\bundl
 
 - `.cargo/config.toml` 이 whisper.cpp 를 **AVX2 기준 + /O2 최적화**로 빌드하도록 설정합니다.
   (cmake 크레이트가 Visual Studio 생성기에서 Release 최적화 플래그를 지우는 문제가 있어, 이 설정이 없으면 20배 이상 느려집니다.)
-- GPU 가속: [Vulkan SDK](https://vulkan.lunarg.com/) 설치 후 `cargo build --release -p badasugi --features vulkan`
+- GPU 가속(배포본 기본): [Vulkan SDK](https://vulkan.lunarg.com/) 설치 후 `--features vulkan`. ggml 의 Vulkan 셰이더 생성기가 빌드 폴더 안 깊숙이 따로 CMake 프로젝트로 빌드되어 Visual Studio 생성기로는 경로 260자를 넘으므로, **Ninja 생성기 · 짧은 빌드 폴더**로 빌드합니다 — `scripts/build-env.ps1` 이 맞춰 줘요 (예: `$env:CARGO_TARGET_DIR = "D:\badasugi-gpu"`). CPU 만 쓰는 빌드는 `-Cpu` (스모크 · 릴리스 스크립트)
+- GPU 빌드는 `vulkan-1.dll` 을 처음 쓸 때 불러오게(/DELAYLOAD) 링크합니다 — 그래픽 드라이버가 없어 Vulkan 이 없는 PC 에서도 앱이 뜨고, 못 찾으면 지연 로드 실패 훅이 "Vulkan 을 열 수 없음" 만 답하는 가짜 함수를 건네 CPU 로 갑니다 (`crates/badasugi-core/tests/no_vulkan.rs` 가 시스템의 vulkan-1.dll 을 가리고 시험)
 
-- 자동 점검: `pwsh scripts/smoke.ps1` — 실제 앱을 격리된 임시 폴더에서 띄워 화면 표시 · 녹음(테스트 음성) · 일시정지(절전 감지) · 정지 · 저장(JSON·MD·Opus) · 다시 듣기(녹음 중·후) · Word · PDF 내보내기 · 회의 후 화자 다시 정리 · 목소리 기억(이름 붙이기 → 다음 받아쓰기에서 자동 지정) · 파일 받아쓰기 · 말로 입력(누른 채 말하고 떼면 받아 적은 글 · 회의 녹음 중에는 쉬기) · 녹음 폴더 지켜보기(켤 때 있던 파일 건너뛰기 · 새 파일 받아 적기 · 받아 적는 중 녹음을 시작하면 녹음이 먼저 · 그 파일은 녹음 뒤 다시) · 진단 로그까지 검사합니다. 쓰고 있는 앱·설정·기록은 건드리지 않아요. 릴리스 스크립트가 배포 전에 자동으로 실행합니다.
+- 자동 점검: `pwsh scripts/smoke.ps1` — GPU 빌드면 두 번 돌립니다(두 번째는 Vulkan 로더에 그래픽 드라이버를 감춰 CPU 로 받아 적는지 · `음성 인식 장치` 점검). 실제 앱을 격리된 임시 폴더에서 띄워 화면 표시 · 녹음(테스트 음성) · 일시정지(절전 감지) · 정지 · 저장(JSON·MD·Opus) · 다시 듣기(녹음 중·후) · Word · PDF 내보내기 · 회의 후 화자 다시 정리 · 목소리 기억(이름 붙이기 → 다음 받아쓰기에서 자동 지정) · 파일 받아쓰기 · 말로 입력(누른 채 말하고 떼면 받아 적은 글 · 회의 녹음 중에는 쉬기) · 녹음 폴더 지켜보기(켤 때 있던 파일 건너뛰기 · 새 파일 받아 적기 · 받아 적는 중 녹음을 시작하면 녹음이 먼저 · 그 파일은 녹음 뒤 다시) · 진단 로그까지 검사합니다. 쓰고 있는 앱·설정·기록은 건드리지 않아요. 릴리스 스크립트가 배포 전에 자동으로 실행합니다.
 - 릴리스(서명된 업데이트 포함): `pwsh scripts/release.ps1 -Notes "변경 내용"` 한 번으로 빌드 → 서명 → `latest.json` → GitHub Release 업로드. 업데이트 서명 키(`%USERPROFILE%\.tauri\badasugi.key`)가 필요합니다.
 
 ### 프로젝트 구조
@@ -296,7 +300,7 @@ ui/                     프런트엔드 (프레임워크 없는 HTML/CSS/JS)
 docs/                   홈페이지 (GitHub Pages)
 ```
 
-개발용 환경 변수: `BADASUGI_TEST_WAV=<wav>` (장치 대신 WAV를 실시간으로 흘려 넣기) · `BADASUGI_DEMO=1` (데모 화면) · `BADASUGI_THREADS` · `BADASUGI_FULL_CTX=1` · `BADASUGI_WHISPER_DEBUG=1`
+개발용 환경 변수: `BADASUGI_TEST_WAV=<wav>` (장치 대신 WAV를 실시간으로 흘려 넣기) · `BADASUGI_DEMO=1` (데모 화면) · `BADASUGI_GPU=0` (GPU 빌드에서 CPU 로) · `BADASUGI_THREADS` · `BADASUGI_FULL_CTX=1` · `BADASUGI_WHISPER_DEBUG=1`
 
 ## 🗺 로드맵
 
@@ -324,7 +328,7 @@ docs/                   홈페이지 (GitHub Pages)
 - [x] 어디서나 말로 입력 (v0.4.33)
 - [x] 일정에서 회의 제목 · 참석자 가져오기 (v0.4.34)
 - [x] 말하는 동안 글자 미리 보기 (v0.4.35)
-- [ ] **2단계** GPU 가속 배포본
+- [x] GPU 가속 배포본 (v0.4.36) — 2단계 끝
 - [ ] **3단계** (방향 먼저 정하기) 개인정보 가리기 · 녹음 보관 기간 · 잡음 줄이기
 
 ## 🙏 감사의 말

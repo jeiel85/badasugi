@@ -9,8 +9,8 @@ license.workspace = true
 default = ["local-whisper"]
 # 로컬 whisper.cpp 엔진 (오프라인 전사)
 local-whisper = ["dep:whisper-rs"]
-# GPU 가속 (Vulkan SDK 필요)
-vulkan = ["local-whisper", "whisper-rs?/vulkan"]
+# GPU 가속 (Vulkan SDK 필요) — 장치 확인에 ggml 장치 목록(raw-api)을 쓴다
+vulkan = ["local-whisper", "whisper-rs?/vulkan", "whisper-rs?/raw-api"]
 
 [dependencies]
 anyhow = "1"

@@ -2,25 +2,33 @@
 #
 #   pwsh scripts/release.ps1 -Notes "release notes"         # build + upload
 #   pwsh scripts/release.ps1 -Notes "..." -NoUpload          # build only (dist/)
+#   pwsh scripts/release.ps1 -Notes "..." -Cpu               # CPU-only build (no Vulkan SDK)
 #
 # Requirements
 #   - Updater signing key: $HOME\.tauri\badasugi.key (cargo tauri signer generate)
 #     If you lose this key, already-installed apps cannot verify new updates. Back it up.
 #   - gh CLI login (for upload)
 #   - The version comes from [workspace.package] version in Cargo.toml.
+#   - GPU (Vulkan) build is the default: needs the Vulkan SDK (https://vulkan.lunarg.com), the Visual Studio C++
+#     tools and a short cargo target dir (CARGO_TARGET_DIR, e.g. D:\badasugi-gpu) - see scripts/build-env.ps1.
+#     The app falls back to the CPU on PCs without a GPU or Vulkan driver; smoke.ps1 checks that too.
 
 param(
     [string]$Notes = "",
     [string]$NotesFile = "",
     [switch]$NoUpload,
     [switch]$SkipBuild,
-    [switch]$SkipSmoke
+    [switch]$SkipSmoke,
+    [switch]$Cpu
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $env:PATH = "$HOME\.cargo\bin;$env:PATH"
+. (Join-Path $PSScriptRoot "build-env.ps1")
+$targetDir = Use-BuildEnv -Gpu:(-not $Cpu)
+$features = if ($Cpu) { @() } else { @("--features", "vulkan") }
 
 $repo = "jeiel85/badasugi"
 $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
@@ -29,7 +37,9 @@ Write-Host "== Badasugi $tag" -ForegroundColor Cyan
 
 # Smoke test first: the real app records/stops/saves/transcribes a test file in an isolated temp profile.
 if (-not $SkipBuild -and -not $SkipSmoke) {
-    pwsh -NoProfile -File (Join-Path $PSScriptRoot "smoke.ps1")
+    $smokeArgs = @("-NoProfile", "-File", (Join-Path $PSScriptRoot "smoke.ps1"))
+    if ($Cpu) { $smokeArgs += "-Cpu" }
+    pwsh @smokeArgs
     if ($LASTEXITCODE -ne 0) { throw "smoke test failed - not releasing" }
 }
 
@@ -44,14 +54,14 @@ if (-not $SkipBuild) {
     $noSign = Join-Path ([IO.Path]::GetTempPath()) "badasugi-nosign.json"
     [IO.File]::WriteAllText($noSign, '{"bundle":{"createUpdaterArtifacts":false}}')
     try {
-        cargo tauri build --config $noSign
+        cargo tauri build --config $noSign @features
         if ($LASTEXITCODE -ne 0) { throw "build failed" }
     } finally {
         Remove-Item $noSign -ErrorAction SilentlyContinue
     }
 }
 
-$bundle = Join-Path $root "target\release\bundle\nsis"
+$bundle = Join-Path $targetDir "release\bundle\nsis"
 $setup = Get-ChildItem $bundle -Filter "*_${version}_x64-setup.exe" | Select-Object -First 1
 if (-not $setup) { throw "installer not found in $bundle" }
 $sigFile = "$($setup.FullName).sig"
@@ -78,7 +88,7 @@ Copy-Item $sigFile (Join-Path $dist "$setupName.sig")
 # Portable: the exe alone (models are downloaded on first use; WebView2 ships with Windows 10/11)
 $stage = Join-Path $dist "portable"
 New-Item -ItemType Directory $stage | Out-Null
-Copy-Item (Join-Path $root "target\release\badasugi.exe") $stage
+Copy-Item (Join-Path $targetDir "release\badasugi.exe") $stage
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath (Join-Path $dist $portableName)
 Remove-Item $stage -Recurse -Force
 

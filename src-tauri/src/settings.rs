@@ -37,6 +37,8 @@ pub struct Settings {
     pub unload_when_idle: bool,
     /// 말하는 동안 미리 보기: "auto"(로컬 엔진만) | "on"(API 도 — 요청이 늘어 비용이 오른다) | "off"
     pub live_preview: String,
+    /// GPU 가속 (GPU 빌드에서 로컬 엔진) — GPU 가 없거나 열지 못하면 저절로 CPU
+    pub gpu: bool,
 
     pub hotkey: String,
     /// 중요 표시 ⭐ 전역 단축키 — 녹음 · 다시 듣기 중 지금 말하는 곳을 메모에 `[시각] ⭐` 로 (빈 값이면 없음)
@@ -170,6 +172,7 @@ impl Default for Settings {
             save_audio: false,
             unload_when_idle: true,
             live_preview: "auto".into(),
+            gpu: true,
             hotkey: "Ctrl+Alt+R".into(),
             star_hotkey: "Ctrl+Alt+B".into(),
             always_on_top: false,
@@ -372,6 +375,8 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{ "engine": "local" }"#).unwrap();
         assert_eq!(s.live_preview, "auto");
         assert!(s.wants_preview());
+        // GPU 가속은 기본 켬 (없으면 저절로 CPU)
+        assert!(s.gpu);
         for engine in ["openai", "groq", "custom"] {
             let mut s = Settings { engine: engine.into(), ..Settings::default() };
             assert!(!s.wants_preview(), "API 는 비용이 들어 기본 꺼짐: {engine}");
