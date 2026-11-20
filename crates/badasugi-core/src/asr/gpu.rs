@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static ENABLED: AtomicBool = AtomicBool::new(true);
 /// GPU 로 열거나 돌리다 실패했다 — 이번 실행 동안은 CPU 로
 static BROKEN: AtomicBool = AtomicBool::new(false);
+/// GPU 장치를 찾지 못했다 (GPU · 드라이버 · Vulkan 없음) — 이번 실행 동안 다시 찾지 않는다
+static NO_DEVICE: AtomicBool = AtomicBool::new(false);
 
 pub fn mark_broken() {
     BROKEN.store(true, Ordering::SeqCst);
@@ -19,6 +21,16 @@ pub fn mark_broken() {
 
 pub fn is_broken() -> bool {
     BROKEN.load(Ordering::SeqCst)
+}
+
+pub fn mark_no_device() {
+    NO_DEVICE.store(true, Ordering::SeqCst);
+}
+
+/// 이번에 모델을 열 때 GPU 를 해 볼지 — 원하고, 실패한 적 없고, 장치가 없다고 확인되지 않았을 때.
+/// 불러온 모델을 다시 쓸지 정하는 열쇠이기도 해서, GPU 가 없는 PC 에서도 CPU 모델을 매번 다시 읽지 않는다.
+pub fn should_try() -> bool {
+    wanted() && !is_broken() && !NO_DEVICE.load(Ordering::SeqCst)
 }
 
 /// 설정 › 녹음 › GPU 가속 — 다음에 모델을 불러올 때부터
@@ -200,5 +212,19 @@ pub(crate) mod delayload {
             }
             assert!(MISSING.load(Ordering::SeqCst));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_device_stops_trying_the_gpu_for_this_run() {
+        set_enabled(true);
+        assert_eq!(should_try(), BUILT_WITH_GPU && std::env::var("BADASUGI_GPU").map_or(true, |v| v != "0"));
+        mark_no_device();
+        assert!(!should_try(), "장치가 없다고 확인되면 다시 찾지 않는다 (CPU 모델을 그대로 다시 씀)");
+        assert!(!is_broken(), "장치가 없는 것은 실패가 아니다 (스모크 점검)");
     }
 }

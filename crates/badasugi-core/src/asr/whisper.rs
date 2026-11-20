@@ -35,7 +35,7 @@ fn context_params(gpu: bool) -> WhisperContextParameters<'static> {
 /// 모델을 메모리에 올린다 (같은 모델이면 재사용). GPU 빌드면 시작할 때 장치를 확인해 GPU 로 열고,
 /// GPU 가 없거나 꺼 두었거나 열지 못하면 CPU 로 연다.
 pub fn load(path: &Path) -> Result<Arc<WhisperContext>> {
-    let gpu = super::gpu::wanted() && !super::gpu::is_broken();
+    let gpu = super::gpu::should_try();
     let mut cache = CACHE.lock();
     if let Some((p, g, ctx)) = cache.as_ref() {
         if p == path && *g == gpu {
@@ -64,8 +64,15 @@ pub fn load(path: &Path) -> Result<Arc<WhisperContext>> {
                     super::gpu::mark_broken();
                 }
             },
-            None if super::gpu::loader_missing() => log::info!("Vulkan 이 없는 PC — CPU 로 받아 적습니다"),
-            None => log::info!("GPU 를 찾지 못해 CPU 로 받아 적습니다"),
+            None => {
+                // 이번 실행 동안 다시 찾지 않는다 — 다음에 열 때도 CPU 모델을 그대로 다시 쓴다
+                super::gpu::mark_no_device();
+                if super::gpu::loader_missing() {
+                    log::info!("Vulkan 이 없는 PC — CPU 로 받아 적습니다");
+                } else {
+                    log::info!("GPU 를 찾지 못해 CPU 로 받아 적습니다");
+                }
+            }
         }
     }
     let ctx = WhisperContext::new_with_params(path, context_params(false)).map_err(|e| anyhow!("whisper 모델 로드 실패: {e}"))?;
