@@ -12,6 +12,10 @@ fn main() -> anyhow::Result<()> {
     let t = Instant::now();
     let mut cp = WhisperContextParameters::default();
     cp.flash_attn(args.get(5).map(|s| s == "1").unwrap_or(false));
+    // BENCH_GPU=0 이면 GPU 빌드에서도 CPU 로 (같은 실행 파일로 CPU · GPU 비교)
+    let gpu = std::env::var("BENCH_GPU").map_or(true, |v| v != "0");
+    cp.use_gpu(gpu);
+    eprintln!("GPU 사용: {gpu}");
     let ctx = WhisperContext::new_with_params(&args[1], cp)?;
     eprintln!("load {:?}", t.elapsed());
     let mut state = ctx.create_state()?;

@@ -4210,6 +4210,11 @@ function renderSettings() {
   $$('[data-engine]').forEach((el) => (el.hidden = el.dataset.engine !== s.engine));
   $('#engine-desc').innerHTML = ENGINE_DESC[s.engine];
   $('#opt-beam').checked = s.beamSize >= 2;
+  // GPU 배포본에서만: 마지막으로 모델을 연 장치를 함께 보여 준다
+  $('#gpu-row').hidden = !S.app?.gpuBuilt;
+  $('#opt-gpu').checked = s.gpu !== false;
+  const dev = S.app?.gpuDevice;
+  $('#gpu-desc').textContent = `그래픽 카드로 더 빨리 받아 적어요 — 없거나 안 되면 저절로 CPU${dev ? ` · 지금: ${dev}` : ''}`;
   $('#opt-usd-krw').value = usdKrw();
   $('#opt-openai-model').value = s.openaiModel;
   $('#opt-groq-model').value = s.groqModel;
@@ -4594,6 +4599,7 @@ bindSeg('seg-llm', (v) => { S.settings.summary.provider = v; $('#llm-models').in
 
 function bind(id, fn, ev = 'change') { $(`#${id}`).addEventListener(ev, (e) => { fn(e.target); saveSettings(); }); }
 bind('opt-beam', (t) => (S.settings.beamSize = t.checked ? 3 : 1));
+bind('opt-gpu', (t) => (S.settings.gpu = t.checked));
 bind('opt-openai-model', (t) => (S.settings.openaiModel = t.value));
 bind('opt-groq-model', (t) => (S.settings.groqModel = t.value));
 bind('opt-custom-url', (t) => (S.settings.customUrl = t.value.trim()));
@@ -5029,7 +5035,7 @@ function createMock() {
       openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
-      saveAudio: false, unloadWhenIdle: true, livePreview: 'auto', hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
+      saveAudio: false, unloadWhenIdle: true, livePreview: 'auto', gpu: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
       meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
       watchFolder: false, watchDir: '', watchSummarize: true, calendar: false,
       dictation: false, dictationHotkey: 'Ctrl+Alt+Space', dictationInsert: 'paste', dictationPolish: false,
@@ -5050,6 +5056,7 @@ function createMock() {
     paused: false, fileMode: false, recSource: null, update: null, updatedFrom: null,
     audioExts: ['wav', 'mp3', 'm4a', 'mp4', 'mov', 'aac', 'flac', 'ogg', 'oga', 'opus'],
     demo: new URLSearchParams(location.search).has('demo'),
+    gpuBuilt: true, gpuDevice: 'GPU · Intel(R) Graphics (Vulkan0)',
   };
   return {
     invoke: async (cmd, args) => {

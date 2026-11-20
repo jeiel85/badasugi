@@ -770,8 +770,14 @@ fn asr_worker(idx: usize, rx: Receiver<Job>, engine_cfg: EngineConfig, ctx: Arc<
     let engine = match asr::create(&engine_cfg) {
         Ok(e) => {
             if is_local && idx == 0 {
+                // GPU 빌드면 어느 장치로 열었는지도 (GPU 가 없거나 열지 못해 CPU 로 열었으면 CPU)
+                let dev = if asr::gpu::BUILT_WITH_GPU {
+                    asr::local_device().map(|d| format!(" · {d}")).unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 ctx.emit(Event::Status {
-                    message: format!("모델 준비 완료 ({:.1}초)", t.elapsed().as_secs_f32()),
+                    message: format!("모델 준비 완료 ({:.1}초{dev})", t.elapsed().as_secs_f32()),
                 });
             }
             Some(e)

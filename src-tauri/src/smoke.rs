@@ -466,6 +466,27 @@ fn run(app: &AppHandle, c: &mut Checks) {
     ) {
         return;
     }
+    // GPU 배포본: 어느 장치로 받아 적었는지 — 점검 스크립트가 GPU 를 가린 판에서는 CPU 로 돌아갔어야 한다
+    let dev = badasugi_core::asr::local_device();
+    let want = std::env::var("BADASUGI_SMOKE_EXPECT_DEVICE").unwrap_or_default();
+    // GPU 로 열었다가 인식 중에 실패해 CPU 로 바꿨으면 실패로 본다 (GPU 가 없는 PC 는 처음부터 CPU 라 해당 없음)
+    let broken = badasugi_core::asr::gpu::is_broken();
+    let dev_ok = !broken
+        && match (want.as_str(), dev.as_deref()) {
+            ("cpu", Some(d)) => d == "CPU",
+            ("gpu", Some(d)) => d.starts_with("GPU"),
+            (_, d) => d.is_some(),
+        };
+    c.add(
+        "음성 인식 장치",
+        dev_ok,
+        format!(
+            "{}{}{}",
+            dev.as_deref().unwrap_or("모름"),
+            if want.is_empty() { String::new() } else { format!(" (기대: {want})") },
+            if broken { " — GPU 에서 실패해 CPU 로 바뀜 (로그 확인)" } else { "" }
+        ),
+    );
     let Some(live) = latest(&sessions, None) else {
         c.add("녹음 기록 저장", false, "기록 파일이 없어요");
         return;

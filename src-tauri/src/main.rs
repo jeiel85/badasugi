@@ -173,6 +173,9 @@ struct StateDto {
     demo: bool,
     /// 지금 받아 적는 녹음 폴더 파일 (녹음 폴더 지켜보기)
     watch_job: Option<String>,
+    /// GPU(Vulkan) 와 함께 빌드한 배포본인지 · 마지막으로 모델을 연 장치 ("GPU · …" / "CPU")
+    gpu_built: bool,
+    gpu_device: Option<String>,
 }
 
 #[tauri::command]
@@ -224,6 +227,8 @@ fn get_state(app: AppHandle) -> StateDto {
         audio_exts: badasugi_core::decode::AUDIO_EXTENSIONS,
         demo: std::env::var("BADASUGI_DEMO").is_ok(),
         watch_job,
+        gpu_built: badasugi_core::asr::gpu::BUILT_WITH_GPU,
+        gpu_device: badasugi_core::asr::local_device(),
     };
     dto
 }
@@ -275,6 +280,8 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
         // 미니 창은 늘 위에
         let _ = w.set_always_on_top(settings.always_on_top || settings.mini_mode);
     }
+    // GPU 가속을 끄고 켠 것은 다음에 모델을 열 때부터 (열린 모델이 다른 장치면 다시 연다) — 녹음 · 파일 · 받아쓰기 입력 모두
+    badasugi_core::asr::gpu::set_enabled(settings.gpu);
     *st.settings.lock() = settings;
     // 녹음 폴더 지켜보기를 켰거나 폴더를 바꿨으면 바로 기준점을 잡게
     watch::wake(&app);
@@ -2463,6 +2470,7 @@ fn main() {
             let settings_path = config_dir.join("settings.json");
             let config_dir_for_usage = config_dir.clone();
             let mut settings = Settings::load(&settings_path);
+            badasugi_core::asr::gpu::set_enabled(settings.gpu);
             if smoke {
                 settings.save_audio = true;
                 settings.mini_mode = false;
