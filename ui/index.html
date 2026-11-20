@@ -93,7 +93,7 @@
     <main class="body" id="body">
       <div class="summary-card" id="summary-card" hidden>
         <div class="summary-head">
-          <span><svg><use href="#i-sparkles"/></svg> 회의 요약<small class="sum-mark" id="sum-mark" hidden>직접 고침</small></span>
+          <span><svg><use href="#i-sparkles"/></svg> 회의 요약<button class="sum-tpl" id="btn-sum-tpl" title="요약 틀 — 눌러서 다른 틀로 다시 요약"><span id="sum-tpl-name">일반 회의</span><svg><use href="#i-chevron"/></svg></button><small class="sum-mark" id="sum-mark" hidden>직접 고침</small></span>
           <div>
             <button class="icon-btn sm" id="btn-edit-summary" title="요약 고치기"><svg><use href="#i-pencil"/></svg></button>
             <button class="icon-btn sm" id="btn-copy-summary" title="요약 복사"><svg><use href="#i-copy"/></svg></button>
@@ -161,6 +161,7 @@
             <b>아직 요약이 없어요</b>
             <p>AI 에게 맡기거나, 직접 써도 돼요.</p>
             <div class="n-actions"><button class="btn sm" id="btn-summary-ai">AI 로 요약</button><button class="btn ghost sm" id="btn-summary-write">직접 쓰기</button></div>
+            <button class="sum-tpl pick" id="btn-sum-tpl-empty" title="이 틀로 요약해요 — 눌러서 회의 종류에 맞는 틀 고르기">요약 틀 <b id="sum-tpl-empty-name">일반 회의</b><svg><use href="#i-chevron"/></svg></button>
           </div>
         </div>
       </div>
@@ -242,6 +243,8 @@
       <button data-source="both"><svg><use href="#i-both"/></svg><div><b>마이크 + 시스템</b><small>온라인 회의 전체 (헤드셋 권장)</small></div></button>
     </div>
     <div class="popover" id="pop-spk" hidden></div>
+    <!-- 요약 틀 고르기 (요약 칸의 틀 이름 · 요약이 없을 때의 '요약 틀') -->
+    <div class="popover pop-tpl" id="pop-tpl" hidden></div>
     <!-- 화자별 발언 통계 (화자 칩 끝의 '발언 통계') -->
     <div class="popover stats-pop" id="pop-stats" hidden></div>
     <!-- 문장 코멘트: 바깥을 누르거나 Enter 로 저장, Esc 로 그만두기 -->
@@ -434,6 +437,21 @@
             </div>
             <datalist id="llm-models"></datalist>
             <button class="btn ghost" id="btn-test-llm">연결 확인 · 모델 목록 불러오기</button>
+          </section>
+          <section>
+            <h4>요약 틀</h4>
+            <p class="desc">회의 종류에 맞춘 회의록 형식이에요. 요약 칸의 틀 이름을 눌러 회의마다 바꿀 수 있고, 회의마다 마지막에 쓴 틀을 기억해 다시 요약할 때도 그 틀로 요약해요.</p>
+            <div class="set-group">
+              <label class="row"><span>기본 틀<small>틀을 고른 적 없는 회의에 써요</small></span><select class="compact" id="opt-sum-template"></select></label>
+              <div class="tpl-list" id="tpl-list"></div>
+              <div class="tpl-edit" id="tpl-edit" hidden>
+                <label class="field"><span>이름</span><input id="tpl-name" maxlength="30" spellcheck="false" placeholder="예: 주간 보고" /></label>
+                <label class="field"><span>섹션 <small>한 줄에 하나 · "섹션 이름 — 무엇을 적을지"</small></span><textarea id="tpl-sections" rows="6" spellcheck="false" placeholder="한 줄 요약&#10;지난주 한 일 — 끝낸 것 위주로&#10;이번 주 할 일&#10;막힌 것 — 도움이 필요한 것&#10;할 일"></textarea></label>
+                <p class="desc tpl-hint">한 줄 요약 · 주요 논의 · 결정 사항 · 할 일 · 남은 질문은 설명 없이 쓰면 일반 회의와 같은 방식으로 적어요. 제목 · 근거 시각 · ⭐ 는 모든 틀에 들어가요.</p>
+                <div class="tpl-edit-foot"><button class="btn ghost sm" id="btn-tpl-cancel">취소</button><button class="btn sm" id="btn-tpl-save">저장</button></div>
+              </div>
+            </div>
+            <button class="btn ghost" id="btn-tpl-add">+ 내 틀 만들기</button>
           </section>
         </div>
 

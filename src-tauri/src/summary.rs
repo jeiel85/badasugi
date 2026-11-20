@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use crate::prompts;
 use crate::session::SessionDoc;
 use crate::settings::{get_key, SummarySettings};
+use crate::templates::{self, Template};
 
 const GROQ_URL: &str = "https://api.groq.com/openai/v1";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
@@ -43,7 +44,7 @@ pub(crate) const MAX_WAIT_SECS: u64 = 75;
 const MIN_CHUNK: usize = 600;
 
 /// 요약 진행 (화면의 진행 막대 · 문구)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
     /// 끝난 요청 수
     pub done: usize,
@@ -56,37 +57,71 @@ pub struct Progress {
     /// 모델이 답을 쓰기 시작했는지 (아니면 아직 녹취록을 읽는 중)
     pub writing: bool,
     /// 지금 쓰는 섹션 이름 (모르면 "")
-    pub section: &'static str,
+    pub section: String,
 }
 
 /// 쓰는 동안 진행을 이보다 자주 알리지 않는다 (섹션이 바뀔 때는 바로)
 const REPORT_EVERY: Duration = Duration::from_millis(200);
 
 /// 답 형식의 섹션: (이름, 답 전체에서 차지하는 몫, 보통 길이(글자))
-type Sections = &'static [(&'static str, f32, f32)];
+type Sections = Vec<(String, f32, f32)>;
 
-/// [`prompts::summary`] 형식 — 몫은 실제 회의록에서 섹션마다 차지하는 대략의 비율
-const FINAL_SECTIONS: Sections = &[
-    ("제목", 0.02, 20.0),
-    ("한 줄 요약", 0.05, 50.0),
-    ("주요 논의", 0.46, 550.0),
-    ("결정 사항", 0.15, 200.0),
-    ("할 일", 0.23, 300.0),
-    ("남은 질문", 0.09, 100.0),
+/// 섹션의 보통 길이(글자) — 실제 회의록에서 섹션마다 차지하는 대략의 길이. 몫은 길이에 비례한다.
+/// 여기 없는 섹션(다른 요약 틀 · 내 틀)은 [`OTHER_LEN`]
+const SECTION_LENS: &[(&str, f32)] = &[
+    ("제목", 20.0),
+    ("한 줄 요약", 50.0),
+    ("주요 논의", 550.0),
+    ("결정 사항", 200.0),
+    ("할 일", 300.0),
+    ("남은 질문", 100.0),
+    // 구간 메모
+    ("논의", 600.0),
+    // 요약 틀의 본문 섹션
+    ("질문과 답", 550.0),
+    ("핵심 내용", 550.0),
+    ("나온 아이디어", 450.0),
 ];
+const OTHER_LEN: f32 = 200.0;
 
-/// [`prompts::summary_part`] 형식 (구간 메모 · 메모 합치기 · 줄이기)
-const PART_SECTIONS: Sections = &[
-    ("논의", 0.55, 600.0),
-    ("결정 사항", 0.15, 200.0),
-    ("할 일", 0.20, 250.0),
-    ("남은 질문", 0.10, 120.0),
-];
+fn sections_of(names: impl IntoIterator<Item = String>) -> Sections {
+    let lens: Vec<(String, f32)> = names
+        .into_iter()
+        .map(|n| {
+            let len = SECTION_LENS.iter().find(|s| s.0 == n).map_or(OTHER_LEN, |s| s.1);
+            (n, len)
+        })
+        .collect();
+    let total = lens.iter().map(|x| x.1).sum::<f32>().max(1.0);
+    lens.into_iter().map(|(n, len)| (n, len / total, len)).collect()
+}
+
+/// 답 형식 하나: 보낼 지시 + 답에 나올 섹션 (진행 어림)
+pub(crate) struct Format {
+    system: String,
+    sections: Sections,
+}
+
+impl Format {
+    /// 요약 틀의 회의록 — 제목 + 틀의 섹션
+    pub(crate) fn of(tpl: &Template) -> Format {
+        let names = std::iter::once("제목".to_string()).chain(templates::section_names(&tpl.format));
+        Format { system: prompts::summary_with(&tpl.format), sections: sections_of(names) }
+    }
+
+    /// 구간 메모 · 메모 합치기 · 줄이기 (틀과 상관없이 하나)
+    fn part() -> Format {
+        Format {
+            system: prompts::summary_part().to_string(),
+            sections: sections_of(templates::section_names(prompts::summary_part())),
+        }
+    }
+}
 
 /// 받아 오는 답에서 지금 어느 섹션을 쓰는지 따라가며 진행을 어림한다.
 /// 섹션 안에서는 보통 길이만큼 쓰면 그 섹션 몫의 63%, 세 배면 95% — 다음 섹션 제목이 나와야 넘어간다
-struct Writing {
-    sections: Sections,
+struct Writing<'a> {
+    sections: &'a [(String, f32, f32)],
     /// 지금 줄 (제목 줄인지 보려고 앞부분만)
     line: String,
     at: Option<usize>,
@@ -96,8 +131,8 @@ struct Writing {
     best: f32,
 }
 
-impl Writing {
-    fn new(sections: Sections) -> Self {
+impl<'a> Writing<'a> {
+    fn new(sections: &'a [(String, f32, f32)]) -> Self {
         Writing { sections, line: String::new(), at: None, in_section: 0, chars: 0, best: 0.0 }
     }
 
@@ -158,8 +193,8 @@ impl Writing {
         }
     }
 
-    fn section(&self) -> &'static str {
-        self.at.map_or("", |i| self.sections[i].0)
+    fn section(&self) -> &'a str {
+        self.at.map_or("", |i| self.sections[i].0.as_str())
     }
 }
 
@@ -355,6 +390,8 @@ type Ask<'a> = dyn FnMut(&str, &str, &mut dyn FnMut(&str)) -> Result<Reply> + 'a
 /// 요청 보내기 · 진행 알림. 요청이 성공할 때마다 `on_reply` 로 사용량을 바로 알린다
 struct Run<'a> {
     call: &'a mut Ask<'a>,
+    /// 구간 메모 형식
+    part: std::rc::Rc<Format>,
     progress: &'a dyn Fn(Progress),
     on_reply: &'a dyn Fn(&Reply),
     done: usize,
@@ -369,27 +406,27 @@ impl Run<'_> {
             wait_secs,
             frac: 0.0,
             writing: false,
-            section: "",
+            section: String::new(),
         });
     }
 
     /// 한도 초과(429)면 알려 준 시간만큼 기다렸다 다시 (몇 번까지만).
     /// 답을 받는 동안 어느 섹션을 쓰는지로 진행을 알린다
-    fn ask(&mut self, system: &str, user: &str) -> Result<String> {
-        let sections = if system == prompts::summary() { FINAL_SECTIONS } else { PART_SECTIONS };
+    fn ask(&mut self, fmt: &Format, user: &str) -> Result<String> {
         let mut tries = 0;
         loop {
             let (done, total, progress) = (self.done, self.total, self.progress);
-            let mut w = Writing::new(sections);
+            let mut w = Writing::new(&fmt.sections);
             let mut last: Option<std::time::Instant> = None;
             let mut on_text = |delta: &str| {
                 let moved = w.push(delta);
                 if moved || last.is_none_or(|t| t.elapsed() >= REPORT_EVERY) {
                     last = Some(std::time::Instant::now());
-                    progress(Progress { done, total, wait_secs: 0, frac: w.frac(), writing: true, section: w.section() });
+                    let section = w.section().to_string();
+                    progress(Progress { done, total, wait_secs: 0, frac: w.frac(), writing: true, section });
                 }
             };
-            match (self.call)(system, user, &mut on_text) {
+            match (self.call)(&fmt.system, user, &mut on_text) {
                 Ok(r) => {
                     // 뒤 요청이 실패해도 이미 쓴 만큼은 사용량에 남게 바로 알린다
                     (self.on_reply)(&r);
@@ -414,7 +451,8 @@ impl Run<'_> {
         if g.len() < 2 {
             return Ok(g.to_vec());
         }
-        match self.ask(prompts::summary_part(), &format!("{head}{}\n\n{}", prompts::merge_notes(), render_notes(g))) {
+        let part = self.part.clone();
+        match self.ask(&part, &format!("{head}{}\n\n{}", prompts::merge_notes(), render_notes(g))) {
             Ok(text) => {
                 self.done += 1;
                 self.report(0);
@@ -433,20 +471,23 @@ impl Run<'_> {
     }
 }
 
-/// 녹취록(`text`)을 요약한다. 한 번에 보내기엔 길면(`budget` 글자 초과) 구간별로 메모한 뒤 합친다.
+/// 녹취록(`text`)을 `fin` 형식(요약 틀의 회의록)으로 요약한다. 한 번에 보내기엔 길면(`budget` 글자 초과)
+/// 구간별로 메모한 뒤 합친다 — 구간 메모는 틀과 상관없이 같은 형식, 합칠 때 틀의 형식으로.
 /// `head` 는 회의 제목 · 일시 줄
 fn run_summary(
     call: &mut Ask,
     progress: &dyn Fn(Progress),
     on_reply: &dyn Fn(&Reply),
+    fin: &Format,
     head: &str,
     text: &str,
     mut budget: usize,
 ) -> Result<String> {
-    let mut r = Run { call, progress, on_reply, done: 0, total: 1 };
+    let memo = std::rc::Rc::new(Format::part());
+    let mut r = Run { call, part: memo.clone(), progress, on_reply, done: 0, total: 1 };
     let len = text.chars().count();
     if len <= budget {
-        match r.ask(prompts::summary(), &format!("{head}녹취록:\n{text}")) {
+        match r.ask(fin, &format!("{head}녹취록:\n{text}")) {
             Ok(out) => return Ok(out),
             // 생각보다 컸다 (토큰이 글자보다 많은 모델 등) — 나눠서
             Err(e) if too_large(&e) && len > MIN_CHUNK * 2 => budget = len / 2 + 1,
@@ -467,7 +508,7 @@ fn run_summary(
             notes.len() + 1,
             notes.len() + 1 + parts.len()
         );
-        match r.ask(prompts::summary_part(), &user) {
+        match r.ask(&memo, &user) {
             Ok(text) => {
                 notes.push(Note { from, to, text });
                 r.done += 1;
@@ -491,7 +532,7 @@ fn run_summary(
         let joined = render_notes(&notes);
         if joined.chars().count() <= budget || round >= 3 {
             let user = format!("{head}{}\n\n{joined}", prompts::merge_final());
-            match r.ask(prompts::summary(), &user) {
+            match r.ask(fin, &user) {
                 Ok(out) => {
                     r.done = r.total;
                     r.report(0);
@@ -516,7 +557,7 @@ fn run_summary(
             r.report(0);
             for i in 0..notes.len() {
                 let user = format!("{head}{}\n\n{}", prompts::shrink_note(), notes[i].render("구간"));
-                notes[i].text = r.ask(prompts::summary_part(), &user)?;
+                notes[i].text = r.ask(&memo, &user)?;
                 r.done += 1;
                 r.report(0);
             }
@@ -662,6 +703,7 @@ pub fn chat_caller(cfg: &SummarySettings) -> Result<(String, Chat)> {
 /// `on_usage(제공자, 응답)` 로 요청마다 사용량을 알린다 (중간에 실패해도 이미 쓴 만큼은 셀 수 있게)
 pub fn summarize(
     cfg: &SummarySettings,
+    tpl: &Template,
     doc: &SessionDoc,
     progress: &dyn Fn(Progress),
     on_usage: &dyn Fn(&str, &Reply),
@@ -682,7 +724,8 @@ pub fn summarize(
         call(s, u, t)
     };
     // 중요 표시 ⭐ 한 문장은 녹취록에 ⭐ 를 붙여 보낸다 (요약이 꼭 다루고 그 불릿에 ⭐)
-    let raw = run_summary(&mut guarded, progress, &on_reply, &head, &doc.to_ai_text(), chunk_budget(&provider))?;
+    let fin = Format::of(tpl);
+    let raw = run_summary(&mut guarded, progress, &on_reply, &fin, &head, &doc.to_ai_text(), chunk_budget(&provider))?;
     if raw.trim().is_empty() {
         bail!("요약 결과가 비어 있습니다");
     }
@@ -1290,6 +1333,11 @@ pub fn list_models(cfg: &SummarySettings) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    /// 일반 회의 틀의 회의록 형식 (틀이 생기기 전과 같다)
+    fn meeting() -> Format {
+        Format::of(&templates::resolve(&SummarySettings::default(), None))
+    }
+
     #[test]
     fn login_turns_on_the_oauth_beta() {
         assert_eq!(beta_header(&[], false), None);
@@ -1330,7 +1378,7 @@ mod tests {
         }))
         .unwrap();
         let cfg = SummarySettings { provider: "ollama".into(), ollama_url: "http://127.0.0.1:9".into(), ..Default::default() };
-        let Err(e) = summarize(&cfg, &doc, &|_| {}, &|_, _| {}, &flag) else {
+        let Err(e) = summarize(&cfg, &templates::resolve(&cfg, None), &doc, &|_| {}, &|_, _| {}, &flag) else {
             panic!("멈췄는데 요약이 됐다");
         };
         assert_eq!(e.to_string(), CANCELLED_MSG);
@@ -1393,7 +1441,7 @@ mod tests {
             Ok(Reply { text: "요약".into(), in_tokens: 10, out_tokens: 5, ..Default::default() })
         };
         let (req, on_reply) = counter();
-        let out = run_summary(&mut call, &|_| {}, &on_reply, "회의 제목: t\n\n", &transcript(10, 20), 12_000).unwrap();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, &meeting(), "회의 제목: t\n\n", &transcript(10, 20), 12_000).unwrap();
         assert_eq!((out.as_str(), req.get()), ("요약", 1));
         assert!(sent[0].0 && sent[0].1.contains("녹취록:"));
     }
@@ -1408,7 +1456,7 @@ mod tests {
         };
         let seen = std::cell::RefCell::new(Vec::new());
         let (req, on_reply) = counter();
-        let out = run_summary(&mut call, &|p| seen.borrow_mut().push(p), &on_reply, "회의 제목: t\n\n", &t, 4_000).unwrap();
+        let out = run_summary(&mut call, &|p| seen.borrow_mut().push(p), &on_reply, &meeting(), "회의 제목: t\n\n", &t, 4_000).unwrap();
         let parts = calls.iter().filter(|c| c.0).count();
         assert!(parts >= 4, "구간으로 나눔: {parts}");
         assert_eq!(req.get() as usize, parts + 1, "구간 + 합치기");
@@ -1432,7 +1480,7 @@ mod tests {
             Ok(Reply { text: "ok".into(), ..Default::default() })
         };
         let (req, on_reply) = counter();
-        let out = run_summary(&mut call, &|_| {}, &on_reply, "", &t, 5_000).unwrap();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, &meeting(), "", &t, 5_000).unwrap();
         assert_eq!(out, "ok");
         assert!(req.get() >= 5, "한 번에 → 두 구간 → 다시 반씩, 끝까지: {}회", req.get());
     }
@@ -1460,7 +1508,7 @@ mod tests {
             Ok(Reply { text, ..Default::default() })
         };
         let (req, on_reply) = counter();
-        let out = run_summary(&mut call, &|_| {}, &on_reply, "", &t, 4_000).unwrap();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, &meeting(), "", &t, 4_000).unwrap();
         assert_eq!(out, "최종");
         assert!(biggest <= 4_300, "합칠 때 너무 큰 요청을 보냄: {biggest}자");
         assert_eq!(req.get(), 5, "구간 2 + 줄이기 2 + 최종 1");
@@ -1477,12 +1525,12 @@ mod tests {
             Ok(Reply { text: "ok".into(), ..Default::default() })
         };
         let (req, on_reply) = counter();
-        let out = run_summary(&mut call, &|_| {}, &on_reply, "", "[00:00] a: b\n", 100).unwrap();
+        let out = run_summary(&mut call, &|_| {}, &on_reply, &meeting(), "", "[00:00] a: b\n", 100).unwrap();
         assert_eq!((out.as_str(), req.get()), ("ok", 1), "한도 초과 뒤 다시 보내 성공");
         let mut call = |_: &str, _: &str, _: &mut dyn FnMut(&str)| -> Result<Reply> {
             Err(anyhow::Error::new(ApiError { status: 429, retry_after: Some(3600), msg: "daily limit".into() }))
         };
-        let e = run_summary(&mut call, &|_| {}, &|_| {}, "", "[00:00] a: b\n", 100).unwrap_err();
+        let e = run_summary(&mut call, &|_| {}, &|_| {}, &meeting(), "", "[00:00] a: b\n", 100).unwrap_err();
         assert!(e.to_string().contains("429"), "하루 한도는 기다리지 않고 알림: {e}");
     }
 
@@ -1498,7 +1546,7 @@ mod tests {
             Ok(Reply { text: "메모".into(), in_tokens: 100, out_tokens: 20, ..Default::default() })
         };
         let (req, on_reply) = counter();
-        assert!(run_summary(&mut call, &|_| {}, &on_reply, "", &transcript(200, 60), 4_000).is_err());
+        assert!(run_summary(&mut call, &|_| {}, &on_reply, &meeting(), "", &transcript(200, 60), 4_000).is_err());
         assert_eq!(req.get(), 2, "실패 전에 성공한 두 요청");
     }
 
@@ -1507,16 +1555,51 @@ mod tests {
     #[test]
     fn prompts_ask_for_the_sections_progress_follows() {
         // 진행 막대 · 제목 뽑기는 답의 "### 섹션" 줄을 본다 — prompts/*.md 의 형식과 이름이 같아야 한다
-        for (prompt, sections) in [(prompts::summary(), FINAL_SECTIONS), (prompts::summary_part(), PART_SECTIONS)] {
-            let asked: Vec<&str> = prompt.lines().filter_map(|l| l.strip_prefix("### ")).collect();
-            let known: Vec<&str> = sections.iter().map(|s| s.0).collect();
-            assert_eq!(asked, known);
+        let mut formats = vec![meeting(), Format::part()];
+        for t in templates::list(&SummarySettings::default()) {
+            formats.push(Format::of(&templates::resolve(&SummarySettings::default(), Some(&t.id))));
         }
+        for f in &formats {
+            let asked: Vec<&str> = f.system.lines().filter_map(|l| l.strip_prefix("### ")).collect();
+            let known: Vec<&str> = f.sections.iter().map(|s| s.0.as_str()).collect();
+            assert_eq!(asked, known);
+            let sum: f32 = f.sections.iter().map(|s| s.1).sum();
+            assert!((sum - 1.0).abs() < 1e-4, "몫을 다 더하면 1: {sum}");
+        }
+        // 일반 회의는 틀이 생기기 전과 같은 지시 · 비슷한 몫 (주요 논의가 가장 크고, 제목이 가장 작다)
+        let m = meeting();
+        assert_eq!(m.system, prompts::summary());
+        assert!(m.sections[2].0 == "주요 논의" && m.sections[2].1 > 0.4 && m.sections[0].1 < 0.03);
+    }
+
+    /// 다른 틀은 그 틀의 형식으로 요약을 마무리하고, 구간 메모는 틀과 상관없이 같은 형식
+    #[test]
+    fn long_meetings_finish_in_the_chosen_template() {
+        let lecture = Format::of(&templates::resolve(&SummarySettings::default(), Some("lecture")));
+        let mut systems = Vec::new();
+        let mut call = |sys: &str, _: &str, _: &mut dyn FnMut(&str)| {
+            systems.push(sys.to_string());
+            Ok(Reply { text: "메모".into(), ..Default::default() })
+        };
+        run_summary(&mut call, &|_| {}, &|_| {}, &lecture, "", &transcript(200, 60), 4_000).unwrap();
+        assert!(systems.len() >= 3);
+        assert_eq!(systems.last().unwrap(), &lecture.system, "마지막은 강의 틀");
+        assert!(systems.last().unwrap().contains("### 질의응답") && !systems.last().unwrap().contains("### 결정 사항"));
+        assert!(systems[..systems.len() - 1].iter().all(|s| s == prompts::summary_part()), "구간 메모는 하나");
+        // 짧은 회의도 그 틀로 한 번에
+        let mut first = String::new();
+        let mut call = |sys: &str, _: &str, _: &mut dyn FnMut(&str)| {
+            first = sys.to_string();
+            Ok(Reply { text: "끝".into(), ..Default::default() })
+        };
+        run_summary(&mut call, &|_| {}, &|_| {}, &lecture, "", "[00:00] a: b\n", 12_000).unwrap();
+        assert_eq!(first, lecture.system);
     }
 
     #[test]
     fn writing_follows_the_sections() {
-        let mut w = Writing::new(FINAL_SECTIONS);
+        let m = meeting();
+        let mut w = Writing::new(&m.sections);
         let (mut fracs, mut seen) = (Vec::new(), Vec::new());
         // 몇 글자씩 나눠 받는다 (제목 줄이 조각 사이에서 끊겨도)
         let chars: Vec<char> = ANSWER.chars().collect();
@@ -1532,14 +1615,15 @@ mod tests {
         assert!(last > 0.9 && last < 1.0, "마지막 섹션까지 썼으면 거의 끝: {last}");
 
         // 다른 모양의 제목 줄 · 본문에 같은 이름이 한 줄로 나와도 되돌아가지 않음
-        let mut w = Writing::new(PART_SECTIONS);
+        let part = Format::part();
+        let mut w = Writing::new(&part.sections);
         assert!(w.push("## 논의\n- 가\n**결정 사항**:\n"));
         assert_eq!(w.section(), "결정 사항");
         assert!(!w.push("논의\n"));
         assert_eq!(w.section(), "결정 사항");
 
         // 섹션 제목 없이 쓰는 모델도 조금씩은 오른다 (끝을 모르니 90% 아래)
-        let mut w = Writing::new(FINAL_SECTIONS);
+        let mut w = Writing::new(&m.sections);
         w.push(&"가".repeat(500));
         assert!(w.frac() > 0.1 && w.frac() < 0.9 && w.section().is_empty());
     }
@@ -1553,10 +1637,10 @@ mod tests {
             Ok(Reply { text: "끝".into(), ..Default::default() })
         };
         let seen = std::cell::RefCell::new(Vec::new());
-        run_summary(&mut call, &|p| seen.borrow_mut().push(p), &|_| {}, "", "[00:00] a: b\n", 12_000).unwrap();
+        run_summary(&mut call, &|p| seen.borrow_mut().push(p), &|_| {}, &meeting(), "", "[00:00] a: b\n", 12_000).unwrap();
         let seen = seen.borrow();
         assert!(seen.iter().all(|p| p.writing && (p.done, p.total) == (0, 1)), "{seen:?}");
-        let mut sections: Vec<&str> = seen.iter().map(|p| p.section).collect();
+        let mut sections: Vec<&str> = seen.iter().map(|p| p.section.as_str()).collect();
         sections.dedup();
         assert_eq!(sections, ["제목", "주요 논의", "할 일"]);
         assert!(seen.windows(2).all(|p| p[1].frac >= p[0].frac));
@@ -1790,20 +1874,23 @@ mod tests {
         let seen = std::cell::RefCell::new(Vec::new());
         let used = std::cell::Cell::new((0, 0));
         let flag = std::sync::atomic::AtomicBool::new(false);
-        let s = summarize(&cfg, &doc, &|p| seen.borrow_mut().push(p), &|_, r| used.set((r.in_tokens, r.out_tokens)), &flag).unwrap();
+        let tpl = templates::resolve(&cfg, None);
+        let s = summarize(&cfg, &tpl, &doc, &|p| seen.borrow_mut().push(p), &|_, r| used.set((r.in_tokens, r.out_tokens)), &flag)
+            .unwrap();
         assert_eq!(s.title.as_deref(), Some("출시 일정 회의"));
         assert!(s.text.starts_with("### 한 줄 요약"));
         assert_eq!(used.get(), (50, 20));
         let sent: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
         assert_eq!(sent["stream"], json!(true));
-        let mut sections: Vec<&str> = seen.borrow().iter().map(|p| p.section).collect();
+        let seen = seen.borrow();
+        let mut sections: Vec<&str> = seen.iter().map(|p| p.section.as_str()).collect();
         sections.dedup();
         assert_eq!(sections, ["제목", "한 줄 요약", "주요 논의", "결정 사항", "할 일", "남은 질문"]);
     }
 
     /// 저장된 회의 하나를 지금 설정(설정 › 요약)의 AI 로 요약해 본다 — 프롬프트를 고칠 때 같은 회의로 전 · 후를 비교하려고.
     /// 실제 API 를 불러 비용이 들므로 평소에는 돌지 않는다 (사용량 장부에도 남지 않는다):
-    /// `BD_SUMMARY_DOC=<기록.json> [BD_SUMMARY_OUT=<결과.md>] cargo test --release -p badasugi summarize_a_saved_meeting -- --ignored --nocapture`
+    /// `BD_SUMMARY_DOC=<기록.json> [BD_SUMMARY_OUT=<결과.md>] [BD_SUMMARY_TEMPLATE=<틀 id>] cargo test --release -p badasugi summarize_a_saved_meeting -- --ignored --nocapture`
     /// 설정 파일은 `BD_SETTINGS`, 없으면 `%APPDATA%\com.badasugi.desktop\settings.json`
     #[test]
     #[ignore]
@@ -1816,10 +1903,16 @@ mod tests {
         });
         let cfg = crate::settings::Settings::load(&settings).summary;
         let doc: SessionDoc = serde_json::from_str(&std::fs::read_to_string(&doc_path).unwrap()).unwrap();
+        // 요약 틀: BD_SUMMARY_TEMPLATE(meeting · one_on_one · interview · lecture · customer · ideas · 내 틀 id),
+        // 없으면 그 회의에 마지막으로 쓴 틀 → 설정의 기본 틀
+        let id = std::env::var("BD_SUMMARY_TEMPLATE").ok().or(doc.summary_template.clone());
+        let tpl = templates::resolve(&cfg, id.as_deref());
+        eprintln!("요약 틀: {} ({})", tpl.name, tpl.id);
         let started = std::time::Instant::now();
         let flag = std::sync::atomic::AtomicBool::new(false);
         let s = summarize(
             &cfg,
+            &tpl,
             &doc,
             &|_| {},
             &|p, r| {

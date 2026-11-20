@@ -37,6 +37,9 @@ pub struct SessionDoc {
     /// 사람이 요약을 직접 고쳤다 (AI 로 다시 요약하기 전에 물어본다)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub summary_edited: bool,
+    /// 마지막 AI 요약에 쓴 요약 틀 id (다시 요약하면 이 틀로) — 틀이 생기기 전 요약은 없음 = 일반 회의
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_template: Option<String>,
     /// 회의를 보면서 적은 메모 (사람만 고친다). `[시각]` 으로 시작하는 줄은 그 시각 문장에 단 코멘트다
     /// ([`note_comments`]) — 코멘트는 따로 저장하지 않고 메모 한 곳에만 있다.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -1072,6 +1075,7 @@ impl SessionStore {
             }
             cur.summary = doc.summary.clone();
             cur.summary_edited = doc.summary_edited;
+            cur.summary_template = doc.summary_template.clone();
             // 메모(코멘트 포함)는 화면에서만 고친다 → 화면 것을 그대로
             cur.notes = doc.notes.clone();
             // 화면이 지웠다고 알린 발화만 지우고, 그 사이 새로 들어온 발화는 지킨다

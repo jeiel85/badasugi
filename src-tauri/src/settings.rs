@@ -77,6 +77,19 @@ pub struct SummarySettings {
     pub anthropic_model: String,
     pub custom_url: String,
     pub custom_model: String,
+    /// 기본 요약 틀 (templates.rs 의 기본 틀 id 또는 내 틀 id) — 회의마다 마지막으로 쓴 틀이 있으면 그것
+    pub template: String,
+    /// 내 틀 (설정 › 요약에서 만든 것)
+    pub templates: Vec<CustomTemplate>,
+}
+
+/// 내 요약 틀 — 섹션은 한 줄에 하나("섹션 이름" 또는 "섹션 이름 — 무엇을 적을지")
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CustomTemplate {
+    pub id: String,
+    pub name: String,
+    pub sections: String,
 }
 
 impl Default for SummarySettings {
@@ -92,6 +105,8 @@ impl Default for SummarySettings {
             anthropic_model: "claude-opus-5-5".into(),
             custom_url: String::new(),
             custom_model: String::new(),
+            template: crate::templates::DEFAULT.into(),
+            templates: Vec::new(),
         }
     }
 }

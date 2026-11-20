@@ -4,6 +4,7 @@
 //! - md 내용이 그대로 모델에게 간다. 메모 · 설명은 md 에 쓰지 말고 이 파일이나 `prompts/README.md` 에
 //! - `{{rules/style.md}}` 처럼 쓴 자리는 그 파일 내용으로 바뀐다 (여러 프롬프트가 같이 쓰는 규칙)
 //! - 파일 끝의 줄바꿈 · 빈 줄은 떼고 보낸다
+//! - 회의록(`summary.md`)의 `{형식}` · `{남은 질문 기준}` 자리는 실행 중에 요약 틀([`summary_with`])로 채운다
 
 use std::sync::LazyLock;
 
@@ -34,6 +35,14 @@ const FILES: &[(&str, &str)] = &[
     // 중요 표시 ⭐ — 회의 중 단축키로 표시한 문장은 녹취록에 "⭐ 문장"으로 간다(SessionDoc::to_ai_text).
     // 요약이 꼭 다루고 그 불릿에도 ⭐ 를 달게 해, 긴 회의의 구간 메모를 합치고 줄여도 남게 한다
     ("rules/starred.md", include_str!("../prompts/rules/starred.md")),
+    // 회의 종류별 요약 틀 — 회의록의 "### 제목" 뒤에 오는 형식 (templates.rs 의 기본 틀 목록이 고른다).
+    // 일반 회의(meeting)는 틀이 생기기 전 회의록 형식 그대로
+    ("templates/meeting.md", include_str!("../prompts/templates/meeting.md")),
+    ("templates/one_on_one.md", include_str!("../prompts/templates/one_on_one.md")),
+    ("templates/interview.md", include_str!("../prompts/templates/interview.md")),
+    ("templates/lecture.md", include_str!("../prompts/templates/lecture.md")),
+    ("templates/customer.md", include_str!("../prompts/templates/customer.md")),
+    ("templates/ideas.md", include_str!("../prompts/templates/ideas.md")),
 ];
 
 /// md 를 보낼 글로: `{{다른 파일}}` 자리를 그 파일 내용으로 바꾸고 끝의 줄바꿈을 뗀다
@@ -59,9 +68,37 @@ macro_rules! prompt {
     };
 }
 
+/// 이름으로 고르는 파일 (요약 틀 형식처럼 코드가 목록에서 고르는 것)
+pub fn file(name: &str) -> &'static str {
+    static ALL: LazyLock<std::collections::HashMap<&'static str, String>> =
+        LazyLock::new(|| FILES.iter().map(|f| (f.0, build(f.0))).collect());
+    ALL.get(name).map(String::as_str).unwrap_or_else(|| panic!("프롬프트 파일이 없음: {name}"))
+}
+
+/// 회의록 지시 — `format` 은 요약 틀의 형식("### 섹션" 목록, 제목은 빼고). "남은 질문" 섹션이 있는 틀에만
+/// 남은 질문 기준을 넣는다 (없는 틀에 넣으면 쓸데없이 길고, 모델이 없는 섹션을 만들기도 한다)
+/// (짧은 회의는 녹취록을 한 번에, 긴 회의는 구간 메모를 합칠 때)
+pub fn summary_with(format: &str) -> String {
+    let open = format.lines().any(|l| l.trim_start_matches('#').trim() == "남은 질문" && l.starts_with("###"));
+    let base = file("summary.md");
+    let base = if open {
+        base.replace("{남은 질문 기준}", open_questions())
+    } else {
+        base.replace("{남은 질문 기준}
+
+", "")
+    };
+    base.replace("{형식}", format.trim_end())
+}
+
+/// 일반 회의 틀의 회의록 지시 (틀이 생기기 전과 같은 글)
+pub fn summary() -> &'static str {
+    static TEXT: LazyLock<String> = LazyLock::new(|| summary_with(file("templates/meeting.md")));
+    TEXT.as_str()
+}
 prompt!(
-    /// 회의록 (짧은 회의는 녹취록을 한 번에, 긴 회의는 구간 메모를 합칠 때)
-    summary = "summary.md"
+    /// "남은 질문" 기준 (그 섹션이 있는 틀의 회의록 · 구간 메모에 들어간다)
+    open_questions = "rules/open_questions.md"
 );
 prompt!(
     /// 긴 회의: 구간 하나를 나중에 합칠 메모로 (구간 메모 · 메모 합치기 · 줄이기에 같이 쓴다)
