@@ -274,6 +274,8 @@ fn begin(app: &AppHandle, id: u64) -> Result<(), String> {
         keywords: terms,
         record_path: None,
         known_voices: Vec::new(),
+        // 받아쓰기 입력은 짧은 발화 하나라 말하는 동안 미리 보기를 쓰지 않는다
+        preview: false,
     };
     let d = app.state::<Dictate>();
     if let Some(sess) = d.cur.lock().as_mut().filter(|x| x.id == id) {

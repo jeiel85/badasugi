@@ -10,6 +10,9 @@ use reqwest::blocking::{multipart, Client};
 
 use super::{AsrRequest, Transcriber};
 
+/// 말하는 동안 미리 보기 요청은 이만큼만 기다린다 — 늦게 오는 미리 보기는 쓸모가 없고, 그동안 워커가 묶인다
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(8);
+
 pub struct ApiTranscriber {
     client: Client,
     url: String,
@@ -47,6 +50,9 @@ impl ApiTranscriber {
             form = form.text(name, value);
         }
         let mut rb = self.client.post(&self.url).multipart(form);
+        if req.preview.is_some() {
+            rb = rb.timeout(PREVIEW_TIMEOUT);
+        }
         if !self.api_key.is_empty() {
             rb = rb.bearer_auth(&self.api_key);
         }
@@ -77,6 +83,11 @@ impl ApiTranscriber {
 impl Transcriber for ApiTranscriber {
     fn transcribe(&mut self, req: &AsrRequest) -> Result<String> {
         let wav = crate::wav::encode_pcm16(req.samples)?;
+        // 미리 보기는 한 번만 보낸다 — 다시 보내거나 요청 한도(Retry-After)를 기다리면 확정 문장을 받아 적을 워커가
+        // 수십 초씩 묶이고, 녹음을 멈출 때도 그만큼 기다린다. 실패하면 파이프라인이 미리 보기를 끈다.
+        if req.preview.is_some() {
+            return self.call(&wav, req);
+        }
         let mut last_err = None;
         for attempt in 0..3u32 {
             match self.call(&wav, req) {
@@ -236,6 +247,7 @@ pub fn test_connection(base_url: &str, api_key: &str, model: &str) -> Result<()>
         prompt: "",
         keywords: &[],
         context: "",
+        preview: None,
     };
     t.call(&wav, &req).map(|_| ())
 }
@@ -243,6 +255,8 @@ pub fn test_connection(base_url: &str, api_key: &str, model: &str) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn req<'a>(keywords: &'a [String], context: &'a str) -> AsrRequest<'a> {
         AsrRequest {
@@ -251,6 +265,7 @@ mod tests {
             prompt: "회의 녹취록입니다. 주요 용어: OKPOS, 스캔프리.",
             keywords,
             context,
+            preview: None,
         }
     }
 
@@ -281,6 +296,55 @@ mod tests {
         }
     }
 
+    /// 요청마다 429 (Retry-After 1초) 를 돌려주는 가짜 서버 → (주소, 받은 요청 수)
+    fn rate_limited_server() -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                h.fetch_add(1, Ordering::SeqCst);
+                // 요청을 끝까지 읽지 않아도 되게 잠깐만 읽고 답한다
+                let mut buf = [0u8; 65536];
+                let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                let _ = std::io::Read::read(&mut s, &mut buf);
+                let body = r#"{"error":{"message":"rate limit"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut s, resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}/v1"), hits)
+    }
+
+    #[test]
+    fn preview_requests_are_sent_once_without_waiting() {
+        let (url, hits) = rate_limited_server();
+        let mut t = ApiTranscriber::new(&url, "", "whisper-large-v3-turbo").unwrap();
+        let samples = vec![0.0f32; 16_000];
+        let abort = || false;
+        let req = AsrRequest {
+            samples: &samples,
+            language: "ko",
+            prompt: "",
+            keywords: &[],
+            context: "",
+            preview: Some(&abort),
+        };
+        let t0 = std::time::Instant::now();
+        assert!(t.transcribe(&req).is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "미리 보기는 다시 보내지 않는다");
+        assert!(t0.elapsed() < Duration::from_millis(900), "Retry-After 를 기다리지 않는다: {:?}", t0.elapsed());
+        // 확정 문장은 그대로 다시 보낸다 (요청 한도면 기다렸다가 — 세 번까지)
+        let req = AsrRequest { preview: None, ..req };
+        assert!(t.transcribe(&req).is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+    }
+
     #[test]
     fn auto_language_and_empty_prompt_are_left_out() {
         let r = AsrRequest {
@@ -289,6 +353,7 @@ mod tests {
             prompt: " ",
             keywords: &[],
             context: "",
+            preview: None,
         };
         assert_eq!(names(&form_fields("gpt-transcribe", &r)), ["model", "response_format", "temperature"]);
     }

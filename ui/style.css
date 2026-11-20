@@ -208,6 +208,12 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 
 .listening { display: flex; align-items: center; gap: 8px; padding: 8px 0 0 14px; color: var(--muted); font-size: 12.5px; }
 .listening .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); animation: blink 1s ease-in-out infinite; }
+/* 말하는 동안 미리 보기 — 아직 확정 아님: 흐린 글씨 (말하는 중은 '듣는 중' 자리에, 받아 적는 중은 그 문장 자리에) */
+.listening.has-pv { align-items: baseline; font-size: var(--fs, 15px); line-height: 1.7; word-break: keep-all; overflow-wrap: anywhere; }
+.listening.has-pv .dot { flex: none; transform: translateY(-2px); }
+.u.pv { color: var(--muted); }
+.u.pv:hover { background: none; }
+.mini-cap .pv { opacity: .85; }
 @keyframes blink { 50% { opacity: .25; } }
 
 .jump { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 6px 12px; border-radius: 999px; background: var(--text); color: var(--bg); font-size: 12px; font-weight: 600; box-shadow: var(--shadow-lg); z-index: 5; }

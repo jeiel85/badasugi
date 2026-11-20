@@ -85,7 +85,13 @@ pub struct AsrRequest<'a> {
     /// 바로 앞에서 받아 적은 말 (같은 회의) — 문장부호 · 띄어쓰기 · 표기를 앞 문장과 맞추게 한다.
     /// 앞 문맥을 받는 엔진만 채운다 ([`EngineConfig::wants_context`]), 아니면 비어 있다.
     pub context: &'a str,
+    /// 말하는 동안 미리 보기 — 있으면 빠르게 한 번만 풀고(로컬: greedy · 다시 풀기 없음),
+    /// 이 함수가 true 를 돌려주면(확정 인식할 발화가 기다리면) 로컬 엔진은 하던 인식을 그만둔다.
+    pub preview: Option<&'a AbortCheck<'a>>,
 }
+
+/// 미리 보기 인식을 그만둘지 (계산 중에 여러 번 부른다)
+pub type AbortCheck<'a> = dyn Fn() -> bool + Sync + 'a;
 
 impl AsrRequest<'_> {
     /// 모델에 보낼 프롬프트: 용어집 문장 + 앞 문맥. 인식 모델은 프롬프트를 '바로 앞 녹취' 로 보고 이어 쓰므로
@@ -282,6 +288,7 @@ mod tests {
             prompt: "회의 녹취록입니다. 주요 용어: OKPOS.",
             keywords: &[],
             context: "네, 좋아요.",
+            preview: None,
         };
         assert_eq!(req.full_prompt(), "회의 녹취록입니다. 주요 용어: OKPOS. 네, 좋아요.");
         req.prompt = "";
@@ -302,6 +309,7 @@ mod tests {
             prompt: &prompt,
             keywords: &[],
             context,
+            preview: None,
         };
         let full = req.full_prompt();
         assert!(full.len() <= PROMPT_MAX_BYTES, "{}", full.len());

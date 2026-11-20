@@ -35,6 +35,8 @@ pub struct Settings {
     pub save_audio: bool,
     /// 녹음이 끝나면 로컬 모델을 메모리에서 내림 (대기 중 가볍게)
     pub unload_when_idle: bool,
+    /// 말하는 동안 미리 보기: "auto"(로컬 엔진만) | "on"(API 도 — 요청이 늘어 비용이 오른다) | "off"
+    pub live_preview: String,
 
     pub hotkey: String,
     /// 중요 표시 ⭐ 전역 단축키 — 녹음 · 다시 듣기 중 지금 말하는 곳을 메모에 `[시각] ⭐` 로 (빈 값이면 없음)
@@ -167,6 +169,7 @@ impl Default for Settings {
             remember_voices: true,
             save_audio: false,
             unload_when_idle: true,
+            live_preview: "auto".into(),
             hotkey: "Ctrl+Alt+R".into(),
             star_hotkey: "Ctrl+Alt+B".into(),
             always_on_top: false,
@@ -268,6 +271,16 @@ impl Settings {
             None => models_dir.join(&self.local_model),
         }
     }
+
+    /// 실시간 녹음에서 말하는 동안 미리 보기를 켤지 — 자동이면 로컬 엔진만
+    /// (로컬은 확정 인식이 쉴 때만 돌리고 밀리면 저절로 끈다 · API 는 요청 수만큼 비용이 늘어 직접 켤 때만)
+    pub fn wants_preview(&self) -> bool {
+        match self.live_preview.as_str() {
+            "on" => true,
+            "off" => false,
+            _ => self.engine == "local",
+        }
+    }
 }
 
 const SERVICE: &str = "badasugi";
@@ -351,6 +364,22 @@ mod tests {
         std::fs::write(&path, br#"{ "openaiModel": "gpt-4o-mini-transcribe" }"#).unwrap();
         assert_eq!(Settings::load(&path).openai_model, "gpt-4o-mini-transcribe");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_preview_is_on_by_default_only_for_the_local_engine() {
+        // 미리 보기가 생기기 전의 설정 파일도 자동으로 읽힌다
+        let s: Settings = serde_json::from_str(r#"{ "engine": "local" }"#).unwrap();
+        assert_eq!(s.live_preview, "auto");
+        assert!(s.wants_preview());
+        for engine in ["openai", "groq", "custom"] {
+            let mut s = Settings { engine: engine.into(), ..Settings::default() };
+            assert!(!s.wants_preview(), "API 는 비용이 들어 기본 꺼짐: {engine}");
+            s.live_preview = "on".into();
+            assert!(s.wants_preview(), "{engine}");
+        }
+        let s = Settings { live_preview: "off".into(), ..Settings::default() };
+        assert!(!s.wants_preview());
     }
 
     #[test]

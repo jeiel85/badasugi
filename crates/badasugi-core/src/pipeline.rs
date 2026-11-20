@@ -61,6 +61,10 @@ pub struct PipelineConfig {
     /// 이름을 아는 목소리 — 녹음 중 화자 목소리가 닮으면 그 이름을 알려 준다 ([`Event::SpeakerNamed`])
     #[serde(default)]
     pub known_voices: Vec<KnownVoice>,
+    /// 말하는 동안 미리 보기 (실시간 녹음만) — 말하는 중인 발화를 1.5초마다 받아 적어 [`Event::Preview`] 로 보낸다.
+    /// 확정 인식을 앞지르지 않고(인식 워커가 쉴 때만), 확정 인식이 밀리면 저절로 끈다.
+    #[serde(default)]
+    pub preview: bool,
 }
 
 fn default_lang() -> String {
@@ -98,6 +102,11 @@ pub enum Event {
         /// 순수 인식 시간
         asr_ms: u64,
     },
+    /// 말하는 중인 발화의 미리 보기 (아직 확정 아님 — 흐린 글씨로). 같은 `start_ms` 로 여러 번 오고,
+    /// 발화가 끝나면 `start_ms` 가 같은 `Pending` 이 뒤따른다 (그 뒤로 이 발화의 미리 보기는 오지 않는다).
+    /// 발화가 너무 짧아 버려지면 `text` 가 빈 미리 보기가 한 번 와서 지운다.
+    #[serde(rename_all = "camelCase")]
+    Preview { start_ms: u64, end_ms: u64, text: String },
     #[serde(rename_all = "camelCase")]
     Discarded { id: u64 },
     /// 인식 실패. `retry` 면 들고 있다가 녹음이 끝나면 한 번 더 받아 적는다 (그때 `Transcript` 나 다시 `Failed` 가 온다)
@@ -168,6 +177,164 @@ impl Inflight {
     }
 }
 
+/// 말하는 중인 발화를 이만큼마다 다시 받아 적는다 (로컬)
+const PREVIEW_EVERY: Duration = Duration::from_millis(1500);
+/// API 엔진은 요청 수만큼 비용 · 분당 요청 한도를 쓰므로 조금 덜 자주
+const PREVIEW_EVERY_API: Duration = Duration::from_millis(2000);
+/// 이보다 짧게 들린 말은 미리 보지 않는다 (1초)
+const PREVIEW_MIN_SAMPLES: usize = SAMPLE_RATE as usize;
+/// 같은 발화에 새로 들린 말이 이보다 적으면 다시 보지 않는다 (0.5초)
+const PREVIEW_MIN_NEW: usize = SAMPLE_RATE as usize / 2;
+/// 확정 인식할 발화가 이만큼 넘게 기다렸으면 미리 보기를 끈다 — 확정 인식이 밀리기 시작했다
+#[cfg(not(test))]
+const PREVIEW_LAG: Duration = Duration::from_millis(2500);
+#[cfg(test)]
+const PREVIEW_LAG: Duration = Duration::from_millis(60);
+/// 미리 보기 한 번이 이보다 오래 걸리는 일이 두 번 이어지면 끈다 — 보여 줄 때는 이미 지난 말이다
+#[cfg(not(test))]
+const PREVIEW_SLOW: Duration = Duration::from_millis(3000);
+#[cfg(test)]
+const PREVIEW_SLOW: Duration = Duration::from_millis(60);
+
+/// 미리 볼 소리 — 말하는 중인 발화의 처음부터 지금까지
+struct PreviewReq {
+    start: u64,
+    samples: Vec<f32>,
+}
+
+/// 말하는 동안 미리 보기 상태 — DSP 스레드가 요청을 넣고, 인식 워커 0 이 쉴 때 꺼내 받아 적는다
+struct PreviewCtl {
+    /// 크기 1 — 늘 가장 최근 요청 하나만 (DSP 가 묵은 요청을 꺼내 버리고 넣는다)
+    tx: Sender<PreviewReq>,
+    rx: Receiver<PreviewReq>,
+    /// 요청 간격
+    every: Duration,
+    off: AtomicBool,
+    slow: std::sync::atomic::AtomicU32,
+    marks: parking_lot::Mutex<PreviewMarks>,
+}
+
+#[derive(Default)]
+struct PreviewMarks {
+    /// 이 위치(샘플) 앞에서 시작한 발화는 끝났다 — 끝난 발화의 미리 보기는 보내지 않는다
+    ended: u64,
+    /// 미리 보기를 보낸 마지막 발화의 시작
+    shown: Option<u64>,
+}
+
+impl PreviewCtl {
+    fn new(every: Duration) -> Self {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        Self {
+            tx,
+            rx,
+            every,
+            off: AtomicBool::new(false),
+            slow: Default::default(),
+            marks: Default::default(),
+        }
+    }
+
+    fn is_off(&self) -> bool {
+        self.off.load(Ordering::Relaxed)
+    }
+
+    /// 묵은 요청은 버리고 새 요청을 넣는다
+    fn request(&self, req: PreviewReq) {
+        while self.rx.try_recv().is_ok() {}
+        let _ = self.tx.try_send(req);
+    }
+
+    /// 말하는 중인 발화의 미리 보기를 보낸다 — 그 발화가 그새 끝났으면 보내지 않는다
+    /// (끝 표시와 같은 잠금 안에서 보내므로, 이 발화의 미리 보기는 늘 그 `Pending` 보다 먼저 간다)
+    fn show(&self, sink: &EventSink, start: u64, end: u64, text: String) {
+        let mut m = self.marks.lock();
+        if start < m.ended || text.is_empty() {
+            return;
+        }
+        m.shown = Some(start);
+        sink(Event::Preview {
+            start_ms: samples_to_ms(start),
+            end_ms: samples_to_ms(end),
+            text,
+        });
+    }
+
+    /// 이 위치에서 시작한 발화가 끝났다 (DSP — 발화를 디스패처에 넘기기 전에).
+    /// `dropped`: 너무 짧아 버려졌다 → 화면에 띄운 미리 보기가 있으면 지운다
+    fn end(&self, sink: &EventSink, start: u64, dropped: bool) {
+        let mut m = self.marks.lock();
+        m.ended = m.ended.max(start + 1);
+        if dropped && m.shown == Some(start) {
+            m.shown = None;
+            let at = samples_to_ms(start);
+            sink(Event::Preview {
+                start_ms: at,
+                end_ms: at,
+                text: String::new(),
+            });
+        }
+        while self.rx.try_recv().is_ok() {}
+    }
+
+    /// 이번 녹음 동안 끈다 (한 번만 알린다)
+    fn turn_off(&self, sink: &EventSink, why: &str) {
+        if !self.off.swap(true, Ordering::SeqCst) {
+            log::info!("말하는 동안 미리 보기 끔: {why}");
+            while self.rx.try_recv().is_ok() {}
+            sink(Event::Status {
+                message: format!("{why} 말하는 동안 미리 보기를 껐어요 (이번 녹음만 · 확정 문장은 그대로 나와요)"),
+            });
+        }
+    }
+}
+
+/// DSP 스레드 쪽: 말하는 동안 일정한 간격으로 미리 보기를 요청하고, 발화가 끝나면 알린다
+struct PreviewTap {
+    ctl: Arc<PreviewCtl>,
+    last_at: Option<Instant>,
+    /// 마지막으로 요청한 (발화 시작, 길이)
+    last: Option<(u64, usize)>,
+}
+
+impl PreviewTap {
+    fn new(ctl: Arc<PreviewCtl>) -> Self {
+        Self { ctl, last_at: None, last: None }
+    }
+
+    /// `before`: 이번 오디오를 넣기 전 말하는 중이던 발화의 시작, `segs`: 이번에 끝난 발화
+    fn after_push(&mut self, sink: &EventSink, before: Option<u64>, segmenter: &Segmenter, segs: &[SpeechSegment], paused: bool) {
+        for s in segs {
+            self.ctl.end(sink, s.start, false);
+        }
+        let now = segmenter.current();
+        if let Some(b) = before {
+            let still = now.is_some_and(|(s, _)| s == b);
+            if !still && !segs.iter().any(|s| s.start == b) {
+                self.ctl.end(sink, b, true);
+            }
+        }
+        if paused || self.ctl.is_off() {
+            return;
+        }
+        let Some((start, audio)) = now else {
+            return;
+        };
+        if audio.len() < PREVIEW_MIN_SAMPLES || self.last_at.is_some_and(|t| t.elapsed() < self.ctl.every) {
+            return;
+        }
+        if self.last.is_some_and(|(s, n)| s == start && audio.len() < n + PREVIEW_MIN_NEW) {
+            return;
+        }
+        self.ctl.request(PreviewReq {
+            start,
+            samples: audio.to_vec(),
+        });
+        self.last_at = Some(Instant::now());
+        self.last = Some((start, audio.len()));
+    }
+}
+
 /// 파이프라인 스레드들이 함께 보는 상태
 #[derive(Default)]
 struct Flags {
@@ -231,16 +398,22 @@ impl Pipeline {
             sink(Event::Status { message });
         }
         let hints = SharedHints::default();
-        let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, hints.clone(), None);
+        let every = match cfg.engine {
+            EngineConfig::Local { .. } => PREVIEW_EVERY,
+            EngineConfig::Api { .. } => PREVIEW_EVERY_API,
+        };
+        let preview = cfg.preview.then(|| Arc::new(PreviewCtl::new(every)));
+        let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, hints.clone(), None, preview.clone());
         let flags = Arc::new(Flags::default());
         let dsp = {
             let sink = sink.clone();
             let flags = flags.clone();
             let source = cfg.capture.source;
             let seg_tx = backend.seg_tx;
+            let tap = preview.map(PreviewTap::new);
             std::thread::Builder::new()
                 .name("bd-dsp".into())
-                .spawn(move || dsp_thread(raw_rx, source, segmenter, seg_tx, sink, recorder, flags))?
+                .spawn(move || dsp_thread(raw_rx, source, segmenter, seg_tx, sink, recorder, flags, tap))?
         };
         Ok(Pipeline {
             capture: Some(capture),
@@ -285,6 +458,7 @@ impl Pipeline {
             Some(inflight.clone()),
             hints.clone(),
             Some(flags.clone()),
+            None,
         );
         // 인식이 밀린 만큼만 앞서 디코딩한다 (결과가 차례로 나오고 메모리도 일정)
         let max_backlog = 2 * cfg.engine.concurrency();
@@ -408,6 +582,7 @@ fn spawn_backend(
     inflight: Option<Arc<Inflight>>,
     hints: SharedHints,
     file_flags: Option<Arc<Flags>>,
+    preview: Option<Arc<PreviewCtl>>,
 ) -> Backend {
     let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<SpeechSegment>();
     let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
@@ -425,6 +600,7 @@ fn spawn_backend(
         retry_noted: AtomicBool::new(false),
         gave_up: AtomicBool::new(false),
         offline: AtomicBool::new(false),
+        preview,
     });
     let n = cfg.engine.concurrency();
     let mut workers = Vec::with_capacity(n);
@@ -551,6 +727,8 @@ struct WorkerCtx {
     gave_up: AtomicBool,
     /// 파일 모드에서 마지막 요청이 연결 문제로 실패했는지 — 그 상태로 멈추면 남은 발화를 하나씩 기다리지 않는다
     offline: AtomicBool,
+    /// 말하는 동안 미리 보기 (실시간 녹음에서 켰을 때만 — 워커 0 이 쉴 때 받아 적는다)
+    preview: Option<Arc<PreviewCtl>>,
 }
 
 impl WorkerCtx {
@@ -607,7 +785,85 @@ fn asr_worker(idx: usize, rx: Receiver<Job>, engine_cfg: EngineConfig, ctx: Arc<
             None
         }
     };
-    run_worker(rx, engine, !is_local, &ctx);
+    // 미리 보기는 워커 0 만 (한 번에 하나만 — 로컬은 워커가 하나뿐이고, API 는 요청이 늘지 않게)
+    run_worker(rx, engine, !is_local, &ctx, idx == 0);
+}
+
+/// 워커가 할 일 — 확정 인식이 늘 먼저다
+enum Work {
+    Final(Job),
+    Preview(PreviewReq),
+}
+
+/// 다음 일을 기다린다. 확정 인식할 발화가 있으면 그것부터, 없을 때만 미리 보기. 입력이 닫히면 None.
+fn next_work(rx: &Receiver<Job>, preview: Option<&PreviewCtl>) -> Option<Work> {
+    match rx.try_recv() {
+        Ok(j) => return Some(Work::Final(j)),
+        Err(crossbeam_channel::TryRecvError::Disconnected) => return None,
+        Err(crossbeam_channel::TryRecvError::Empty) => {}
+    }
+    let Some(p) = preview else {
+        return rx.recv().ok().map(Work::Final);
+    };
+    crossbeam_channel::select_biased! {
+        recv(rx) -> j => j.ok().map(Work::Final),
+        recv(p.rx) -> r => match r {
+            Ok(r) => Some(Work::Preview(r)),
+            Err(_) => rx.recv().ok().map(Work::Final),
+        },
+    }
+}
+
+/// 말하는 중인 발화를 미리 받아 적어 보낸다. 확정 인식할 발화가 들어오면 (로컬은) 하던 것을 그만둔다.
+fn run_preview(engine: &mut dyn asr::Transcriber, req: PreviewReq, rx: &Receiver<Job>, ctx: &WorkerCtx, is_api: bool) {
+    let Some(p) = ctx.preview.as_deref() else {
+        return;
+    };
+    if p.is_off() {
+        return;
+    }
+    let abort = || !rx.is_empty() || p.is_off();
+    let t0 = Instant::now();
+    let r = engine.transcribe(&AsrRequest {
+        samples: &req.samples,
+        language: &ctx.lang,
+        prompt: &ctx.prompt,
+        keywords: &ctx.keywords,
+        context: "",
+        preview: Some(&abort),
+    });
+    let took = t0.elapsed();
+    if is_api {
+        // 미리 보기도 실제로 보낸 요청이다 — 사용량에 넣는다
+        ctx.emit(Event::ApiUsage {
+            audio_ms: samples_to_ms(req.samples.len() as u64),
+            ok: r.is_ok(),
+        });
+    }
+    match r {
+        Ok(raw) => {
+            let end = req.start + req.samples.len() as u64;
+            p.show(&ctx.sink, req.start, end, crate::text::clean(&raw));
+        }
+        Err(e) => {
+            log::debug!("미리 보기 안 됨: {e}");
+            if abort() {
+                return;
+            }
+            // API 미리 보기가 실패했으면(연결 · 요청 한도) 확정 문장 요청을 위해 아낀다
+            if is_api {
+                p.turn_off(&ctx.sink, "API 요청이 잘 되지 않아");
+                return;
+            }
+        }
+    }
+    if took > PREVIEW_SLOW {
+        if p.slow.fetch_add(1, Ordering::SeqCst) + 1 >= 2 {
+            p.turn_off(&ctx.sink, "이 PC에선 미리 보기가 늦게 나와");
+        }
+    } else {
+        p.slow.store(0, Ordering::SeqCst);
+    }
 }
 
 /// 실시간 녹음에서 연결 문제로 받아 적지 못한 발화를 녹음이 끝날 때까지 들고 있는 양 (워커마다, 16 kHz 샘플) — 5분
@@ -633,7 +889,13 @@ impl Later {
     }
 }
 
-fn run_worker(rx: Receiver<Job>, mut engine: Option<Box<dyn asr::Transcriber>>, is_api: bool, ctx: &WorkerCtx) {
+fn run_worker(
+    rx: Receiver<Job>,
+    mut engine: Option<Box<dyn asr::Transcriber>>,
+    is_api: bool,
+    ctx: &WorkerCtx,
+    takes_preview: bool,
+) {
     // API 가 연달아 실패하면(인터넷 끊김 등) 20초 동안은 부르지 않는다 — 한 번에 수십 초 걸리는 재시도가 쌓여
     // 정지·종료가 몇 시간씩 걸리지 않게. 그동안 들어온 발화는 들고 있다가 녹음이 끝나면 다시 받아 적는다.
     let mut fails = 0u32;
@@ -646,7 +908,26 @@ fn run_worker(rx: Receiver<Job>, mut engine: Option<Box<dyn asr::Transcriber>>, 
             Err(_) => ctx.fail(id, format!("{reason}{}", ctx.kept_note()), false),
         }
     };
-    for job in rx {
+    let preview = ctx.preview.as_deref().filter(|_| takes_preview && engine.is_some());
+    // 모델을 불러오는 동안 쌓인 발화는 밀린 것으로 치지 않는다
+    let ready = Instant::now();
+    while let Some(work) = next_work(&rx, preview) {
+        let job = match work {
+            Work::Final(job) => job,
+            Work::Preview(req) => {
+                let offline = skip_until.is_some_and(|t| Instant::now() < t);
+                if let (Some(engine), false) = (engine.as_deref_mut(), offline) {
+                    run_preview(engine, req, &rx, ctx, is_api);
+                }
+                continue;
+            }
+        };
+        if let Some(p) = ctx.preview.as_deref() {
+            let waited = job.queued.max(ready).elapsed();
+            if waited > PREVIEW_LAG && !p.is_off() {
+                p.turn_off(&ctx.sink, "확정 문장이 밀리기 시작해");
+            }
+        }
         // 결과가 어떻든 이 조각 처리가 끝나면 진행률에 반영
         let _done = ctx.inflight.as_deref().map(|t| InflightDone(t, job.origin));
         let Some(engine) = engine.as_deref_mut() else {
@@ -678,6 +959,10 @@ fn run_worker(rx: Receiver<Job>, mut engine: Option<Box<dyn asr::Transcriber>>, 
             }
             // 연결 문제 · 요청 한도 · 서비스 장애: 들고 있다가 녹음이 끝나면 다시
             Err(e) if is_api && asr::retryable(&e) => {
+                // 연결 문제 · 요청 한도 — 미리 보기 요청이 한도를 더 쓰지 않게 끈다
+                if let Some(p) = ctx.preview.as_deref() {
+                    p.turn_off(&ctx.sink, "API 요청이 잘 되지 않아");
+                }
                 fails += 1;
                 if fails >= 3 {
                     skip_until = Some(Instant::now() + Duration::from_secs(20));
@@ -791,6 +1076,7 @@ fn recognize(engine: &mut dyn asr::Transcriber, job: &Job, ctx: &WorkerCtx, is_a
         prompt: &ctx.prompt,
         keywords: &ctx.keywords,
         context: &context,
+        preview: None,
     });
     if is_api {
         ctx.emit(Event::ApiUsage {
@@ -929,6 +1215,7 @@ fn dsp_thread(
     sink: EventSink,
     mut recorder: Option<Recorder>,
     flags: Arc<Flags>,
+    mut preview: Option<PreviewTap>,
 ) {
     const LEAD: usize = SAMPLE_RATE as usize / 5; // 200 ms
     let both = source == SourceKind::Both;
@@ -1020,10 +1307,15 @@ fn dsp_thread(
         }
         level_n += mixed.len();
 
+        let before = segmenter.current().map(|(s, _)| s);
         if let Err(e) = segmenter.push(&mixed, &mut segs) {
             sink(Event::Error {
                 message: format!("VAD 오류: {e}"),
             });
+        }
+        // 끝난 발화를 디스패처에 넘기기 전에 미리 보기에 알린다 (그 발화의 미리 보기가 Pending 보다 먼저 가게)
+        if let Some(t) = preview.as_mut() {
+            t.after_push(&sink, before, &segmenter, &segs, paused);
         }
         for s in segs.drain(..) {
             let _ = seg_tx.send(s);
@@ -1042,7 +1334,11 @@ fn dsp_thread(
     }
 
     // 큐에 남은 200 ms 미만 자투리는 버리고, 진행 중이던 발화만 마무리한다
+    let before = segmenter.current().map(|(s, _)| s);
     segmenter.flush(&mut segs);
+    if let Some(t) = preview.as_mut() {
+        t.after_push(&sink, before, &segmenter, &segs, true);
+    }
     for s in segs.drain(..) {
         let _ = seg_tx.send(s);
     }
@@ -1250,14 +1546,19 @@ mod tests {
         }
     }
 
-    /// 일을 차례로 넣고 입력을 닫은 뒤 워커를 끝까지 돌려 이벤트를 모은다
-    fn run(errors: Vec<anyhow::Error>, jobs: Vec<Job>, file_flags: Option<Arc<Flags>>) -> (Vec<Event>, u32) {
-        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    type Events = Arc<parking_lot::Mutex<Vec<Event>>>;
+
+    fn collect() -> (Events, EventSink) {
+        let events: Events = Default::default();
         let sink: EventSink = {
             let events = events.clone();
             Arc::new(move |e| events.lock().push(e))
         };
-        let ctx = WorkerCtx {
+        (events, sink)
+    }
+
+    fn worker_ctx(sink: EventSink, file_flags: Option<Arc<Flags>>, preview: Option<Arc<PreviewCtl>>) -> WorkerCtx {
+        WorkerCtx {
             lang: "ko".into(),
             prompt: String::new(),
             keywords: Vec::new(),
@@ -1270,14 +1571,21 @@ mod tests {
             retry_noted: AtomicBool::new(false),
             gave_up: AtomicBool::new(false),
             offline: AtomicBool::new(false),
-        };
+            preview,
+        }
+    }
+
+    /// 일을 차례로 넣고 입력을 닫은 뒤 워커를 끝까지 돌려 이벤트를 모은다
+    fn run(errors: Vec<anyhow::Error>, jobs: Vec<Job>, file_flags: Option<Arc<Flags>>) -> (Vec<Event>, u32) {
+        let (events, sink) = collect();
+        let ctx = worker_ctx(sink, file_flags, None);
         let calls = Arc::new(parking_lot::Mutex::new(0));
         let (tx, rx) = crossbeam_channel::unbounded();
         for j in jobs {
             tx.send(j).unwrap();
         }
         drop(tx);
-        run_worker(rx, Some(Box::new(Scripted(errors.into(), calls.clone()))), true, &ctx);
+        run_worker(rx, Some(Box::new(Scripted(errors.into(), calls.clone()))), true, &ctx, true);
         let out = std::mem::take(&mut *events.lock());
         let n = *calls.lock();
         (out, n)
@@ -1350,6 +1658,169 @@ mod tests {
         assert!(flags.stop.load(Ordering::SeqCst), "파일 받아쓰기를 멈춘다");
         assert_eq!(ev.iter().filter(|e| matches!(e, Event::Error { .. })).count(), 1);
         assert_eq!(ev.iter().filter(|e| matches!(e, Event::Failed { .. })).count(), 2);
+    }
+
+    /// 확정 인식 · 미리 보기에 걸리는 시간을 정해 둔 가짜 엔진 (미리 보기면 "미리:" 를 붙인다)
+    struct Timed {
+        final_ms: u64,
+        preview_ms: u64,
+        previews: Arc<parking_lot::Mutex<u32>>,
+    }
+
+    impl asr::Transcriber for Timed {
+        fn transcribe(&mut self, req: &AsrRequest) -> Result<String> {
+            let (ms, text) = match req.preview {
+                Some(_) => {
+                    *self.previews.lock() += 1;
+                    (self.preview_ms, "미리: 결제 모듈은")
+                }
+                None => (self.final_ms, "결제 모듈은 금요일까지 배포할게요"),
+            };
+            std::thread::sleep(Duration::from_millis(ms));
+            Ok(text.into())
+        }
+    }
+
+    fn preview_req(start: u64) -> PreviewReq {
+        PreviewReq { start, samples: vec![0.0; 24_000] }
+    }
+
+    fn kinds(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Transcript { id, .. } => Some(format!("확정{id}")),
+                Event::Preview { start_ms, text, .. } => Some(format!("미리{start_ms}:{text}")),
+                Event::Status { message } if message.contains("미리 보기를 껐어요") => Some("끔".into()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn preview_runs_only_when_no_final_job_waits() {
+        let p = Arc::new(PreviewCtl::new(PREVIEW_EVERY));
+        let (events, sink) = collect();
+        let ctx = worker_ctx(sink, None, Some(p.clone()));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        // 확정 인식할 발화와 미리 보기가 함께 기다리면 확정 인식부터
+        tx.send(job(0)).unwrap();
+        p.request(preview_req(64_000));
+        let previews = Arc::new(parking_lot::Mutex::new(0));
+        let engine = Timed { final_ms: 5, preview_ms: 5, previews: previews.clone() };
+        let h = std::thread::spawn(move || run_worker(rx, Some(Box::new(engine)), false, &ctx, true));
+        let t = Instant::now();
+        while !events.lock().iter().any(|e| matches!(e, Event::Preview { .. })) && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(tx);
+        h.join().unwrap();
+        assert_eq!(kinds(&events.lock()), ["확정0", "미리4000:미리: 결제 모듈은"]);
+        assert!(!p.is_off());
+    }
+
+    #[test]
+    fn previews_left_when_recording_stops_are_dropped() {
+        let p = Arc::new(PreviewCtl::new(PREVIEW_EVERY));
+        let (events, sink) = collect();
+        let ctx = worker_ctx(sink, None, Some(p.clone()));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(job(0)).unwrap();
+        p.request(preview_req(64_000));
+        drop(tx);
+        let previews = Arc::new(parking_lot::Mutex::new(0));
+        let engine = Timed { final_ms: 1, preview_ms: 1, previews: previews.clone() };
+        run_worker(rx, Some(Box::new(engine)), false, &ctx, true);
+        assert_eq!(kinds(&events.lock()), ["확정0"]);
+        assert_eq!(*previews.lock(), 0);
+    }
+
+    #[test]
+    fn preview_turns_off_when_final_jobs_start_to_lag() {
+        // 확정 인식 한 번이 늦어 다음 발화가 기다렸다 → 미리 보기를 끄고 한 번 알린다
+        let p = Arc::new(PreviewCtl::new(PREVIEW_EVERY));
+        let (events, sink) = collect();
+        let ctx = worker_ctx(sink, None, Some(p.clone()));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        for i in 0..3 {
+            tx.send(job(i)).unwrap();
+        }
+        drop(tx);
+        let engine = Timed { final_ms: 80, preview_ms: 1, previews: Default::default() };
+        run_worker(rx, Some(Box::new(engine)), false, &ctx, true);
+        assert!(p.is_off());
+        assert_eq!(kinds(&events.lock()), ["확정0", "끔", "확정1", "확정2"]);
+    }
+
+    #[test]
+    fn slow_previews_turn_preview_off() {
+        let p = Arc::new(PreviewCtl::new(PREVIEW_EVERY));
+        let (events, sink) = collect();
+        let ctx = worker_ctx(sink, None, Some(p.clone()));
+        let (tx, rx) = crossbeam_channel::unbounded::<Job>();
+        let engine = Timed { final_ms: 1, preview_ms: 80, previews: Default::default() };
+        let pc = p.clone();
+        let h = std::thread::spawn(move || run_worker(rx, Some(Box::new(engine)), false, &ctx, true));
+        for start in [16_000u64, 32_000] {
+            pc.request(preview_req(start));
+            let t = Instant::now();
+            while !pc.rx.is_empty() && t.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        drop(tx);
+        h.join().unwrap();
+        assert!(p.is_off(), "느린 미리 보기가 두 번 이어지면 끈다");
+        assert_eq!(kinds(&events.lock()), ["미리1000:미리: 결제 모듈은", "미리2000:미리: 결제 모듈은", "끔"]);
+    }
+
+    #[test]
+    fn api_preview_failure_turns_preview_off() {
+        // API 미리 보기가 연결 문제 · 요청 한도로 실패하면 끈다 — 확정 문장 요청에 한도를 남긴다
+        let p = Arc::new(PreviewCtl::new(PREVIEW_EVERY_API));
+        let (events, sink) = collect();
+        let ctx = worker_ctx(sink, None, Some(p.clone()));
+        let (tx, rx) = crossbeam_channel::unbounded::<Job>();
+        let calls = Arc::new(parking_lot::Mutex::new(0));
+        let engine = Scripted(vec![status(429)].into(), calls.clone());
+        let pc = p.clone();
+        let h = std::thread::spawn(move || run_worker(rx, Some(Box::new(engine)), true, &ctx, true));
+        pc.request(preview_req(16_000));
+        let t = Instant::now();
+        while !pc.is_off() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        tx.send(job(1)).unwrap();
+        drop(tx);
+        h.join().unwrap();
+        assert_eq!(kinds(&events.lock()), ["끔", "확정1"]);
+        // 미리 보기도 실제로 보낸 요청이라 사용량에 든다 (실패 1 + 확정 1)
+        let usage = events.lock().iter().filter(|e| matches!(e, Event::ApiUsage { .. })).count();
+        assert_eq!(usage, 2);
+    }
+
+    #[test]
+    fn preview_of_an_ended_utterance_is_not_shown() {
+        let p = PreviewCtl::new(PREVIEW_EVERY);
+        let (events, sink) = collect();
+        p.show(&sink, 16_000, 40_000, "결제 모듈은".into());
+        // 발화가 끝나 디스패처로 넘어갔다 → 그새 끝난 미리 보기는 보내지 않는다
+        p.end(&sink, 16_000, false);
+        p.show(&sink, 16_000, 48_000, "결제 모듈은 금요일까지".into());
+        // 다음 발화는 보낸다 · 빈 결과는 보내지 않는다
+        p.show(&sink, 64_000, 80_000, String::new());
+        p.show(&sink, 64_000, 80_000, "네".into());
+        // 너무 짧아 버려진 발화: 띄운 미리 보기를 지운다 (띄운 적 없는 발화는 조용히)
+        p.end(&sink, 64_000, true);
+        p.end(&sink, 96_000, true);
+        assert_eq!(kinds(&events.lock()), ["미리1000:결제 모듈은", "미리4000:네", "미리4000:"]);
+    }
+
+    #[test]
+    fn preview_events_json_shape() {
+        let e = serde_json::to_string(&Event::Preview { start_ms: 1000, end_ms: 2500, text: "결제".into() }).unwrap();
+        assert_eq!(e, r#"{"type":"preview","startMs":1000,"endMs":2500,"text":"결제"}"#);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
-use super::{AsrRequest, Transcriber};
+use super::{AbortCheck, AsrRequest, Transcriber};
 use crate::SAMPLE_RATE;
 
 static CACHE: Mutex<Option<(PathBuf, Arc<WhisperContext>)>> = Mutex::new(None);
@@ -119,7 +119,39 @@ fn params_template<'a>(threads: i32, beam: u32, req: &'a AsrRequest<'a>, prompt:
     params
 }
 
+/// whisper.cpp 가 계산 중에 부르는 중단 확인 — `user_data` 는 `&&AbortCheck` (부르는 쪽이 `full` 이 끝날 때까지 잡고 있다)
+unsafe extern "C" fn abort_trampoline(user_data: *mut std::ffi::c_void) -> bool {
+    if user_data.is_null() {
+        return false;
+    }
+    let check = unsafe { &*(user_data as *const &AbortCheck<'_>) };
+    check()
+}
+
 impl LocalWhisper {
+    /// 말하는 동안 미리 보기: 빠르게 한 번만 (greedy · 다시 풀기 없음 · 반복 정리만). 확정 인식할 발화가 기다리면 그만둔다.
+    /// (인코더 계산 중에는 멈추지 않고, 인코더가 끝난 뒤 · 낱말을 하나씩 풀 때마다 확인한다)
+    fn preview(&mut self, req: &AsrRequest, samples: &[f32], audio_ctx: i32, prompt: &str, abort: &AbortCheck<'_>) -> Result<String> {
+        let mut params = params_template(self.threads, 1, req, prompt);
+        if audio_ctx < 1500 {
+            params.set_audio_ctx(audio_ctx);
+        }
+        params.set_temperature_inc(0.0);
+        let secs = req.samples.len() as f32 / SAMPLE_RATE as f32;
+        params.set_max_tokens((secs * 30.0) as i32 + 20);
+        let holder: &AbortCheck<'_> = abort;
+        // SAFETY: `holder` 는 아래 `full` 이 돌아올 때까지 살아 있고, whisper.cpp 는 `full` 안에서만 콜백을 부른다
+        unsafe {
+            params.set_abort_callback(Some(abort_trampoline));
+            params.set_abort_callback_user_data(&holder as *const &AbortCheck<'_> as *mut std::ffi::c_void);
+        }
+        self.state.full(params, samples).map_err(|e| anyhow!("미리 보기 그만둠: {e}"))?;
+        if abort() {
+            anyhow::bail!("미리 보기 그만둠");
+        }
+        Ok(crate::text::clean(&self.collect()))
+    }
+
     fn collect(&self) -> String {
         let mut text = String::new();
         for seg in self.state.as_iter() {
@@ -156,6 +188,9 @@ impl Transcriber for LocalWhisper {
         let reduced = audio_ctx < 1500 && std::env::var("BADASUGI_FULL_CTX").is_err();
 
         let prompt = req.full_prompt();
+        if let Some(abort) = req.preview {
+            return self.preview(req, samples, audio_ctx, &prompt, abort);
+        }
         let mut params = params_template(self.threads, self.beam, req, &prompt);
         if reduced {
             params.set_audio_ctx(audio_ctx);

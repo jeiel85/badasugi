@@ -679,6 +679,8 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
             keywords: terms,
             record_path,
             known_voices,
+            // 말하는 동안 미리 보기는 실시간 녹음만 (파일은 녹음보다 빨리 받아 적으므로 필요 없다)
+            preview: file.is_none() && s.wants_preview(),
         };
         st.store.lock().begin(doc);
         badasugi_core::perf::disable_power_throttling();

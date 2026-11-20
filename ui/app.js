@@ -71,6 +71,8 @@ const S = {
   viewDoc: null,
   pending: new Map(),
   failed: new Map(),
+  // 말하는 동안 미리 보기 — 말하는 중인 발화 { startMs, endMs, text } (끝나면 그 발화의 pending 으로 옮긴다)
+  livePreview: null,
   timerStart: 0,
   speaking: false,
   downloads: {},
@@ -386,12 +388,14 @@ function renderDoc() {
       ${g.items.map((it) => it.kind === 'u'
         ? `${uHtml(it, cms.byU.get(it.id))}${commentHtml(cms.byU.get(it.id))}`
         : it.kind === 'p'
-          ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
+          ? (it.preview
+            ? `<div class="u pv" title="받아 적는 중 — 확정 문장으로 곧 바뀌어요">${esc(it.preview)}</div>`
+            : `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`)
           : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
       ${trShown(d) ? trHtml(d, g.items) : ''}
     </div>`));
 
-  $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking && !S.paused && !S.fileMode);
+  syncListening();
   renderMeta();
   syncSpkSel(d);
   renderNotes();
@@ -404,6 +408,16 @@ function renderDoc() {
   if (S.findQ) { updateFind(false); return; }
   if (stick) pinBottom();
   else if (S.live && S.rec === 'recording') $('#jump').hidden = false;
+}
+
+/* 녹취록 아래 '듣는 중' 줄 — 말하는 동안 미리 보기가 있으면 그 글을 흐리게 */
+function syncListening() {
+  const el = $('#listening');
+  const pv = S.live ? S.livePreview : null;
+  el.hidden = !(S.live && S.rec === 'recording' && !S.paused && !S.fileMode && (S.speaking || pv));
+  el.classList.toggle('has-pv', !!pv);
+  el.title = pv ? '말하는 중 — 말이 끝나면 확정 문장으로 바뀌어요' : '';
+  $('#listening-text').textContent = pv ? pv.text : '듣는 중';
 }
 
 function renderMeta() {
@@ -819,6 +833,7 @@ function onRec(state) {
     }
     S.pending.clear();
     S.failed.clear();
+    S.livePreview = null;
     S.liveDoc = null;
     S.slowHinted = false;
     S.paused = false;
@@ -864,12 +879,15 @@ function onEvent(e) {
       if (!document.hidden) setLevel(e.rms);
       if (S.speaking !== e.speaking) {
         S.speaking = e.speaking;
-        $('#listening').hidden = !(S.live && S.speaking);
+        syncListening();
         renderMiniCap();
       }
       break;
-    case 'pending':
-      S.pending.set(e.id, { startMs: e.startMs, endMs: e.endMs, speaker: e.speaker });
+    case 'pending': {
+      const p = { startMs: e.startMs, endMs: e.endMs, speaker: e.speaker };
+      // 말하는 동안 띄운 미리 보기는 그 발화(의 첫 조각)가 받아 적힐 때까지 흐린 글씨로 그 자리에 둔다
+      if (S.livePreview?.startMs === e.startMs) { p.preview = S.livePreview.text; S.livePreview = null; }
+      S.pending.set(e.id, p);
       // PC 가 받아 적는 속도보다 말이 빨라 대기열이 쌓이면 한 번만 안내
       if (S.pending.size >= 4 && !S.slowHinted && !S.fileMode && S.settings?.engine === 'local') {
         S.slowHinted = true;
@@ -877,6 +895,16 @@ function onEvent(e) {
       }
       renderLive();
       break;
+    }
+    case 'preview': {
+      // 앱은 발화가 끝나기 전의 미리 보기만 보내고, 그 발화의 pending 보다 늘 먼저 보낸다
+      if (!e.text) { if (S.livePreview?.startMs === e.startMs) S.livePreview = null; }
+      else if (!d?.utterances.some((u) => u.startMs === e.startMs)) S.livePreview = { startMs: e.startMs, endMs: e.endMs, text: e.text };
+      syncListening();
+      renderMiniCap();
+      if (S.livePreview && following() && follow) pinBottom();
+      break;
+    }
     case 'transcript':
       S.pending.delete(e.id);
       // 연결 문제로 미뤄 뒀다가 녹음이 끝난 뒤 다시 받아 적은 문장
@@ -962,6 +990,7 @@ function onEvent(e) {
       break;
     case 'stopped': {
       S.pending.clear();
+      S.livePreview = null;
       // 화면이 들고 있던 기록(도착 순서대로 쌓임)을 저장된 기록으로 바꾼다 — 이후 편집이 순서가 뒤섞인 사본을 저장하지 않게
       const id = S.liveDoc?.id;
       flushSaves();
@@ -3643,11 +3672,13 @@ let fontPx = 15;
 try { fontPx = +localStorage.getItem('fontPx') || 15; } catch {}
 function zoom(dir) {
   fontPx = dir === 0 ? 15 : Math.max(12, Math.min(24, fontPx + dir));
-  $('#transcript').style.setProperty('--fs', `${fontPx}px`);
+  setFontPx();
   try { localStorage.setItem('fontPx', String(fontPx)); } catch {}
   if (dir !== 0 || fontPx !== 15) toast(`글자 크기 ${fontPx}px`);
 }
-$('#transcript').style.setProperty('--fs', `${fontPx}px`);
+// 녹취록과 그 아래 미리 보기 줄('듣는 중')이 같은 크기로
+function setFontPx() { for (const id of ['#transcript', '#listening']) $(id).style.setProperty('--fs', `${fontPx}px`); }
+setFontPx();
 
 /* ───────────── 다시 듣기 · 문장 눌러 듣기 ───────────── */
 const audio = new Audio();
@@ -4000,7 +4031,22 @@ function renderMiniCap() {
   if (!S.mini || !cap) return;
   const d = S.live ? S.liveDoc : null;
   const last = d?.utterances?.[d.utterances.length - 1];
+  // 말하는 동안 미리 보기 (말하는 중 · 받아 적는 중) — 마지막 확정 문장보다 뒤의 말이면 그것을 흐리게
+  const pend = [...S.pending.values()].filter((p) => p.preview).sort((a, b) => b.startMs - a.startMs)[0];
+  const pv = S.livePreview ? { text: S.livePreview.text, startMs: S.livePreview.startMs }
+    : pend ? { text: pend.preview, startMs: pend.startMs, speaker: pend.speaker } : null;
   if (S.rec === 'recording' && S.paused) cap.textContent = S.sleepPaused ? 'PC가 잠들어서 일시정지했어요 — ▶ 로 이어서' : '일시정지 중 — 이 동안은 받아 적지 않아요';
+  else if (pv && S.rec === 'recording' && (!last || pv.startMs > last.startMs)) {
+    cap.innerHTML = `${pv.speaker != null ? `<b>${esc(speakerName(d, resolveSpk(d, pv.speaker)))}</b>` : ''}<span class="pv">${esc(pv.text)}</span>`;
+    // 작은 창엔 한 줄뿐이라 넘치면 앞 낱말부터 덜어 끝(방금 들린 말)을 보여 준다
+    const span = cap.querySelector('.pv');
+    let t = pv.text;
+    while (cap.scrollWidth > cap.clientWidth && t.length > 6) {
+      const sp = t.indexOf(' ', 1);
+      t = sp > 0 ? t.slice(sp + 1) : t.slice(4);
+      span.textContent = `…${t}`;
+    }
+  }
   else if (last && S.rec !== 'idle') cap.innerHTML = `<b>${esc(speakerName(d, resolveSpk(d, last.speaker)))}</b>${esc(last.text)}`;
   else if (S.rec === 'starting') cap.textContent = '준비하는 중…';
   else if (S.rec === 'stopping') cap.textContent = '남은 발화를 정리하는 중…';
@@ -4194,6 +4240,7 @@ function renderSettings() {
 
   $('#opt-lang').value = s.language;
   $('#opt-glossary').value = s.glossary;
+  $('#opt-preview').value = s.livePreview || 'auto';
   api.invoke('list_devices').then((devs) => {
     const sel = $('#opt-mic');
     sel.innerHTML = '<option value="">기본 마이크</option>' + devs.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}${d.isDefault ? ' (기본)' : ''}</option>`).join('');
@@ -4558,6 +4605,7 @@ bind('opt-voices', (t) => { S.settings.rememberVoices = t.checked; renderVoices(
 bind('opt-mic', (t) => (S.settings.micDevice = t.value || null));
 bind('opt-lang', (t) => (S.settings.language = t.value));
 bind('opt-glossary', (t) => (S.settings.glossary = t.value));
+bind('opt-preview', (t) => (S.settings.livePreview = t.value));
 bind('opt-ollama-url', (t) => (S.settings.summary.ollamaUrl = t.value.trim()));
 bind('opt-ollama-model', (t) => (S.settings.summary.ollamaModel = t.value.trim()));
 bind('opt-llm-groq-model', (t) => (S.settings.summary.groqModel = t.value.trim()));
@@ -4981,7 +5029,7 @@ function createMock() {
       openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
-      saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
+      saveAudio: false, unloadWhenIdle: true, livePreview: 'auto', hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
       meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
       watchFolder: false, watchDir: '', watchSummarize: true, calendar: false,
       dictation: false, dictationHotkey: 'Ctrl+Alt+Space', dictationInsert: 'paste', dictationPolish: false,

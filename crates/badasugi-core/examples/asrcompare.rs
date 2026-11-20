@@ -195,6 +195,7 @@ fn recognize(t: &mut dyn asr::Transcriber, samples: &[f32], prompt: &str, keywor
         prompt,
         keywords,
         context,
+        preview: None,
     };
     for attempt in 0..6 {
         match t.transcribe(&req) {
