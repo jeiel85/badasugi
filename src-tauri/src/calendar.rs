@@ -98,6 +98,7 @@ pub fn antivirus_good(states: &[u32]) -> bool {
 }
 
 /// 참석자(주소록 정보)를 읽어도 Outlook 이 경고 창을 띄우지 않나 — Outlook 이 바깥 프로그램을 보는 기준 그대로:
+/// - `AdminSecurityMode` 1 · 2(Exchange 공용 폴더의 보안 양식)면 백신 상태를 보지 않으므로 읽지 않는다
 /// - 회사 정책(`AdminSecurityMode` = 3)이 주소 정보 접근(`PromptOOMAddressInformationAccess`)을 정했으면 그대로
 ///   (Microsoft 문서: 0 = 자동 거부 · 1 = 사용자에게 묻기(기본) · 2 = 자동 허용. 3 = 컴퓨터 보안 상태(백신)에 따라 —
 ///   그룹 정책 서식의 넷째 선택. 그 밖은 읽지 않음)
@@ -105,13 +106,16 @@ pub fn antivirus_good(states: &[u32]) -> bool {
 ///   0 이나 없음(기본) = 백신이 꺼졌거나 오래됐을 때만 경고
 /// 모르는 값은 읽지 않는 쪽으로
 pub fn people_allowed(policy_mode: Option<u32>, policy_prompt: Option<u32>, guard: Option<u32>, av_good: bool) -> bool {
-    if policy_mode == Some(3) {
-        match policy_prompt {
+    match policy_mode {
+        Some(3) => match policy_prompt {
             Some(2) => return true,
             Some(3) => return av_good,
             Some(_) => return false,
             None => {}
-        }
+        },
+        // 1 · 2 = Exchange 공용 폴더의 보안 양식 — Outlook 이 백신 상태를 보지 않아 경고가 뜰 수 있으니 읽지 않는다
+        Some(1) | Some(2) => return false,
+        _ => {}
     }
     match guard {
         Some(2) => true,
@@ -405,7 +409,8 @@ mod com {
         .find_map(|p| dword(HKEY_LOCAL_MACHINE, p, "ObjectModelGuard"));
         let (mode, prompt) = (policy("AdminSecurityMode"), policy("PromptOOMAddressInformationAccess"));
         // 백신 상태가 필요할 때만 보안 센터에 묻는다
-        let needs_av = !(mode == Some(3) && prompt.is_some_and(|p| p != 3)) && !matches!(guard, Some(1) | Some(2));
+        let decided = matches!(mode, Some(1) | Some(2)) || (mode == Some(3) && prompt.is_some_and(|p| p != 3));
+        let needs_av = !decided && !matches!(guard, Some(1) | Some(2));
         let av = needs_av && antivirus_states().map(|s| super::antivirus_good(&s)).unwrap_or(false);
         let ok = super::people_allowed(mode, prompt, guard, av);
         log::info!("Outlook 참석자 읽기 {} (정책 {mode:?}/{prompt:?}, 설정 {guard:?}, 백신 {av})", if ok { "됨" } else { "안 함 — 경고 창이 뜰 수 있음" });
@@ -507,19 +512,11 @@ impl Calendar {
     }
 }
 
-/// 참석자를 읽어도 경고가 뜨지 않나 — 10분 동안 기억한다 (Outlook 스레드에서)
+/// 참석자를 읽어도 경고가 뜨지 않나 — 읽을 때마다 다시 본다 (그 사이 백신이 꺼지거나 정책이 바뀌면 경고가 돌아오므로,
+/// 기억해 두지 않는다. 레지스트리 몇 개와 보안 센터 한 번이라 가볍다)
 #[cfg(windows)]
 fn people_ok() -> bool {
-    static CACHE: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
-    let mut c = CACHE.lock();
-    if let Some((at, ok)) = *c {
-        if at.elapsed() < Duration::from_secs(600) {
-            return ok;
-        }
-    }
-    let ok = com::people_allowed();
-    *c = Some((std::time::Instant::now(), ok));
-    ok
+    com::people_allowed()
 }
 
 /// 오늘 일정을 읽는다 → 상태 (지금 일정 · 다음 일정)
@@ -667,6 +664,9 @@ mod tests {
         assert!(people_allowed(Some(3), Some(3), None, true));
         assert!(!people_allowed(Some(3), Some(3), None, false));
         assert!(people_allowed(Some(0), Some(0), None, true));
+        // 공용 폴더 보안 양식(1 · 2)은 백신이 좋아도 읽지 않는다
+        assert!(!people_allowed(Some(1), None, None, true));
+        assert!(!people_allowed(Some(2), Some(2), Some(2), true));
         // 모르는 값은 읽지 않는다
         assert!(!people_allowed(None, None, Some(7), true));
     }
