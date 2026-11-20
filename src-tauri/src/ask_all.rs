@@ -7,6 +7,8 @@
 //!   나누고 회의에 묻기와 같은 방법([`ask::context`])으로 싣는다 — 요약 · 메모 + 질문과 겹치는 녹취록 문장
 //! - 근거는 `[회의 2 · 12:34]` (요약 · 메모만이면 `[회의 2]`) — 화면이 눌러서 그 회의의 그 문장으로 간다
 //! - 묻고 답한 것은 기록에 저장하지 않는다 (회의 하나에 묶이지 않는다 — 앱을 다시 켜면 비워진다)
+//! - 이어 묻기: 물을 때마다 회의를 다시 골라 번호가 바뀌므로, 앞선 대화 · 새 질문의 "회의 2" 는 그때 실은 회의의
+//!   이름 · 날짜로 바꿔 보내고([`name_refs`]) 바로 앞 답에 실은 회의는 다시 싣는다 ("그중 금요일까지인 것만")
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -14,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ask::{self, Event, Focus};
 use crate::prompts;
@@ -33,13 +35,22 @@ const HISTORY: usize = 4;
 const MIN_BUDGET: usize = 2_000;
 
 /// 실은 회의 (답의 `[회의 n · …]` 번호 → 기록)
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
     pub n: usize,
     pub id: String,
     pub title: String,
     pub started_at: String,
+}
+
+/// 이 대화에서 앞서 묻고 받은 것 (그때 실은 회의와 함께)
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Past {
+    pub q: String,
+    pub a: String,
+    pub sources: Vec<Source>,
 }
 
 /// 받은 답
@@ -100,9 +111,16 @@ fn scores(docs: &[SessionDoc], query: &str) -> Vec<f64> {
 
 /// 실을 회의 (번호 순 = 날짜 순) · 회의마다 자리 비율 · 최근 회의로 골랐는지.
 /// `docs` 는 최근 것이 앞
-fn choose(docs: &[SessionDoc], query: &str, budget: usize) -> (Vec<(usize, f64)>, bool) {
+/// `keep` 은 꼭 실을 회의(바로 앞 답에 실은 회의 — 이어 묻기)
+fn choose(docs: &[SessionDoc], query: &str, budget: usize, keep: &[&str]) -> (Vec<(usize, f64)>, bool) {
     let max = (budget / PER_MEETING).clamp(MIN_MEETINGS, MAX_MEETINGS);
-    let s = scores(docs, query);
+    let mut s = scores(docs, query);
+    let best = s.iter().cloned().fold(0.0, f64::max).max(1.0);
+    for (i, d) in docs.iter().enumerate() {
+        if keep.contains(&d.id.as_str()) {
+            s[i] = s[i].max(best);
+        }
+    }
     let top = s.iter().cloned().fold(0.0, f64::max);
     let mut picked: Vec<(usize, f64)>;
     let recent = top < 1e-6;
@@ -138,8 +156,8 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 /// 회의 기록 덩어리 + 실은 회의
-fn records(docs: &[SessionDoc], query: &str, budget: usize, considered: usize) -> (String, Vec<Source>, bool) {
-    let (shares, recent) = choose(docs, query, budget);
+fn records(docs: &[SessionDoc], query: &str, budget: usize, considered: usize, keep: &[&str]) -> (String, Vec<Source>, bool) {
+    let (shares, recent) = choose(docs, query, budget, keep);
     let how = if recent {
         "질문과 겹치는 말이 있는 회의가 없어 최근 회의부터"
     } else {
@@ -157,13 +175,35 @@ fn records(docs: &[SessionDoc], query: &str, budget: usize, considered: usize) -
     (text, sources, recent)
 }
 
+/// 글의 "회의 2" · "[회의 2 · 12:34]" 를 그때 실은 회의 이름 · 날짜로 ("[보안 점검 회의(2026-11-12) · 12:34]") —
+/// 물을 때마다 회의를 다시 골라 번호가 바뀌어, 앞선 대화의 번호가 새로 실은 다른 회의를 가리키지 않게
+fn name_refs(text: &str, sources: &[Source]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("회의") {
+        let after = &rest[i + "회의".len()..];
+        let t = after.trim_start_matches(' ');
+        let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+        if let Some(s) = t[..digits].parse::<usize>().ok().and_then(|n| sources.iter().find(|s| s.n == n)) {
+            out.push_str(&rest[..i]);
+            out.push_str(&format!("{}({})", s.title.trim(), s.started_at.get(..10).unwrap_or(&s.started_at)));
+            rest = &t[digits..];
+            continue;
+        }
+        out.push_str(&rest[..i + "회의".len()]);
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// 모든 회의에 묻는다. `docs` 는 물어볼 기간 안의 기록(최근 것이 앞), `past` 는 이 대화에서 앞서 묻고 받은 것
 #[allow(clippy::too_many_arguments)]
 pub fn ask_all(
     cfg: &SummarySettings,
     docs: &[SessionDoc],
     question: &str,
-    past: &[(String, String)],
+    past: &[Past],
     on_event: &mut dyn FnMut(Event),
     on_usage: &dyn Fn(&str, &Reply),
     cancel: &AtomicBool,
@@ -180,7 +220,7 @@ fn ask_all_with(
     mut budget: usize,
     docs: &[SessionDoc],
     question: &str,
-    past: &[(String, String)],
+    past: &[Past],
     on_event: &mut dyn FnMut(Event),
     on_usage: &dyn Fn(&str, &Reply),
     cancel: &AtomicBool,
@@ -194,8 +234,16 @@ fn ask_all_with(
         bail!("물어볼 회의 기록이 없어요");
     }
     let docs: Vec<SessionDoc> = docs.into_iter().cloned().collect();
-    let past: Vec<(String, String)> =
-        past.iter().skip(past.len().saturating_sub(HISTORY)).map(|(q, a)| (clip(q, 500), clip(a, 1_500))).collect();
+    let recent_past = &past[past.len().saturating_sub(HISTORY)..];
+    // 바로 앞 답에 실은 회의는 다시 싣고, 새 질문의 "회의 2" 는 그 답의 번호로 읽어 회의 이름으로
+    let last_sources: &[Source] = recent_past.last().map(|p| p.sources.as_slice()).unwrap_or(&[]);
+    let keep: Vec<&str> = last_sources.iter().map(|s| s.id.as_str()).collect();
+    let asked = name_refs(question, last_sources);
+    let question = asked.as_str();
+    let past: Vec<(String, String)> = recent_past
+        .iter()
+        .map(|p| (clip(&name_refs(&p.q, &p.sources), 500), clip(&name_refs(&p.a, &p.sources), 1_500)))
+        .collect();
     // 회의를 고를 때는 바로 앞 질문도 함께 본다 ("그중 기한 있는 것만")
     let query = match past.last() {
         Some((q, _)) => format!("{question}\n{q}"),
@@ -209,7 +257,7 @@ fn ask_all_with(
         let past_now = ask::recent_within(&past, budget / 4);
         let talk = past_now.iter().map(|(q, a)| q.chars().count() + a.chars().count()).sum::<usize>()
             + question.chars().count();
-        let (head, sources, recent) = records(&docs, &query, budget.saturating_sub(talk).max(budget / 2), docs.len());
+        let (head, sources, recent) = records(&docs, &query, budget.saturating_sub(talk).max(budget / 2), docs.len(), &keep);
         let mut turns = vec![Turn { user: true, text: &head, cache: true }];
         for (q, a) in &past_now {
             turns.push(Turn::user(q));
@@ -288,7 +336,7 @@ mod tests {
     #[test]
     fn meetings_that_match_the_question_come_first_in_date_order() {
         let d = docs();
-        let (picked, recent) = choose(&d, "VPN 비용 얼마라고 했지?", 40_000);
+        let (picked, recent) = choose(&d, "VPN 비용 얼마라고 했지?", 40_000, &[]);
         assert!(!recent);
         let ids: Vec<&str> = picked.iter().map(|p| d[p.0].id.as_str()).collect();
         assert!(ids.contains(&"d3") && ids.contains(&"d1"), "{ids:?}");
@@ -304,11 +352,11 @@ mod tests {
     #[test]
     fn unrelated_questions_fall_back_to_recent_meetings_and_small_budgets_take_fewer() {
         let d = docs();
-        let (picked, recent) = choose(&d, "zzz", 40_000);
+        let (picked, recent) = choose(&d, "zzz", 40_000, &[]);
         assert!(recent);
         assert_eq!(picked.len(), 4);
         // Groq(4천 자)는 두 회의까지 — 최근 두 회의, 날짜 순
-        let (picked, _) = choose(&d, "zzz", 4_000);
+        let (picked, _) = choose(&d, "zzz", 4_000, &[]);
         let ids: Vec<&str> = picked.iter().map(|p| d[p.0].id.as_str()).collect();
         assert_eq!(ids, ["d3", "d4"]);
     }
@@ -316,7 +364,7 @@ mod tests {
     #[test]
     fn records_are_numbered_with_sources() {
         let d = docs();
-        let (text, sources, _) = records(&d, "VPN 비용", 40_000, 4);
+        let (text, sources, _) = records(&d, "VPN 비용", 40_000, 4, &[]);
         assert!(text.starts_with("다음은 회의 기록 2개입니다 (기록 4개 중 질문과 관련 있어 보이는 회의 위주로 골랐어요)"), "{text}");
         assert!(text.contains("# 회의 1\n회의 제목: 예산 회의\n일시: 2026-10-29 10:00"), "{text}");
         assert!(text.contains("# 회의 2\n회의 제목: 보안 점검 회의") && text.contains("[00:00] 김 팀장: VPN 은 월 12만 원에 도입"), "{text}");
@@ -339,7 +387,7 @@ mod tests {
             t("월 12만 원 [회의 2 · 00:00]");
             Ok(Reply { text: "월 12만 원 [회의 2 · 00:00]".into(), model: "m".into(), ..Default::default() })
         };
-        let past = vec![("VPN 은 언제 도입했어?".to_string(), "11월 [회의 1]".to_string())];
+        let past = vec![Past { q: "VPN 은 언제 도입했어?".into(), a: "11월 [회의 1]".into(), sources: vec![] }];
         let mut got = String::new();
         let a = ask_all_with(
             &mut chat,
@@ -364,6 +412,28 @@ mod tests {
         assert_eq!(seen[3], (true, "비용은?".to_string()));
         // "비용은?" 만으로는 VPN 회의를 고르기 어렵다 — 앞 질문(VPN)도 함께 보고 고른다
         assert!(a.sources.iter().any(|s| s.id == "d3"), "{:?}", a.sources);
+    }
+
+    /// 이어 묻기: 앞 답의 "회의 2" 는 그때 실은 회의 이름으로 바꿔 보내고, 그 회의는 질문과 겹치지 않아도 다시 싣는다
+    #[test]
+    fn follow_ups_name_the_meetings_and_keep_them() {
+        let src = |n: usize, id: &str, title: &str, day: &str| Source { n, id: id.into(), title: title.into(), started_at: format!("{day} 10:00") };
+        let before = vec![src(1, "d1", "예산 회의", "2026-10-29"), src(2, "d3", "보안 점검 회의", "2026-11-12")];
+        assert_eq!(
+            name_refs("월 12만 원 [회의 2 · 00:00], 예산은 회의 1 에서 [회의 1] · 회의 9 · 회의록", &before),
+            "월 12만 원 [보안 점검 회의(2026-11-12) · 00:00], 예산은 예산 회의(2026-10-29) 에서 [예산 회의(2026-10-29)] · 회의 9 · 회의록"
+        );
+        let mut seen: Vec<String> = Vec::new();
+        let mut chat = |_: &str, turns: &[Turn], _: &mut dyn FnMut(&str)| {
+            seen = turns.iter().map(|t| t.text.to_string()).collect();
+            Ok(Reply { text: "김 팀장".into(), ..Default::default() })
+        };
+        let past = vec![Past { q: "VPN 얘기 어디서 했지?".into(), a: "[회의 2 · 00:00] 에서".into(), sources: before.clone() }];
+        let a = ask_all_with(&mut chat, "anthropic", 40_000, &docs(), "회의 2의 담당자는?", &past, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
+            .unwrap();
+        assert!(a.sources.iter().any(|s| s.id == "d3"), "앞 답에 실은 회의는 다시 {:?}", a.sources);
+        assert_eq!(seen[2], "[보안 점검 회의(2026-11-12) · 00:00] 에서", "앞 답의 번호 → 회의 이름");
+        assert_eq!(seen[3], "보안 점검 회의(2026-11-12)의 담당자는?", "새 질문의 번호도 앞 답의 번호로 읽는다");
     }
 
     #[test]

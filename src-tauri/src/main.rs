@@ -1483,7 +1483,7 @@ async fn ask_all(
     question: String,
     token: u64,
     days: Option<u32>,
-    history: Vec<(String, String)>,
+    history: Vec<ask_all::Past>,
 ) -> CmdResult<AskAllDto> {
     let st = app.state::<AppState>();
     st.busy_ops.fetch_add(1, Ordering::SeqCst);

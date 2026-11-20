@@ -10,7 +10,7 @@ const T = window.__TAURI__;
 const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
   'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
-const AFTER_CMDS = new Set(['summarize', 'ask_meeting']);
+const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
   if (AFTER_CMDS.has(cmd)) return orderedChain.then(() => T.core.invoke(cmd, args));
@@ -2918,7 +2918,9 @@ async function askAll(question) {
   S.allTimer = setInterval(renderAllPending, 1000);
   renderAllAsk();
   try {
-    const history = S.allQa.slice(-4).map((x) => [x.q, x.a]);
+    // 앞선 질문 · 답과 그때 실은 회의 — 앱이 답의 "회의 2" 를 회의 이름으로 바꿔 보내고 그 회의들을 다시 싣는다
+    // (물을 때마다 회의를 다시 골라 번호가 바뀐다)
+    const history = S.allQa.slice(-4).map((x) => ({ q: x.q, a: x.a, sources: x.sources }));
     const r = await api.invoke('ask_all', { question: q, token: my.token, days: days || null, history });
     S.allQa.push({ q, a: r.a, sources: r.sources || [], considered: r.considered, recent: r.recent, at: r.at, model: r.model, days });
   } catch (e) {
