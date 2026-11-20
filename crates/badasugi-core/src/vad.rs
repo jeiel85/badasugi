@@ -180,6 +180,11 @@ impl Segmenter {
         }
     }
 
+    /// 말하는 중인 발화 → (시작 위치, 지금까지 들린 소리). 말하는 중이 아니면 없음 (말하는 동안 미리 보기용)
+    pub fn current(&self) -> Option<(u64, &[f32])> {
+        self.in_speech.then_some((self.seg_start, &self.seg[..]))
+    }
+
     /// 지금까지 처리한 전체 길이 (샘플)
     pub fn position(&self) -> u64 {
         self.total + self.pending.len() as u64

@@ -236,6 +236,7 @@ pub fn test_connection(base_url: &str, api_key: &str, model: &str) -> Result<()>
         prompt: "",
         keywords: &[],
         context: "",
+        preview: None,
     };
     t.call(&wav, &req).map(|_| ())
 }
@@ -251,6 +252,7 @@ mod tests {
             prompt: "회의 녹취록입니다. 주요 용어: OKPOS, 스캔프리.",
             keywords,
             context,
+            preview: None,
         }
     }
 
@@ -289,6 +291,7 @@ mod tests {
             prompt: " ",
             keywords: &[],
             context: "",
+            preview: None,
         };
         assert_eq!(names(&form_fields("gpt-transcribe", &r)), ["model", "response_format", "temperature"]);
     }

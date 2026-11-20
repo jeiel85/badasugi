@@ -88,6 +88,7 @@ fn main() -> anyhow::Result<()> {
         keywords: Vec::new(),
         record_path: None,
         known_voices: Vec::new(),
+        preview: false,
     };
 
     let t0 = Instant::now();
