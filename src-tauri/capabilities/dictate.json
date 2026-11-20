@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dictate",
+  "description": "말로 입력 알림 창 권한 (상태를 받기만 한다)",
+  "windows": ["dictate"],
+  "permissions": ["core:default"]
+}

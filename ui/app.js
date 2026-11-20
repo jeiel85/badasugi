@@ -4209,6 +4209,10 @@ function renderSettings() {
   $('#opt-autoupdate').checked = s.autoUpdate;
   $('#opt-meet').checked = !!s.meetingAlert;
   renderMeetApps();
+  $('#opt-dictate').checked = !!s.dictation;
+  $('#opt-dictate-insert').value = s.dictationInsert === 'type' ? 'type' : 'paste';
+  $('#opt-dictate-polish').checked = !!s.dictationPolish;
+  renderDictate();
   $('#opt-watch').checked = !!s.watchFolder;
   $('#opt-watch-sum').checked = s.watchSummarize !== false;
   renderWatch();
@@ -4228,6 +4232,11 @@ function renderMeetApps() {
     b.setAttribute('aria-pressed', String(on.has(id)));
     return b;
   }));
+}
+// 설정 › 말로 입력: 켰을 때만 단축키 · 넣는 방법 · AI 다듬기
+function renderDictate() {
+  const on = !!S.settings?.dictation;
+  for (const id of ['dictate-hotkey-row', 'dictate-insert-row', 'dictate-polish-row', 'dictate-desc']) $(`#${id}`).hidden = !on;
 }
 // 설정 › 녹음 폴더 지켜보기: 폴더 · 지금 상태 (받아 적는 중 · 기다리는 파일 · 받아 적은 파일)
 const shortPath = (p) => {
@@ -4533,6 +4542,24 @@ bind('opt-meet', (t) => {
   renderMeetApps();
   if (t.checked) toast(`회의 앱이 마이크를 쓰기 시작하면 시계 위에서 물어볼게요${S.app?.autostart ? '' : '\n받아쓰기가 켜져 있어야 해요 — Windows 시작 시 실행도 켜 두면 놓치지 않아요'}`, '', 6000);
 });
+// 말로 입력 켜기 — 단축키를 다른 프로그램이 쓰고 있으면 앱이 켜지 않고 알려 준다 (바로 저장해 결과를 본다)
+$('#opt-dictate').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  S.settings.dictation = on;
+  renderDictate();
+  try {
+    await api.invoke('save_settings', { settings: S.settings });
+    const key = S.settings.dictationHotkey;
+    if (on) toast(key ? `${key} 를 누른 채 말하고 떼면 지금 커서가 있는 곳에 입력해요` : '말로 입력 단축키를 정해 주세요', '', 6000);
+  } catch (err) {
+    S.settings.dictation = !on;
+    e.target.checked = !on;
+    renderDictate();
+    toast(String(err), 'error');
+  }
+});
+bind('opt-dictate-insert', (t) => (S.settings.dictationInsert = t.value));
+bind('opt-dictate-polish', (t) => (S.settings.dictationPolish = t.checked));
 $('#opt-watch').addEventListener('change', async (e) => {
   const on = e.target.checked;
   // 처음 켤 때는 지켜볼 폴더부터 고른다 (고르지 않으면 켜지 않는다)
@@ -4627,6 +4654,7 @@ const keycaps = (keys) => keys.map((k) => `<kbd>${esc(k)}</kbd>`).join('<i>+</i>
 const HOTKEYS = [
   { key: 'hotkey', label: '녹음', btn: $('#opt-hotkey'), desc: $('#hotkey-desc'), text: '어디서든 녹음을 시작하고 멈춰요' },
   { key: 'starHotkey', label: '중요 표시', btn: $('#opt-star-hotkey'), desc: $('#star-hotkey-desc'), text: '지금 말하는 곳에 ⭐ · 요약이 꼭 다뤄요' },
+  { key: 'dictationHotkey', label: '말로 입력', btn: $('#opt-dictate-hotkey'), desc: $('#dictate-hotkey-desc'), text: '누른 채 말하기 · 톡 누르면 손을 떼고 말해도 돼요' },
 ];
 function renderHotkeyField(f, note) {
   f.desc.classList.toggle('warn', !!note);
@@ -4911,6 +4939,7 @@ function createMock() {
       saveAudio: false, unloadWhenIdle: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
       meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
       watchFolder: false, watchDir: '', watchSummarize: true,
+      dictation: false, dictationHotkey: 'Ctrl+Alt+Space', dictationInsert: 'paste', dictationPolish: false,
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '', template: 'meeting', templates: [] },
       translate: { lang: 'ko', live: false },
