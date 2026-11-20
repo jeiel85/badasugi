@@ -4,6 +4,7 @@
 mod ant;
 mod ask;
 mod ask_all;
+mod calendar;
 mod dictate;
 mod inject;
 mod export;
@@ -713,6 +714,9 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
                     spawn_live_translation(app.clone(), id);
                 }
             }
+            if file.is_none() {
+                apply_calendar(app);
+            }
             Ok(())
         }
         Err(e) => {
@@ -723,6 +727,47 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
             Err(e)
         }
     }
+}
+
+/// 녹음을 시작했다 — 지금 시각의 Outlook 일정이 있으면 그 제목을 회의 제목으로, 참석자를 화자 이름 후보로
+/// (설정에서 켰을 때만 · Outlook 을 기다리는 동안 녹음은 이미 돌고 있다)
+fn apply_calendar(app: &AppHandle) {
+    if !app.state::<AppState>().settings.lock().calendar {
+        return;
+    }
+    let Some(id) = app.state::<AppState>().store.lock().current.as_ref().map(|d| d.id.clone()) else {
+        return;
+    };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let Some(ev) = calendar::current(&app) else {
+            return;
+        };
+        let applied = {
+            let st = app.state::<AppState>();
+            let mut store = st.store.lock();
+            match store.current.as_mut().filter(|d| d.id == id) {
+                // 사람이 이미 제목을 고쳤으면 제목은 두고 참석자만
+                Some(d) => {
+                    if d.auto_title && !ev.subject.is_empty() {
+                        d.title = ev.subject.chars().take(80).collect();
+                        d.auto_title = false;
+                    }
+                    d.attendees = ev.attendees.clone();
+                    store.mark_dirty();
+                    store.current.as_ref().map(|d| (d.title.clone(), d.auto_title))
+                }
+                None => None,
+            }
+        };
+        if let Some((title, auto_title)) = applied {
+            log::info!("일정에서 회의 제목을 가져옴 (참석자 {}명)", ev.attendees.len());
+            let _ = app.emit(
+                "bd://calendar",
+                serde_json::json!({ "id": id, "title": title, "autoTitle": auto_title, "attendees": ev.attendees, "subject": ev.subject }),
+            );
+        }
+    });
 }
 
 pub(crate) fn stop_recording_inner(app: &AppHandle) {
@@ -2473,6 +2518,7 @@ fn main() {
             });
             app.manage(Updates::default());
             app.manage(meeting::Meet::new());
+            app.manage(calendar::Calendar::new());
             app.manage(VoiceBook::load(config_dir_for_usage.join("voices.json")));
             app.manage(usage_book::UsageBook::load(config_dir_for_usage.join("usage.json")));
             app.manage(status::Status::new(tray_base));
@@ -2588,6 +2634,7 @@ fn main() {
             meeting::meet_ready,
             meeting::meet_answer,
             watch::watch_status,
+            calendar::calendar_status,
             dictate::dictate_state,
             dictate::dictate_ready,
             get_usage,

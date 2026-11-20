@@ -356,11 +356,13 @@ fn registry_users() -> Vec<MicUser> {
 
 pub struct Meet {
     det: Mutex<Detector>,
+    /// 지금 회의에 맞는 Outlook 일정 제목 (일정에서 가져오기를 켰을 때 · 알림에 보인다)
+    event: Mutex<Option<String>>,
 }
 
 impl Meet {
     pub fn new() -> Self {
-        Self { det: Mutex::new(Detector::default()) }
+        Self { det: Mutex::new(Detector::default()), event: Mutex::new(None) }
     }
 }
 
@@ -400,6 +402,10 @@ pub fn spawn(app: AppHandle) {
             had.then_some(None)
         };
         if let Some(p) = change {
+            // 받아쓸지 묻는 알림에는 지금 일정의 제목을 함께 (Outlook 을 기다리는 동안은 알림을 미룬다 — 몇 초 안)
+            if matches!(p, Some(Prompt::Start { .. })) {
+                *meet.event.lock() = crate::calendar::current(&app).map(|e| e.subject).filter(|s| !s.is_empty());
+            }
             show(&app, p.as_ref());
         }
     });
@@ -415,6 +421,8 @@ pub struct MeetView {
     /// 지금 녹음한 시간 (ms)
     elapsed_ms: u64,
     theme: String,
+    /// 지금 회의에 맞는 Outlook 일정 제목
+    event: Option<String>,
 }
 
 /// 알림에서 녹음을 시작할 때 받을 소리 — 마이크만 고른 상태면 상대방 목소리(PC 소리)도 함께
@@ -429,12 +437,15 @@ fn view(app: &AppHandle) -> MeetView {
     let st = app.state::<AppState>();
     let s = st.settings.lock().clone();
     let elapsed_ms = st.rec_started.lock().map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
-    let prompt = app.state::<Meet>().det.lock().prompt().cloned();
+    let meet = app.state::<Meet>();
+    let prompt = meet.det.lock().prompt().cloned();
+    let event = meet.event.lock().clone();
     MeetView {
         prompt,
         source: meeting_source(s.source),
         elapsed_ms,
         theme: s.theme,
+        event,
     }
 }
 

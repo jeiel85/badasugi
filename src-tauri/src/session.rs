@@ -53,6 +53,9 @@ pub struct SessionDoc {
     pub speaker_map: BTreeMap<u32, u32>,
     /// 자동으로 붙인 제목이면 요약 때 AI 가 제안한 제목으로 바꾼다
     pub auto_title: bool,
+    /// 일정(Outlook)에서 가져온 참석자 — 화자 이름을 바꿀 때 고를 수 있게
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attendees: Vec<String>,
     /// 파일 받아쓰기라면 원본 파일 이름
     pub source_file: Option<String>,
     /// 파일 받아쓰기라면 원본 파일 전체 경로 (다시 듣기용)

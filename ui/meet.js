@@ -33,12 +33,13 @@ function render(v) {
   if (!p) return false;
   let title, desc, acts;
   if (p.kind === 'start') {
-    title = '회의가 시작된 것 같아요';
-    desc = `${p.app}에서 마이크를 쓰고 있어요 · ${SOURCE_BY[v.source] || SOURCE_BY.mic} 받아 적어요`;
+    // Outlook 일정에서 가져오기를 켰으면 지금 일정의 제목을 보인다
+    title = v.event || '회의가 시작된 것 같아요';
+    desc = `${v.event ? '회의가 시작된 것 같아요 · ' : ''}${p.app}에서 마이크를 쓰고 있어요 · ${SOURCE_BY[v.source] || SOURCE_BY.mic} 받아 적어요`;
     acts = [['start', '받아쓰기 시작'], ['close', '이번엔 안 함']];
   } else if (p.kind === 'started') {
     title = '받아 적고 있어요';
-    desc = '회의가 끝나면 멈출지 물어볼게요';
+    desc = v.event ? `${v.event} · 회의가 끝나면 멈출지 물어볼게요` : '회의가 끝나면 멈출지 물어볼게요';
     acts = [['open', '창 열기']];
   } else {
     title = '회의가 끝난 것 같아요';
@@ -100,6 +101,7 @@ function mockApi() {
     source: q.get('source') || 'both',
     elapsedMs: 3723000,
     theme: q.get('theme') || 'system',
+    event: q.get('event') || null,
   });
   return {
     listen: async (_ev, h) => { handler = h; },
