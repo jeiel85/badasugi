@@ -3,6 +3,7 @@
 
 mod ant;
 mod ask;
+mod ask_all;
 mod logging;
 mod meeting;
 mod power;
@@ -1463,6 +1464,95 @@ async fn ask_meeting(
     Ok(item)
 }
 
+/// 모든 회의에 묻기 → 답 (기록에 남기지 않는다). `days` 가 있으면 최근 그 날 수 안의 회의만, `history` 는 이 대화의
+/// 앞선 질문 · 답. 답은 받는 대로 `bd://ask-all-progress` 로 알린다: { token, delta | restart | waitSecs }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AskAllDto {
+    a: String,
+    model: String,
+    sources: Vec<ask_all::Source>,
+    considered: usize,
+    recent: bool,
+    at: String,
+}
+
+#[tauri::command]
+async fn ask_all(
+    app: AppHandle,
+    question: String,
+    token: u64,
+    days: Option<u32>,
+    history: Vec<(String, String)>,
+) -> CmdResult<AskAllDto> {
+    let st = app.state::<AppState>();
+    st.busy_ops.fetch_add(1, Ordering::SeqCst);
+    let _busy = BusyGuard(&st.busy_ops);
+    let (cfg, dir, current) = {
+        let store = st.store.lock();
+        (st.settings.lock().summary.clone(), store.dir.clone(), store.current_doc())
+    };
+    let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
+    let (app2, cancel2) = (app.clone(), cancel.clone());
+    let mut on_event = move |e: ask::Event| {
+        if cancel2.load(Ordering::SeqCst) {
+            return;
+        }
+        let payload = match e {
+            ask::Event::Text(t) => serde_json::json!({ "token": token, "delta": t }),
+            ask::Event::Restart => serde_json::json!({ "token": token, "restart": true }),
+            ask::Event::Wait(w) => serde_json::json!({ "token": token, "waitSecs": w }),
+        };
+        let _ = app2.emit("bd://ask-all-progress", payload);
+    };
+    let app3 = app.clone();
+    let on_usage = move |provider: &str, r: &summary::Reply| {
+        app3.state::<usage_book::UsageBook>().summary(provider, &r.model, r.in_tokens, r.out_tokens, r.cache_write, r.cache_read);
+    };
+    // 기록을 모두 읽는 일이라 기록 잠금 밖에서 (녹음 중 저장이 기다리지 않게). 녹음 중인 기록은 앱이 들고 있는 것으로
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let cancel = cancel.clone();
+        let question = question.clone();
+        let _ = std::thread::Builder::new().name("bd-ask-all".into()).spawn(move || {
+            let mut docs = SessionStore::new(dir).all_docs();
+            if let Some(cur) = current {
+                docs.retain(|d| d.id != cur.id);
+                docs.insert(0, cur);
+            }
+            if let Some(n) = days {
+                let from = (chrono::Local::now().date_naive() - chrono::Duration::days(n as i64)).format("%Y-%m-%d").to_string();
+                docs.retain(|d| d.started_at.get(..10).is_some_and(|day| day >= from.as_str()));
+            }
+            let _ = tx.send(ask_all::ask_all(&cfg, &docs, &question, &history, &mut on_event, &on_usage, &cancel));
+        });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(r) => return r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::SeqCst) => {
+                return Err(anyhow::Error::new(summary::AskCancelled))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow::anyhow!("답을 받다가 문제가 생겼어요"))
+            }
+        }
+    })
+    .await;
+    st.summary_cancel.lock().remove(&token);
+    app.state::<usage_book::UsageBook>().save();
+    let a = res.map_err(err)?.map_err(err)?;
+    Ok(AskAllDto {
+        a: a.text,
+        model: a.model,
+        sources: a.sources,
+        considered: a.considered,
+        recent: a.recent,
+        at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+    })
+}
+
 #[tauri::command]
 fn cancel_ask(app: AppHandle, token: u64) {
     log::info!("묻기 멈춤");
@@ -2119,6 +2209,7 @@ fn main() {
             summarize,
             cancel_summary,
             ask_meeting,
+            ask_all,
             cancel_ask,
             summary_templates,
             delete_qa,

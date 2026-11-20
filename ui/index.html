@@ -277,11 +277,27 @@
           <button class="icon-btn" data-close title="닫기"><svg><use href="#i-x"/></svg></button>
         </div>
       </div>
-      <div class="h-search">
+      <!-- 기록 목록 · 모든 회의에 묻기 -->
+      <nav class="seg h-tabs" id="h-tabs" role="tablist" aria-label="회의 기록">
+        <button role="tab" data-hmode="list" class="on">기록 · 찾기</button>
+        <button role="tab" data-hmode="ask">모든 회의에 묻기</button>
+      </nav>
+      <div class="h-search" data-hpage="list">
         <svg><use href="#i-search"/></svg>
         <input id="history-q" placeholder="제목·내용으로 찾기" spellcheck="false" autocomplete="off" />
       </div>
-      <div class="panel-body" id="history-list"></div>
+      <div class="panel-body" id="history-list" data-hpage="list"></div>
+      <div class="hask" data-hpage="ask" hidden>
+        <div class="hask-range" id="hask-range" role="group" aria-label="물어볼 기간">
+          <span>기간</span>
+          <button data-days="7">1주</button><button data-days="30">1달</button><button data-days="90">3달</button><button data-days="0" class="on">전체</button>
+        </div>
+        <div class="ask-list hask-list" id="hask-list" aria-live="polite"></div>
+        <form class="ask-foot" id="hask-form">
+          <textarea id="hask-input" rows="1" spellcheck="false" aria-label="모든 회의에 물어볼 내용" placeholder="모든 회의에 물어보세요"></textarea>
+          <button class="ask-send" id="hask-send" type="submit" title="보내기 (Enter)"><svg><use href="#i-send"/></svg></button>
+        </form>
+      </div>
     </aside>
 
     <!-- 설정 패널 -->

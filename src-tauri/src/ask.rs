@@ -50,13 +50,13 @@ pub struct Answer {
 }
 
 /// 앞에 두는 회의 기록 덩어리
-struct Context {
-    text: String,
+pub(crate) struct Context {
+    pub(crate) text: String,
     partial: bool,
 }
 
 /// 두 글자 묶음 (글자 · 숫자가 이어진 곳 안에서, 소문자로) — 한국어는 조사가 붙어도 앞 두 글자가 겹친다
-fn grams(s: &str) -> HashSet<String> {
+pub(crate) fn grams(s: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     for word in s.split(|c: char| !c.is_alphanumeric()) {
         let chars: Vec<char> = word.to_lowercase().chars().collect();
@@ -183,7 +183,7 @@ fn catch_up(doc: &SessionDoc, mins: u32) -> Result<CatchUp> {
 }
 
 /// 녹취록이 길어 골라 실을 때 무엇에 맞추나
-enum Focus<'a> {
+pub(crate) enum Focus<'a> {
     /// 질문 — 질문과 겹치는 말이 많은 곳과 그 앞뒤 위주로
     Question(&'a str),
     /// 따라잡기 — 끝(가장 최근 말)을 먼저. `from` 이 있으면 녹취록이 그 시각부터라고 밝힌다(앞부분은 일부러 뺐다)
@@ -191,7 +191,7 @@ enum Focus<'a> {
 }
 
 /// 회의 기록 덩어리. 다 실으면 `budget` 글자를 넘을 때 녹취록은 `focus` 에 맞춰 골라 싣는다
-fn context(doc: &SessionDoc, focus: &Focus, budget: usize) -> Context {
+pub(crate) fn context(doc: &SessionDoc, focus: &Focus, budget: usize) -> Context {
     let (query, from, recent) = match *focus {
         Focus::Question(q) => (q, None, false),
         Focus::Recent { from } => ("", from, true),
@@ -276,7 +276,7 @@ fn clip(s: &str, n: usize) -> String {
 
 /// 앞선 질문 · 답 중 최근 것부터 합쳐 `cap` 글자 안쪽까지 (오래된 것부터 차례로). 가장 최근 답은 넘치면
 /// 잘라서라도 넣는다 — 이어 묻는 말("그건 누가 해?")은 바로 앞 답을 가리키기 쉽다
-fn recent_within(past: &[(String, String)], cap: usize) -> Vec<(String, String)> {
+pub(crate) fn recent_within(past: &[(String, String)], cap: usize) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut used = 0;
     for (q, a) in past.iter().rev() {

@@ -16,6 +16,8 @@ const FILES: &[(&str, &str)] = &[
     ("merge_final.md", include_str!("../prompts/merge_final.md")),
     ("shrink_note.md", include_str!("../prompts/shrink_note.md")),
     ("ask.md", include_str!("../prompts/ask.md")),
+    // 모든 회의에 묻기 — 여러 회의를 번호로 실어 보낸다. 근거는 [회의 2 · 12:34] (화면이 그 회의의 그 문장으로)
+    ("ask_all.md", include_str!("../prompts/ask_all.md")),
     // 지금까지 따라잡기 — 녹음 중 "지난 10분"만 실어 묻는 지시 (사용자 글). `{범위}` 자리는 ask.rs 가
     // "지난 10분([32:10]부터) 동안" · "회의 처음부터 지금까지" 로 채운다. 지금 하는 얘기를 맨 앞에 —
     // 늦게 들어온 사람이 바로 대화에 끼어들 수 있게
@@ -119,6 +121,10 @@ prompt!(
 prompt!(
     /// 회의에 묻기
     ask = "ask.md"
+);
+prompt!(
+    /// 모든 회의에 묻기
+    ask_all = "ask_all.md"
 );
 prompt!(
     /// 지금까지 따라잡기 — 실린 구간을 정리하라는 지시 (사용자 글, `{범위}` 자리를 채워 보낸다)
