@@ -725,7 +725,7 @@ pub fn summarize(
     };
     // 중요 표시 ⭐ 한 문장은 녹취록에 ⭐ 를 붙여 보낸다 (요약이 꼭 다루고 그 불릿에 ⭐)
     let fin = Format::of(tpl);
-    let raw = run_summary(&mut guarded, progress, &on_reply, &fin, &head, &doc.to_ai_text(), chunk_budget(&provider))?;
+    let raw = run_summary(&mut guarded, progress, &on_reply, &fin, &head, &doc.to_ai_text(true), chunk_budget(&provider))?;
     if raw.trim().is_empty() {
         bail!("요약 결과가 비어 있습니다");
     }

@@ -196,6 +196,10 @@ fn replace_default_speakers(text: &str, map: &BTreeMap<u32, String>) -> String {
     out
 }
 
+/// AI 에 보내는 녹취록([`SessionDoc::to_ai_text`])에서 한 사람이 길게 이어 말한 문단은, 앞에 적은 시각에서
+/// 이만큼 지난 문장 앞에 시각을 다시 적는다. 근거 시각이 실제 문장보다 이보다 많이 앞서지 않는다
+pub const AI_TIME_EVERY_MS: u64 = 10_000;
+
 pub fn fmt_time(ms: u64) -> String {
     let s = ms / 1000;
     if s >= 3600 {
@@ -863,28 +867,37 @@ impl SessionDoc {
             .collect()
     }
 
-    /// 요약에 보내는 녹취록: [`to_text`](Self::to_text) 와 같되 중요 표시 ⭐ 한 문장 앞에 `⭐ ` 를 붙인다
-    /// (메모 · 코멘트 글은 보내지 않는다 — 표시한 곳만 알린다)
-    pub fn to_ai_text(&self) -> String {
-        let starred = self.starred_ids();
-        if starred.is_empty() {
-            return self.to_text();
-        }
-        let texts: HashMap<u64, &str> = self.utterances.iter().map(|u| (u.id, u.text.as_str())).collect();
+    /// AI(요약 · 회의에 묻기 · 따라잡기)에 보내는 녹취록: [`to_text`](Self::to_text) 처럼 문단마다
+    /// "[시각] 화자: 글" 한 줄이되, 한 사람이 길게 이어 말한 문단은 앞에 적은 시각에서
+    /// [`AI_TIME_EVERY_MS`] 이상 지난 문장 앞에도 `[시각]` 을 다시 적는다.
+    ///
+    /// 모델은 근거 시각을 녹취록에 적힌 것 가운데서 고르므로, 문단 첫 시각만 있으면 문단 중간 문장의 근거가
+    /// 실제보다 수십 초 앞을 가리킨다 (2026-11-19 회의: [20:12] 에 시작한 문단 속 [20:39] 문장의 근거가
+    /// [20:12] → 눌러 보면 "감사합니다."). 적는 시각은 그 문장이 시작한 초라, 화면에서 누르면 그 문장으로 간다.
+    /// 문장(발화)마다 다 적으면 짧은 발화가 많아 글이 30% 남짓 늘어 간격을 둔다 (실제 회의 두 개에서 5% 안팎).
+    ///
+    /// `starred`: 중요 표시 ⭐ 한 문장 앞에 `⭐ ` 를 붙인다 (요약만 — 메모 · 코멘트 글은 보내지 않고 표시한 곳만 알린다)
+    pub fn to_ai_text(&self, starred: bool) -> String {
+        let stars = if starred { self.starred_ids() } else { HashSet::new() };
         let mut s = String::new();
+        // 문단은 utterances 에서 이어진 문장들이다 — 차례로 짚는다 (id 로 찾지 않는다)
+        let mut i = 0;
         for (spk, start, _, _, ids) in self.paragraphs() {
-            let body: Vec<String> = ids
-                .iter()
-                .map(|id| {
-                    let t = texts.get(id).copied().unwrap_or_default();
-                    if starred.contains(id) {
-                        format!("⭐ {t}")
-                    } else {
-                        t.to_string()
-                    }
-                })
-                .collect();
-            s.push_str(&format!("[{}] {}: {}\n", fmt_time(start), self.speaker_name(spk), body.join(" ")));
+            s.push_str(&format!("[{}] {}:", fmt_time(start), self.speaker_name(spk)));
+            let mut last = start;
+            for u in &self.utterances[i..i + ids.len()] {
+                s.push(' ');
+                if u.start_ms >= last + AI_TIME_EVERY_MS && !u.text.trim().is_empty() {
+                    s.push_str(&format!("[{}] ", fmt_time(u.start_ms)));
+                    last = u.start_ms;
+                }
+                if stars.contains(&u.id) {
+                    s.push_str("⭐ ");
+                }
+                s.push_str(&u.text);
+            }
+            i += ids.len();
+            s.push('\n');
         }
         s
     }
@@ -1805,10 +1818,12 @@ mod tests {
         assert_eq!(d.starred_ids(), HashSet::from([1, 2]));
         // 요약에는 표시한 문장 앞에만 ⭐ (메모 글은 보내지 않는다)
         assert_eq!(
-            d.to_ai_text(),
+            d.to_ai_text(true),
             "[00:00] 화자 1: 문장 0 ⭐ 문장 1\n[00:30] 화자 2: ⭐ 문장 2\n"
         );
-        assert!(!d.to_ai_text().contains("가격"));
+        assert!(!d.to_ai_text(true).contains("가격"));
+        // 회의에 묻기에는 ⭐ 를 보내지 않는다
+        assert_eq!(d.to_ai_text(false), d.to_text());
         // 내보내기 · 텍스트 복사는 그대로
         assert!(!d.to_text().contains('⭐'));
         // Markdown 회의록: 문장 아래에 ⭐ 로 (글이 없으면 "중요 표시")
@@ -1818,7 +1833,53 @@ mod tests {
         assert!(md.contains("> 💬 `00:00` 보통 코멘트"));
         // 표시가 없으면 to_text 와 같다
         d.notes = "[00:06] 보통".into();
-        assert_eq!(d.to_ai_text(), d.to_text());
+        assert_eq!(d.to_ai_text(true), d.to_text());
+    }
+
+    /// 한 사람이 길게 이어 말한 문단은 AI 에 보내는 녹취록에서 문단 중간에도 [시각] 이 붙는다 —
+    /// 요약 · 묻기의 근거 시각이 문단 첫 시각(실제 문장보다 수십 초 앞)으로 가지 않게
+    #[test]
+    fn long_paragraphs_carry_times_inside_for_the_ai() {
+        let mut d = SessionDoc::new("로컬".into());
+        // 화자 1 이 0~40초 쉬지 않고(앞 문장 끝에서 15초 안) 이어 말한다 → 한 문단. 4 는 빈 문장, 6 은 ⭐
+        d.utterances = vec![
+            u(0, 0, 0),
+            u(1, 3_000, 0),
+            u(2, 9_900, 0),   // 첫 시각에서 9.9초 — 아직
+            u(3, 12_500, 0),  // 12.5초 → [00:12]
+            u(4, 23_000, 0),  // 빈 문장에는 붙이지 않는다
+            u(5, 24_000, 0),  // 앞 시각(12.5초)에서 11.5초 → [00:24]
+            u(6, 30_000, 0),  // 6초 — 아직
+            u(7, 34_500, 0),  // 10.5초 → [00:34]
+            u(8, 60_000, 1),  // 다른 화자 — 새 문단
+            u(9, 65_000, 0),
+        ];
+        d.utterances[4].text = " ".into();
+        d.notes = "[00:30] ⭐".into();
+        assert_eq!(d.starred_ids(), HashSet::from([6]));
+        assert_eq!(
+            d.to_ai_text(true),
+            "[00:00] 화자 1: 문장 0 문장 1 문장 2 [00:12] 문장 3   [00:24] 문장 5 ⭐ 문장 6 [00:34] 문장 7\n\
+             [01:00] 화자 2: 문장 8\n\
+             [01:05] 화자 1: 문장 9\n"
+        );
+        assert_eq!(
+            d.to_ai_text(false),
+            "[00:00] 화자 1: 문장 0 문장 1 문장 2 [00:12] 문장 3   [00:24] 문장 5 문장 6 [00:34] 문장 7\n\
+             [01:00] 화자 2: 문장 8\n\
+             [01:05] 화자 1: 문장 9\n"
+        );
+        // 내보내기 · 텍스트 복사는 문단 첫 시각만 그대로
+        assert_eq!(
+            d.to_text(),
+            "[00:00] 화자 1: 문장 0 문장 1 문장 2 문장 3   문장 5 문장 6 문장 7\n[01:00] 화자 2: 문장 8\n[01:05] 화자 1: 문장 9\n"
+        );
+        // 문단 중간의 시각은 그 문장이 시작한 초 — 화면(app.js anchorOf)과 같은 규칙으로 찾으면 그 문장이 나온다
+        // (메모 코멘트를 문장에 붙이는 anchored_comments 가 같은 규칙)
+        for (at, id) in [(12_000, 3), (24_000, 5), (34_000, 7)] {
+            d.notes = format!("[{}] 확인", fmt_time(at));
+            assert_eq!(d.anchored_comments()[0].1, Some(id), "{}", fmt_time(at));
+        }
     }
 
     #[test]
