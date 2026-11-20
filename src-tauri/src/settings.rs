@@ -66,8 +66,26 @@ pub struct Settings {
     pub full_bounds: Option<[i32; 4]>,
 
     pub summary: SummarySettings,
+    /// 번역 (요약에 쓰는 AI 로)
+    pub translate: TranslateSettings,
     /// 사용량 금액을 원화로 보여 줄 때 쓰는 환율 (1달러 = ? 원)
     pub usd_krw: f64,
+}
+
+/// 번역 — 요약 · 묻기에 쓰는 AI 제공자로 (translate.rs)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TranslateSettings {
+    /// 번역할 언어 (translate::LANGS 의 코드)
+    pub lang: String,
+    /// 녹음 중에 확정된 문장을 바로 번역 (API 면 몇 문장마다 요청이 간다 — 기본 꺼짐)
+    pub live: bool,
+}
+
+impl Default for TranslateSettings {
+    fn default() -> Self {
+        Self { lang: "ko".into(), live: false }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +173,7 @@ impl Default for Settings {
             mini_docked: true,
             full_bounds: None,
             summary: SummarySettings::default(),
+            translate: TranslateSettings::default(),
             usd_krw: DEFAULT_USD_KRW,
         }
     }

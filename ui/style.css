@@ -978,3 +978,22 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .pd-turn .pd-t { margin-left: 7pt; }
 .pd-sp { margin: 0 0 3pt; }
 .pd-note { margin: 0 0 4pt 6pt; padding: 1pt 0 1pt 7pt; border-left: 2.5px solid #c9c9d6; color: #4a4a57; font-size: 9pt; break-inside: avoid; }
+.pd-tr { margin: -1pt 0 4pt; color: #3f5a9e; font-size: 9.5pt; }
+
+/* ───────────── 번역 (translate.rs) ───────────── */
+/* 녹취록 문단 아래 번역 — 원문보다 한 단계 작고 흐리게 */
+.g-tr { margin: 2px 0 2px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); color: var(--text-2); font-size: calc(var(--fs, 15px) - 1.5px); line-height: 1.6; word-break: keep-all; overflow-wrap: anywhere; user-select: text; }
+.g-tr.wait { color: var(--muted); font-style: normal; }
+.pop-tr { width: 290px; padding: 12px 14px; }
+.pop-tr .tr-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13.5px; font-weight: 700; }
+.pop-tr .tr-head select { width: auto; }
+.pop-tr .tr-status { margin: 8px 0 6px; font-size: 12.5px; color: var(--text-2); }
+.pop-tr .tr-bar { height: 4px; border-radius: 99px; background: var(--sunken); overflow: hidden; margin-bottom: 8px; }
+.pop-tr .tr-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+.pop-tr .tr-show { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2); margin: 4px 0 10px; cursor: pointer; }
+.pop-tr .tr-acts { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pop-tr .tr-acts button { width: auto; display: inline-flex; padding: 6px 12px; }
+.pop-tr .tr-acts .link { padding: 6px 2px; }
+.pop-tr .tr-note { margin-top: 9px; line-height: 1.45; }
+#pop-save .save-tr { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--line); font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+#pop-save .save-tr .seg button { width: auto; display: block; padding: 4px 10px; text-align: center; }

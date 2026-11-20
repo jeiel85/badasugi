@@ -8,9 +8,9 @@ const T = window.__TAURI__;
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
 // (요약 보내기도 기록을 읽는다 — 요약을 고치고 바로 보내도 고친 요약으로)
 const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
-  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html']);
+  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html', 'clear_translation']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
-const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all']);
+const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all', 'translate_session']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
   if (AFTER_CMDS.has(cmd)) return orderedChain.then(() => T.core.invoke(cmd, args));
@@ -96,6 +96,11 @@ const S = {
   spkDoc: null,
   spkPeek: null,
   spkCur: null,
+  // 번역: 녹취록에 보이기 · 번역 팝오버에서 고른 언어 · 돌고 있는 번역 { id, token, done, total, waitSecs } · 내보내기 녹취록
+  trShow: true,
+  trLang: null,
+  trJob: null,
+  saveTr: null,
 };
 const doc = () => (S.live ? S.liveDoc : S.viewDoc);
 
@@ -383,6 +388,7 @@ function renderDoc() {
         : it.kind === 'p'
           ? `<div class="u pending" style="--w:${40 + ((it.id * 37) % 50)}%"></div>`
           : `<div class="u err">인식 실패: ${esc(it.message)}</div>`).join('')}
+      ${trShown(d) ? trHtml(d, g.items) : ''}
     </div>`));
 
   $('#listening').hidden = !(S.live && S.rec === 'recording' && S.speaking && !S.paused && !S.fileMode);
@@ -2238,27 +2244,41 @@ function hidePopovers() {
   if (S.cmt) closeComment(true); // 쓰던 코멘트는 바깥을 눌러도 저장
   $$('.popover').forEach((p) => (p.hidden = true));
 }
-document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, .spk-chip, .g-name, #btn-spk-stats, .sum-tpl, #btn-share-summary')) hidePopovers(); });
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('.popover, #btn-source, #btn-save, #btn-translate, .spk-chip, .g-name, #btn-spk-stats, .sum-tpl, #btn-share-summary')) hidePopovers(); });
 
-$('#btn-save').addEventListener('click', (e) => showPopover($('#pop-save'), e.currentTarget, 'right'));
+$('#btn-save').addEventListener('click', (e) => {
+  const d = doc();
+  // 번역이 있는 회의: 녹취록을 원문 · 번역 · 둘 다로 (처음에는 화면에 번역을 보이고 있으면 둘 다)
+  $('#save-tr').hidden = !hasTr(d);
+  setSeg('seg-save-tr', saveTrMode(d));
+  showPopover($('#pop-save'), e.currentTarget, 'right');
+});
+$('#seg-save-tr').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-v]');
+  if (!b) return;
+  S.saveTr = b.dataset.v;
+  setSeg('seg-save-tr', S.saveTr);
+});
+const saveTrMode = (d) => (hasTr(d) ? S.saveTr || (S.trShow ? 'both' : 'orig') : 'orig');
 $('#pop-save').addEventListener('click', async (e) => {
   const b = e.target.closest('button[data-fmt]');
   const d = doc();
   if (!b || !d) return;
   hidePopovers();
   const fmtName = b.dataset.fmt;
+  const tr = saveTrMode(d);
   const safe = (d.title || d.id).replace(/[\\/:*?"<>|]/g, '_');
   const path = await api.save({ defaultPath: `${safe}.${fmtName}`, filters: [{ name: fmtName.toUpperCase(), extensions: [fmtName] }] });
   if (!path) return;
-  if (fmtName === 'pdf') await exportPdf(d, path);
-  else await call('export_session', { id: d.id, format: fmtName, path });
+  if (fmtName === 'pdf') await exportPdf(d, path, tr);
+  else await call('export_session', { id: d.id, format: fmtName, path, tr });
   toast('저장했어요');
 });
 // PDF: 앱(export.rs)이 그린 회의록 HTML 을 인쇄용 칸에 넣고, 인쇄할 때 그 칸만 보이게 한 뒤(body.printing)
 // 화면을 PDF 로 (WebView2 PrintToPdf — 인쇄 대화상자 없이). 끝나면 칸을 비운다
-async function exportPdf(d, path) {
+async function exportPdf(d, path, tr = 'orig') {
   const box = $('#print-doc');
-  box.innerHTML = await call('export_html', { id: d.id });
+  box.innerHTML = await call('export_html', { id: d.id, tr });
   document.body.classList.add('printing');
   try {
     await document.fonts.ready;
@@ -2267,6 +2287,117 @@ async function exportPdf(d, path) {
     document.body.classList.remove('printing');
     box.innerHTML = '';
   }
+}
+
+/* ───────────── 번역 (translate.rs) ─────────────
+   문장마다 번역해 기록에 원문과 따로 둔다 — 번역할 때의 원문(src)이 지금 원문과 같을 때만 그 번역을 쓴다
+   (문장을 고치면 다시 번역할 문장이 된다 · translate.rs 의 Translation::get 과 같은 규칙) */
+const TR_LANGS = [['ko', '한국어'], ['en', '영어'], ['ja', '일본어'], ['zh', '중국어(간체)']];
+const trLangName = (c) => (TR_LANGS.find((l) => l[0] === c) || TR_LANGS[0])[1];
+const trOptions = () => TR_LANGS.map(([v, n]) => `<option value="${v}">${n}</option>`).join('');
+const docById = (id) => [S.liveDoc, S.viewDoc].find((d) => d && d.id === id) || null;
+function trOf(d, id, text) {
+  const x = d?.translation?.items?.[id];
+  return x && x.src === String(text || '').trim() ? x.text : null;
+}
+const hasTr = (d) => !!d?.translation && Object.keys(d.translation.items || {}).length > 0;
+// 녹음 중 실시간 번역이 도는 회의 (설정에서 켜고 녹음 중인 회의)
+const trLive = (d) => !!(S.settings?.translate?.live && S.live && S.rec !== 'idle' && d && d === S.liveDoc);
+const trShown = (d) => S.trShow && (hasTr(d) || trLive(d));
+// 문단 아래 번역 — 번역된 문장만 잇고, 실시간 번역을 기다리는 문장이 있으면 끝에 …
+function trHtml(d, items) {
+  const us = items.filter((x) => x.kind === 'u' && String(x.text || '').trim());
+  if (!us.length) return '';
+  const parts = us.map((u) => trOf(d, u.id, u.text));
+  const got = parts.filter((t) => t != null && t.trim());
+  const waiting = trLive(d) && parts.some((t) => t == null);
+  if (!got.length) return waiting ? '<div class="g-tr wait">번역하는 중…</div>' : '';
+  return `<div class="g-tr" lang="${esc(d.translation.lang)}">${esc(got.join(' '))}${waiting ? ' …' : ''}</div>`;
+}
+// 번역된 문장 수 / 번역할 문장 수 (빈 문장 빼고, 고른 언어로)
+function trCount(d, lang) {
+  const us = (d?.utterances || []).filter((u) => String(u.text || '').trim());
+  const same = d?.translation?.lang === lang;
+  return { done: same ? us.filter((u) => trOf(d, u.id, u.text) != null).length : 0, total: us.length };
+}
+function renderTrPop() {
+  const d = doc();
+  if (!d) return;
+  const sel = $('#tr-lang');
+  if (!sel.options.length) sel.innerHTML = trOptions();
+  const lang = S.trLang || (hasTr(d) ? d.translation.lang : S.settings?.translate?.lang) || 'ko';
+  sel.value = lang;
+  const job = S.trJob && S.trJob.id === d.id ? S.trJob : null;
+  const { done, total } = trCount(d, lang);
+  const other = hasTr(d) && d.translation.lang !== lang;
+  sel.disabled = !!job;
+  $('#tr-status').textContent = job
+    ? (job.waitSecs ? `요청 한도에 걸려 ${job.waitSecs}초 기다렸다 이어서 해요` : `번역하는 중… ${job.done} / ${job.total}문장`)
+    : !total ? '번역할 문장이 없어요'
+      : other ? `${trLangName(d.translation.lang)} 번역이 있어요 — ${trLangName(lang)}로 번역하면 바꿔요`
+        : done >= total ? `${total}문장 모두 번역했어요`
+          : done ? `${total}문장 중 ${done}문장 번역됨` : `${total}문장 — 아직 번역하지 않았어요`;
+  const bar = $('#tr-bar');
+  bar.hidden = !job;
+  if (job) bar.firstElementChild.style.width = `${job.total ? Math.round((job.done / job.total) * 100) : 0}%`;
+  $('#tr-show').checked = S.trShow;
+  $('#tr-show').closest('label').hidden = !hasTr(d) && !trLive(d);
+  $('#tr-clear').hidden = !!job || !hasTr(d);
+  const go = $('#tr-go');
+  go.textContent = job ? '멈추기' : done && !other ? '남은 문장 번역' : '번역하기';
+  go.disabled = !job && (!total || (done >= total && !other));
+  const p = S.settings?.summary?.provider;
+  const name = $(`#seg-llm button[data-v="${p}"]`)?.textContent || '요약에 쓰는 AI';
+  $('#tr-note').textContent = `${name}(설정 › 요약)로 번역해요 · ${S.settings?.translate?.live ? '녹음 중 실시간 번역 켜짐' : '녹음 중 실시간 번역은 설정 › 요약 › 번역에서 켜요'}`;
+}
+$('#btn-translate').addEventListener('click', (e) => {
+  if (!$('#pop-tr').hidden) { hidePopovers(); return; }
+  S.trLang = null;
+  renderTrPop();
+  showPopover($('#pop-tr'), e.currentTarget, 'right');
+});
+$('#tr-lang').addEventListener('change', (e) => { S.trLang = e.target.value; renderTrPop(); });
+$('#tr-show').addEventListener('change', (e) => { S.trShow = e.target.checked; renderDoc(); });
+$('#tr-clear').addEventListener('click', async () => {
+  const d = doc();
+  if (!d || !(await api.ask('이 회의의 번역을 지울까요? 원문은 그대로예요.', { title: '번역 지우기', kind: 'warning' }))) return;
+  await call('clear_translation', { id: d.id });
+  d.translation = null;
+  renderDoc();
+  renderTrPop();
+});
+$('#tr-go').addEventListener('click', async () => {
+  const d = doc();
+  if (!d) return;
+  if (S.trJob) { api.invoke('cancel_summary', { token: S.trJob.token }).catch(() => {}); return; }
+  const lang = $('#tr-lang').value;
+  if (hasTr(d) && d.translation.lang !== lang
+    && !(await api.ask(`${trLangName(d.translation.lang)} 번역을 지우고 ${trLangName(lang)}로 다시 번역할까요?`, { title: '번역', kind: 'warning' }))) return;
+  const token = Date.now();
+  S.trJob = { id: d.id, token, done: 0, total: trCount(d, lang).total, waitSecs: null };
+  S.trShow = true;
+  renderTrPop();
+  try {
+    const r = await api.invoke('translate_session', { id: d.id, lang, token });
+    const t = docById(d.id);
+    if (t && r.translation) t.translation = r.translation;
+    toast(r.missed ? `번역했어요 — ${r.missed}문장은 번역하지 못했어요\n번역하기를 다시 누르면 그 문장만 다시 해요` : '번역했어요');
+  } catch (err) {
+    if (String(err) !== '번역을 멈췄어요') toast(String(err), 'error');
+  } finally {
+    S.trJob = null;
+    renderDoc();
+    if (!$('#pop-tr').hidden) renderTrPop();
+  }
+});
+// 앱이 번역한 문장 (번역 단추 · 녹음 중 실시간 번역) — 그 회의의 번역에 넣는다
+function onTranslation({ id, lang, items }) {
+  const d = docById(id);
+  if (!d) return;
+  if (!d.translation || d.translation.lang !== lang) d.translation = { lang, items: {} };
+  Object.assign(d.translation.items, items);
+  if (d === doc()) scheduleRender();
+  if (!$('#pop-tr').hidden) renderTrPop();
 }
 
 $('#btn-source').addEventListener('click', (e) => {
@@ -4054,6 +4185,10 @@ function renderSettings() {
   $('#opt-llm-custom-url').value = s.summary.customUrl;
   $('#opt-llm-custom-model').value = s.summary.customModel;
   renderTplSettings();
+  const tl = $('#opt-tr-lang');
+  if (!tl.options.length) tl.innerHTML = trOptions();
+  tl.value = s.translate?.lang || 'ko';
+  $('#opt-tr-live').checked = !!s.translate?.live;
 
   renderHotkey();
   $('#opt-top').checked = s.alwaysOnTop;
@@ -4372,6 +4507,11 @@ bind('opt-llm-openai-model', (t) => (S.settings.summary.openaiModel = t.value.tr
 bind('opt-anthropic-model', (t) => (S.settings.summary.anthropicModel = t.value.trim()));
 bind('opt-llm-custom-url', (t) => (S.settings.summary.customUrl = t.value.trim()));
 bind('opt-llm-custom-model', (t) => (S.settings.summary.customModel = t.value.trim()));
+bind('opt-tr-lang', (t) => (S.settings.translate = { ...(S.settings.translate || {}), lang: t.value }));
+bind('opt-tr-live', (t) => {
+  S.settings.translate = { ...(S.settings.translate || {}), live: t.checked };
+  if (t.checked) toast(S.rec !== 'idle' ? '다음 녹음부터 실시간으로 번역해요' : '녹음하면 문장이 확정되는 대로 번역해 문단 아래에 보여 줘요');
+});
 bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
 bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
 bind('opt-unload', (t) => (S.settings.unloadWhenIdle = t.checked));
@@ -4582,6 +4722,14 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
     if (p.waitSecs != null) a.waitSecs = p.waitSecs;
     if (!allFrame) allFrame = requestAnimationFrame(renderAllPending);
   });
+  await api.listen('bd://translation', (e) => onTranslation(e.payload));
+  await api.listen('bd://translate-progress', (e) => {
+    const p = e.payload;
+    if (!S.trJob || S.trJob.token !== p.token) return;
+    Object.assign(S.trJob, { done: p.done, total: p.total, waitSecs: p.waitSecs || null });
+    if (!$('#pop-tr').hidden) renderTrPop();
+  });
+  await api.listen('bd://translate-error', (e) => toast(`실시간 번역을 하지 못했어요 — ${e.payload.message}\n30초 뒤 다시 해 볼게요 (녹음은 그대로 계속돼요)`, 'error', 8000));
   await api.listen('bd://mini', (e) => setMini(!!e.payload));
   // 중요 표시 ⭐ 전역 단축키 (다른 창을 보고 있어도)
   await api.listen('bd://star', () => addStar());
@@ -4751,6 +4899,7 @@ function createMock() {
       watchFolder: false, watchDir: '', watchSummarize: true,
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '', template: 'meeting', templates: [] },
+      translate: { lang: 'ko', live: false },
       usdKrw: 1360,
     },
     rec: 'idle',
@@ -4827,6 +4976,25 @@ function createMock() {
         + '<tbody><tr><td>☐</td><td>결제 모듈 배포 <span class="pd-t">[00:07]</span></td><td>금요일</td></tr></tbody></table>'
         + '<h2>녹취록</h2><div class="pd-turn"><b style="color:#7c6cff">김 팀장</b><span class="pd-t">00:01</span></div><p class="pd-sp">시작하겠습니다.</p></article>';
       if (cmd === 'print_pdf') { await new Promise((r) => setTimeout(r, 300)); return; }
+      // 번역: 문장마다 앞에 [언어] 를 붙인 척, 몇 문장씩 (?trfail 이면 오류)
+      if (cmd === 'translate_session') {
+        const d = docById(args.id) || demoDoc();
+        const us = d.utterances.filter((u) => String(u.text || '').trim());
+        const emit = (name, payload) => handlers[name] && handlers[name]({ payload });
+        if (new URLSearchParams(location.search).has('trfail')) { await new Promise((r) => setTimeout(r, 600)); throw 'AI API 오류 401: invalid api key (API 키를 확인해 주세요)'; }
+        const items = {};
+        for (let i = 0; i < us.length; i += 3) {
+          await new Promise((r) => setTimeout(r, 450));
+          if (mockSumCancel === args.token) throw '번역을 멈췄어요';
+          const part = {};
+          for (const u of us.slice(i, i + 3)) part[u.id] = { src: u.text.trim(), text: `[${args.lang}] ${u.text.trim()}` };
+          Object.assign(items, part);
+          emit('bd://translation', { id: args.id, lang: args.lang, items: part });
+          emit('bd://translate-progress', { id: args.id, token: args.token, done: Math.min(i + 3, us.length), total: us.length });
+        }
+        return { translation: { lang: args.lang, items }, missed: 0 };
+      }
+      if (cmd === 'clear_translation') return;
       if (cmd === 'cancel_summary') { mockSumCancel = args.token; return; }
       if (cmd === 'ask_meeting') return mockAsk(args);
       // 모든 회의에 묻기: 기록 두 개를 실은 척, 답을 조금씩 (?askfail 이면 오류)

@@ -442,7 +442,7 @@ fn run(app: &AppHandle, c: &mut Checks) {
     // ── 1-1. 회의록 내보내기: Word(.docx) 는 앱이 직접, PDF 는 화면과 같은 길(인쇄용 칸 → PrintToPdf)로 ──
     let out = home().unwrap_or_else(std::env::temp_dir);
     let word = out.join("smoke-export.docx");
-    let saved = std::fs::write(&word, crate::export::docx(&live)).map(|_| std::fs::read(&word).unwrap_or_default());
+    let saved = std::fs::write(&word, crate::export::docx(&live, crate::session::TrMode::Orig)).map(|_| std::fs::read(&word).unwrap_or_default());
     match saved {
         Ok(b) => c.add("Word 내보내기", b.starts_with(b"PK\x03\x04") && b.len() > 2000, format!("{} KB", b.len() / 1024)),
         Err(e) => c.add("Word 내보내기", false, e.to_string()),

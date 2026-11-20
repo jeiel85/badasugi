@@ -18,6 +18,7 @@ mod status;
 mod summary;
 mod tails;
 mod templates;
+mod translate;
 mod update;
 mod pricing;
 mod usage_book;
@@ -666,6 +667,12 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
             *st.rec_source.lock() = src;
             let _ = app.emit("bd://rec-source", src);
             set_rec(app, RecState::Recording);
+            // 실시간 번역 (설정에서 켠 경우) — 확정된 문장이 쌓이는 대로 번역한다
+            if st.settings.lock().translate.live {
+                if let Some(id) = st.store.lock().current.as_ref().map(|d| d.id.clone()) {
+                    spawn_live_translation(app.clone(), id);
+                }
+            }
             Ok(())
         }
         Err(e) => {
@@ -1213,19 +1220,20 @@ fn delete_session_now(app: &AppHandle, id: &str) -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn export_session(app: AppHandle, id: String, format: String, path: String) -> CmdResult<()> {
-    off_main(move || export_session_now(&app, &id, &format, path)).await
+async fn export_session(app: AppHandle, id: String, format: String, path: String, tr: Option<String>) -> CmdResult<()> {
+    off_main(move || export_session_now(&app, &id, &format, path, session::TrMode::parse(tr.as_deref()))).await
 }
 
-fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String) -> CmdResult<()> {
+/// `tr`: 녹취록을 원문 · 번역 · 둘 다 (번역이 없는 문장은 원문, JSON 은 늘 그대로)
+fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String, tr: session::TrMode) -> CmdResult<()> {
     let doc = app.state::<AppState>().store.lock().load(id).map_err(err)?;
     if format == "docx" {
-        return std::fs::write(path, export::docx(&doc)).map_err(err);
+        return std::fs::write(path, export::docx(&doc, tr)).map_err(err);
     }
     let body = match format {
-        "md" => doc.to_markdown(),
-        "txt" => doc.to_text(),
-        "srt" => doc.to_srt(),
+        "md" => doc.markdown(tr),
+        "txt" => doc.text(tr),
+        "srt" => doc.srt(tr),
         "json" => serde_json::to_string_pretty(&doc).map_err(err)?,
         _ => return Err("알 수 없는 형식".into()),
     };
@@ -1240,10 +1248,10 @@ fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String) -> 
 
 /// PDF 로 낼 회의록 HTML — 화면이 인쇄용 칸(`#print-doc`)에 넣고 [`print_pdf`] 를 부른다
 #[tauri::command]
-async fn export_html(app: AppHandle, id: String) -> CmdResult<String> {
+async fn export_html(app: AppHandle, id: String, tr: Option<String>) -> CmdResult<String> {
     off_main(move || {
         let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
-        Ok(export::html(&doc))
+        Ok(export::html(&doc, session::TrMode::parse(tr.as_deref())))
     })
     .await
 }
@@ -1469,6 +1477,187 @@ fn cancel_token(app: &AppHandle, token: u64) {
     // 이미 끝난 요약을 멈춰 남은 신호는 치운다 — 돌고 있는 요약이 쥐고 있는 신호(복제본이 있는 것)는 남긴다
     map.retain(|&t, flag| t == token || Arc::strong_count(flag) > 1);
     map.entry(token).or_default().store(true, Ordering::SeqCst);
+}
+
+/// 번역 한 묶음: 보내고, 받은 번역을 기록에 넣고, 화면에 알린다(`bd://translation`) → 보낸 문장
+fn translate_step(
+    app: &AppHandle,
+    chat: &mut summary::Chat,
+    provider: &str,
+    lang: &str,
+    doc: &SessionDoc,
+    todo: &[u64],
+) -> anyhow::Result<Vec<u64>> {
+    let b = translate::translate_batch(chat, lang, doc, todo)?;
+    let book = app.state::<usage_book::UsageBook>();
+    book.summary(provider, &b.reply.model, b.reply.in_tokens, b.reply.out_tokens, b.reply.cache_write, b.reply.cache_read);
+    book.save();
+    if !b.items.is_empty() {
+        let items: BTreeMap<u64, translate::TrItem> = b.items.iter().cloned().collect();
+        app.state::<AppState>().store.lock().update_translation(&doc.id, |t| translate::merge(t, lang, b.items))?;
+        let _ = app.emit("bd://translation", serde_json::json!({ "id": doc.id, "lang": lang, "items": items }));
+    }
+    Ok(b.sent)
+}
+
+/// 번역할 기록 — 녹음 중인 기록이면 앱이 들고 있는 것, 아니면 저장된 것
+fn doc_for_translation(app: &AppHandle, id: &str) -> anyhow::Result<SessionDoc> {
+    let st = app.state::<AppState>();
+    let cur = st.store.lock().current.as_ref().filter(|d| d.id == id).cloned();
+    match cur {
+        Some(d) => Ok(d),
+        None => st.store.lock().load(id),
+    }
+}
+
+/// 보냈는데도 번역이 안 된(번호가 빠진) 문장을 센다 — 두 번 빠진 문장은 건너뛴다 (모델이 늘 빠뜨리는 문장에 갇히지 않게)
+fn count_misses(app: &AppHandle, id: &str, lang: &str, sent: Vec<u64>, misses: &mut std::collections::HashMap<u64, u32>) {
+    let still: BTreeSet<u64> = doc_for_translation(app, id).map(|d| translate::pending(&d, lang).into_iter().collect()).unwrap_or_default();
+    for s in sent.into_iter().filter(|s| still.contains(s)) {
+        *misses.entry(s).or_default() += 1;
+    }
+}
+
+/// 녹음 중 실시간 번역 — 새로 확정된 문장이 3개 넘게 쌓이거나 첫 문장이 6초 넘게 기다렸으면 한 묶음을 보낸다.
+/// 녹음이 끝나면 남은 문장까지 번역하고 끝낸다. 설정에서 끄면 다음 차례에 멈춘다. 두 번 빠진 문장은 건너뛴다
+/// (회의 화면의 번역 단추로 다시 할 수 있다). 오류는 화면에 한 번만 알리고 30초 뒤 다시.
+fn spawn_live_translation(app: AppHandle, id: String) {
+    let _ = std::thread::Builder::new().name("bd-translate".into()).spawn(move || {
+        let st = app.state::<AppState>();
+        let mut misses = std::collections::HashMap::new();
+        let mut first_seen: Option<Instant> = None;
+        let mut resume_at: Option<Instant> = None;
+        let mut warned = false;
+        log::info!("실시간 번역 시작: {id}");
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let (cfg, tcfg) = {
+                let s = st.settings.lock();
+                (s.summary.clone(), s.translate.clone())
+            };
+            if !tcfg.live {
+                break;
+            }
+            let ended = !st.store.lock().current.as_ref().is_some_and(|d| d.id == id);
+            if resume_at.is_some_and(|t| Instant::now() < t) {
+                continue;
+            }
+            let Ok(doc) = doc_for_translation(&app, &id) else {
+                break;
+            };
+            let todo: Vec<u64> =
+                translate::pending(&doc, &tcfg.lang).into_iter().filter(|u| misses.get(u).copied().unwrap_or(0) < 2).collect();
+            if todo.is_empty() {
+                first_seen = None;
+                if ended {
+                    break;
+                }
+                continue;
+            }
+            let since = *first_seen.get_or_insert_with(Instant::now);
+            if !ended && todo.len() < 3 && since.elapsed() < std::time::Duration::from_secs(6) {
+                continue;
+            }
+            let step = summary::chat_caller(&cfg)
+                .and_then(|(provider, mut chat)| translate_step(&app, &mut chat, &provider, &tcfg.lang, &doc, &todo));
+            match step {
+                Ok(sent) => {
+                    first_seen = None;
+                    count_misses(&app, &id, &tcfg.lang, sent, &mut misses);
+                }
+                Err(e) => {
+                    if let Some(w) = summary::wait_for(&e) {
+                        resume_at = Some(Instant::now() + std::time::Duration::from_secs(w));
+                        continue;
+                    }
+                    log::warn!("실시간 번역 실패: {e:#}");
+                    if !warned {
+                        warned = true;
+                        let _ = app.emit("bd://translate-error", serde_json::json!({ "id": id, "message": format!("{e:#}") }));
+                    }
+                    if ended {
+                        break;
+                    }
+                    resume_at = Some(Instant::now() + std::time::Duration::from_secs(30));
+                }
+            }
+        }
+        log::info!("실시간 번역 끝: {id}");
+    });
+}
+
+/// 번역 단추의 결과: 번역 · 못 한 문장 수
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslateResult {
+    translation: Option<translate::Translation>,
+    missed: usize,
+}
+
+/// 번역 단추: 번역 안 된 문장을 모두 번역한다 (언어가 다르면 처음부터).
+/// 진행은 `bd://translate-progress` { id, token, done, total, waitSecs }, 번역은 받는 대로 `bd://translation`.
+/// 멈추기는 요약과 같은 `cancel_summary(token)`
+#[tauri::command]
+async fn translate_session(app: AppHandle, id: String, lang: String, token: u64) -> CmdResult<TranslateResult> {
+    let st = app.state::<AppState>();
+    st.busy_ops.fetch_add(1, Ordering::SeqCst);
+    let _busy = BusyGuard(&st.busy_ops);
+    let cfg = st.settings.lock().summary.clone();
+    let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
+    let (app2, id2) = (app.clone(), id.clone());
+    let res = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<TranslateResult> {
+        let (provider, mut chat) = summary::chat_caller(&cfg)?;
+        let progress = |done: usize, total: usize, wait: Option<u64>| {
+            let _ = app2.emit(
+                "bd://translate-progress",
+                serde_json::json!({ "id": id2, "token": token, "done": done, "total": total, "waitSecs": wait }),
+            );
+        };
+        let total = translate::pending(&doc_for_translation(&app2, &id2)?, &lang).len();
+        let mut misses = std::collections::HashMap::new();
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(anyhow::anyhow!(translate::CANCELLED_MSG));
+            }
+            let doc = doc_for_translation(&app2, &id2)?;
+            let left = translate::pending(&doc, &lang);
+            let todo: Vec<u64> = left.iter().copied().filter(|u| misses.get(u).copied().unwrap_or(0) < 2).collect();
+            progress(total.saturating_sub(left.len()), total, None);
+            if todo.is_empty() {
+                let translation = doc.translation.filter(|t| t.lang == lang);
+                return Ok(TranslateResult { translation, missed: left.len() });
+            }
+            match translate_step(&app2, &mut chat, &provider, &lang, &doc, &todo) {
+                Ok(sent) => count_misses(&app2, &id2, &lang, sent, &mut misses),
+                Err(e) => {
+                    let Some(w) = summary::wait_for(&e).filter(|w| *w <= summary::MAX_WAIT_SECS) else {
+                        return Err(e);
+                    };
+                    progress(total.saturating_sub(left.len()), total, Some(w));
+                    let until = Instant::now() + std::time::Duration::from_secs(w);
+                    while Instant::now() < until {
+                        if cancel.load(Ordering::SeqCst) {
+                            return Err(anyhow::anyhow!(translate::CANCELLED_MSG));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    st.summary_cancel.lock().remove(&token);
+    res.map_err(err)?.map_err(err)
+}
+
+/// 번역 지우기 (원문은 그대로)
+#[tauri::command]
+async fn clear_translation(app: AppHandle, id: String) -> CmdResult<()> {
+    off_main(move || {
+        app.state::<AppState>().store.lock().update_translation(&id, |t| *t = None).map_err(err)?;
+        Ok(())
+    })
+    .await
 }
 
 /// 회의에 묻는다 → 받은 답 (기록의 묻고 답하기 목록 끝에 저장한 것).
@@ -2285,6 +2474,8 @@ fn main() {
             delete_session,
             export_session,
             export_html,
+            translate_session,
+            clear_translation,
             print_pdf,
             share_info,
             share_messenger,
