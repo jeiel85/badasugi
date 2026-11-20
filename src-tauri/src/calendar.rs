@@ -6,9 +6,10 @@
 //! - **Outlook 을 띄우지 않는다**: 이미 켜져 있는 Outlook 에만 붙는다(`GetActiveObject`). `CoCreateInstance` 는 꺼져 있는
 //!   Outlook 을 화면 없이 띄우고, 계정을 만든 적 없는 PC 에서는 계정 추가 창까지 띄운다. 꺼져 있으면 조용히 건너뛰고
 //!   설정에 그렇다고 보인다.
-//! - **보안 경고를 내지 않는다**: 참석자(주소록 정보)는 Outlook 개체 모델 보호 대상이라, 백신이 꺼져 있거나 회사 정책으로
-//!   막혀 있으면 "프로그램이 전자 메일 주소 정보에 접근하려고 합니다" 창이 뜬다. Outlook 이 바깥 프로그램을 믿을 때
-//!   (`Application.IsTrusted`)만 참석자를 읽고, 아니면 제목 · 시각만 쓴다.
+//! - **보안 경고를 내지 않는다**: 참석자 · 주최자(주소록 정보)는 Outlook 개체 모델 보호 대상이라, 백신이 꺼져 있거나
+//!   오래됐거나 회사 정책 · "늘 경고" 설정이면 주소 정보 접근 경고 창이 뜬다. Outlook 이 바깥 프로그램에 쓰는 것과 같은
+//!   기준 — 프로그래밍 방식 액세스 설정 · 정책과 Windows 보안 센터의 백신 상태 — 으로 경고가 뜨지 않을 때만 참석자를
+//!   읽고(`people_allowed`), 아니면 제목 · 시각만 쓴다. (`Application.IsTrusted` 는 바깥 프로그램에는 늘 거짓이라 못 쓴다)
 //! - 새 Outlook(olk.exe)은 COM 을 내놓지 않아 읽을 수 없다 — 클래식 Outlook 이 없으면 그렇다고 보인다.
 //! - COM 은 따로 스레드 하나(STA)에서 — Outlook 이 바쁘거나 답하지 않아도 녹음 시작 · 회의 알림을 붙잡지 않게 짧게만 기다린다.
 
@@ -46,7 +47,7 @@ pub enum Status {
     NoOutlook,
     /// 설치돼 있지만 켜져 있지 않다 — 띄우지 않고 건너뛴다
     NotRunning,
-    /// 읽을 수 있다. `trusted` 가 아니면 참석자는 읽지 않는다 (보안 경고가 뜨지 않게)
+    /// 읽을 수 있다. `trusted` 가 아니면 참석자는 읽지 않는다 (Outlook 보안 경고가 뜨지 않게)
     #[serde(rename_all = "camelCase")]
     Ready { trusted: bool, now: Option<Event>, next: Option<Event> },
     Error { message: String },
@@ -88,6 +89,34 @@ pub fn next_after(now: NaiveDateTime, items: &[(Item, bool)]) -> Option<usize> {
         .filter(|(_, (it, skip))| !*skip && it.start > now && it.start.date() == now.date())
         .min_by_key(|(_, (it, _))| it.start)
         .map(|(i, _)| i)
+}
+
+/// 백신이 켜져 있고 최신인가 — Windows 보안 센터 `AntiVirusProduct.productState` (가운데 바이트 0x10 = 켜짐,
+/// 낮은 바이트 0x00 = 최신. 예: Windows Defender 0x061100). 하나라도 그러면 참
+pub fn antivirus_good(states: &[u32]) -> bool {
+    states.iter().any(|s| (s >> 8) & 0x10 != 0 && s & 0xFF == 0)
+}
+
+/// 참석자(주소록 정보)를 읽어도 Outlook 이 경고 창을 띄우지 않나 — Outlook 이 바깥 프로그램을 보는 기준 그대로:
+/// - 회사 정책(`AdminSecurityMode` = 3)이 주소 정보 접근(`PromptOOMAddressInformationAccess`)을 정했으면 그대로
+///   (1 = 묻지 않고 허용 · 3 = 백신 상태에 따라 · 0 묻기 · 2 거부 · 그 밖은 읽지 않음)
+/// - 아니면 프로그래밍 방식 액세스 설정(`ObjectModelGuard`): 2 = 경고하지 않음 · 1 = 늘 경고 ·
+///   0 이나 없음(기본) = 백신이 꺼졌거나 오래됐을 때만 경고
+/// 모르는 값은 읽지 않는 쪽으로
+pub fn people_allowed(policy_mode: Option<u32>, policy_prompt: Option<u32>, guard: Option<u32>, av_good: bool) -> bool {
+    if policy_mode == Some(3) {
+        match policy_prompt {
+            Some(1) => return true,
+            Some(3) => return av_good,
+            Some(_) => return false,
+            None => {}
+        }
+    }
+    match guard {
+        Some(2) => true,
+        None | Some(0) => av_good,
+        Some(_) => false,
+    }
 }
 
 /// "김 팀장; 이 개발 (개발팀); park@example.com" → 이름들 (주소만 있으면 @ 앞, 괄호 속 부서는 뗀다, 같은 이름은 한 번)
@@ -305,9 +334,81 @@ mod com {
         v
     }
 
-    /// Outlook 이 바깥 프로그램(우리)을 믿는가 — 믿지 않으면 참석자 같은 주소록 정보를 읽을 때 보안 경고 창이 뜬다
-    pub fn trusted(app: &IDispatch) -> bool {
-        get(app, "IsTrusted").ok().and_then(|v| v.bool()).unwrap_or(false)
+    /// Windows 보안 센터에 등록된 백신들의 상태 (`root\SecurityCenter2` 의 `AntiVirusProduct.productState`)
+    pub fn antivirus_states() -> windows::core::Result<Vec<u32>> {
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoSetProxyBlanket, CLSCTX_INPROC_SERVER, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
+        };
+        use windows::Win32::System::Wmi::{
+            IWbemClassObject, IWbemContext, IWbemLocator, WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
+        };
+        unsafe {
+            let loc: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)?;
+            let empty = BSTR::new();
+            let svc = loc.ConnectServer(&BSTR::from("ROOT\\SecurityCenter2"), &empty, &empty, &empty, 0, &empty, None::<&IWbemContext>)?;
+            // RPC_C_AUTHN_WINNT = 10, RPC_C_AUTHZ_NONE = 0
+            CoSetProxyBlanket(&svc, 10, 0, PCWSTR::null(), RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, None, EOAC_NONE)?;
+            let found = svc.ExecQuery(
+                &BSTR::from("WQL"),
+                &BSTR::from("SELECT productState FROM AntiVirusProduct"),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                None::<&IWbemContext>,
+            )?;
+            let mut out = Vec::new();
+            for _ in 0..16 {
+                let mut objs: [Option<IWbemClassObject>; 1] = [None];
+                let mut n = 0u32;
+                // 5초까지 (보안 센터가 답하지 않으면 그만)
+                if found.Next(5000, &mut objs, &mut n).is_err() || n == 0 {
+                    break;
+                }
+                let Some(o) = objs[0].take() else {
+                    break;
+                };
+                let name: Vec<u16> = "productState".encode_utf16().chain(Some(0)).collect();
+                let mut v = Var(VARIANT::default());
+                if o.Get(PCWSTR(name.as_ptr()), 0, &mut v.0, None, None).is_ok() {
+                    if let Some(x) = v.int() {
+                        out.push(x as u32);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// 레지스트리 DWORD 하나 (없으면 None)
+    fn dword(root: windows_sys::Win32::System::Registry::HKEY, path: &str, name: &str) -> Option<u32> {
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_DWORD};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (p, n) = (wide(path), wide(name));
+        let mut v = 0u32;
+        let mut size = 4u32;
+        let rc = unsafe { RegGetValueW(root, p.as_ptr(), n.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut v as *mut u32).cast(), &mut size) };
+        (rc == ERROR_SUCCESS).then_some(v)
+    }
+
+    /// 참석자를 읽어도 경고 창이 뜨지 않나 — 정책 · 프로그래밍 방식 액세스 설정 · 백신 상태 ([`super::people_allowed`])
+    pub fn people_allowed() -> bool {
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        const POLICY: &str = r"Software\Policies\Microsoft\Office\16.0\Outlook\Security";
+        let policy = |name: &str| dword(HKEY_CURRENT_USER, POLICY, name).or_else(|| dword(HKEY_LOCAL_MACHINE, POLICY, name));
+        // 설정은 설치 방식에 따라 여기저기 (일반 · 32비트 Office · 클릭 투 런 가상 레지스트리)
+        let guard = [
+            r"SOFTWARE\Microsoft\Office\16.0\Outlook\Security",
+            r"SOFTWARE\WOW6432Node\Microsoft\Office\16.0\Outlook\Security",
+            r"SOFTWARE\Microsoft\Office\ClickToRun\REGISTRY\MACHINE\Software\Microsoft\Office\16.0\Outlook\Security",
+        ]
+        .iter()
+        .find_map(|p| dword(HKEY_LOCAL_MACHINE, p, "ObjectModelGuard"));
+        let (mode, prompt) = (policy("AdminSecurityMode"), policy("PromptOOMAddressInformationAccess"));
+        // 백신 상태가 필요할 때만 보안 센터에 묻는다
+        let needs_av = !(mode == Some(3) && prompt.is_some_and(|p| p != 3)) && !matches!(guard, Some(1) | Some(2));
+        let av = needs_av && antivirus_states().map(|s| super::antivirus_good(&s)).unwrap_or(false);
+        let ok = super::people_allowed(mode, prompt, guard, av);
+        log::info!("Outlook 참석자 읽기 {} (정책 {mode:?}/{prompt:?}, 설정 {guard:?}, 백신 {av})", if ok { "됨" } else { "안 함 — 경고 창이 뜰 수 있음" });
+        ok
     }
 
     /// `from` ~ `to` 사이에 걸친 기본 일정 폴더의 일정 (되풀이 일정은 그날 것으로 펼친다) — 최대 60개
@@ -405,6 +506,21 @@ impl Calendar {
     }
 }
 
+/// 참석자를 읽어도 경고가 뜨지 않나 — 10분 동안 기억한다 (Outlook 스레드에서)
+#[cfg(windows)]
+fn people_ok() -> bool {
+    static CACHE: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
+    let mut c = CACHE.lock();
+    if let Some((at, ok)) = *c {
+        if at.elapsed() < Duration::from_secs(600) {
+            return ok;
+        }
+    }
+    let ok = com::people_allowed();
+    *c = Some((std::time::Instant::now(), ok));
+    ok
+}
+
 /// 오늘 일정을 읽는다 → 상태 (지금 일정 · 다음 일정)
 pub(crate) fn read_now() -> Status {
     #[cfg(windows)]
@@ -415,7 +531,7 @@ pub(crate) fn read_now() -> Status {
             com::Outlook::NotRunning => return Status::NotRunning,
             com::Outlook::App(a) => a,
         };
-        let trusted = com::trusted(&app);
+        let trusted = people_ok();
         let (from, to) = query_range(now);
         match com::events(&app, from, to, trusted) {
             Ok(list) => {
@@ -526,6 +642,44 @@ mod tests {
         // 0:03 → 방금 0시에 끝난 회의도 (끝나고 5분)
         let (from, _) = query_range(at(21, 0, 3));
         assert!(from < at(21, 0, 0));
+    }
+
+    #[test]
+    fn reads_attendees_only_when_outlook_would_not_warn() {
+        // Windows Defender 켜짐 · 최신 / 꺼짐 / 오래됨
+        assert!(antivirus_good(&[0x061100]));
+        assert!(!antivirus_good(&[0x060100]));
+        assert!(!antivirus_good(&[0x061110]));
+        assert!(antivirus_good(&[0x060100, 0x041000]));
+        assert!(!antivirus_good(&[]));
+        // 기본 설정: 백신 상태에 따라
+        assert!(people_allowed(None, None, None, true));
+        assert!(!people_allowed(None, None, None, false));
+        assert!(people_allowed(None, None, Some(0), true));
+        // "경고하지 않음" · "늘 경고"
+        assert!(people_allowed(None, None, Some(2), false));
+        assert!(!people_allowed(None, None, Some(1), true));
+        // 회사 정책이 정해 두었으면 그대로 (정책을 쓰지 않으면 설정으로)
+        assert!(people_allowed(Some(3), Some(1), Some(1), false));
+        assert!(!people_allowed(Some(3), Some(0), None, true));
+        assert!(!people_allowed(Some(3), Some(2), Some(2), true));
+        assert!(people_allowed(Some(3), Some(3), None, true));
+        assert!(!people_allowed(Some(3), Some(3), None, false));
+        assert!(people_allowed(Some(0), Some(0), None, true));
+        // 모르는 값은 읽지 않는다
+        assert!(!people_allowed(None, None, Some(7), true));
+    }
+
+    /// 이 PC 의 Outlook 보안 설정 · 백신 상태로 참석자를 읽을지:
+    /// `cargo test -p badasugi calendar::tests::live_people -- --ignored --nocapture`
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_people_allowed() {
+        let cal = Calendar::new();
+        let r = cal.run(|| (com::antivirus_states().map_err(|e| e.message()), com::people_allowed()));
+        println!("{r:?}");
+        assert!(r.is_some_and(|(s, _)| s.is_ok()));
     }
 
     #[test]

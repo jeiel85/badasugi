@@ -4271,7 +4271,7 @@ async function renderCalendar() {
   else if (st.kind === 'error') html = `<span class="warn">${esc(st.message)}</span>`;
   else {
     const parts = [st.now ? `지금 일정: ${ev(st.now)}` : '지금 시각에 맞는 일정이 없어요', st.next ? `다음 일정: ${ev(st.next)}` : ''];
-    if (!st.trusted) parts.push('Outlook 이 바깥 프로그램을 믿지 않는 상태라(백신 · 회사 정책) 보안 경고가 뜨지 않게 참석자는 읽지 않아요');
+    if (!st.trusted) parts.push('지금 Outlook 보안 설정(백신이 꺼졌거나 오래됨 · 회사 정책 · 늘 경고)에서는 참석자를 읽으면 경고 창이 떠서, 참석자는 읽지 않아요');
     html = parts.filter(Boolean).join('<br>');
   }
   box.innerHTML = html;
