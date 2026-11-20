@@ -47,7 +47,9 @@ const FILES: &[(&str, &str)] = &[
     // 구간 메모를 합칠 때: 앞 구간의 남은 질문이 뒤 구간에서 풀렸으면 빼게 한다
     ("rules/drop_resolved.md", include_str!("../prompts/rules/drop_resolved.md")),
     // 요약 불릿 끝의 근거 시각 [12:34] — 화면에서 눌러 녹취록 그 문장으로 간다 (회의에 묻기와 같은 표기).
-    // 긴 회의는 구간 메모에도 달게 해, 메모를 합치고 줄여도 시각이 회의록까지 살아남게 한다
+    // 긴 회의는 구간 메모에도 달게 해, 메모를 합치고 줄여도 시각이 회의록까지 살아남게 한다.
+    // 녹취록은 한 사람이 길게 말한 문단 중간에도 [시각] 이 있다(SessionDoc::to_ai_text) — 문단 첫 시각만 있을 때
+    // 근거가 실제 문장보다 수십 초 앞을 가리켰다(2026-11-20 사수님 발견). 그래서 "바로 앞의 [시각]" 을 쓰게 한다
     ("rules/evidence_time.md", include_str!("../prompts/rules/evidence_time.md")),
     // 중요 표시 ⭐ — 회의 중 단축키로 표시한 문장은 녹취록에 "⭐ 문장"으로 간다(SessionDoc::to_ai_text).
     // 요약이 꼭 다루고 그 불릿에도 ⭐ 를 달게 해, 긴 회의의 구간 메모를 합치고 줄여도 남게 한다
@@ -208,6 +210,11 @@ mod tests {
         }
         // 화면이 누를 수 있는 표기 — 회의에 묻기와 같은 [분:초]
         assert!(ask().contains("[12:34]"));
+        // 녹취록은 긴 문단 중간에도 [시각] 이 있다(SessionDoc::to_ai_text) — 줄 앞 시각이 아니라 근거 발언 바로 앞의 것을
+        for (name, text) in [("summary", summary()), ("summary_part", summary_part()), ("ask", ask()), ("ask_all", ask_all())] {
+            assert!(text.contains("그 발언 바로 앞") || text.contains("근거 발언 바로 앞"), "{name}: 바로 앞의 시각을 쓰라는 말");
+            assert!(text.contains("줄 중간에도"), "{name}: 줄 중간의 시각 설명");
+        }
     }
 
     #[test]

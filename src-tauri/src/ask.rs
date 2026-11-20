@@ -216,7 +216,9 @@ pub(crate) fn context(doc: &SessionDoc, focus: &Focus, budget: usize) -> Context
             clip(doc.notes.trim(), (budget / 5).max(MIN_UNIT))
         ));
     }
-    let transcript = doc.to_text();
+    // 요약과 같은 녹취록 글 — 한 사람이 길게 말한 문단 중간에도 [시각] 이 있어 근거 시각이 그 문장을 가리킨다
+    // (⭐ 는 이 프롬프트가 다루지 않아 보내지 않는다). 길어서 골라 실을 때는 문장마다 시각을 단다(units)
+    let transcript = doc.to_ai_text(false);
     if transcript.trim().is_empty() {
         head.push_str("## 녹취록\n(아직 받아 적은 문장이 없어요)\n");
         return Context { text: head, partial: false };
@@ -501,6 +503,11 @@ mod tests {
         v[40] = (200, 0, "VPN 은 월 12만 원에 도입했습니다");
         let d = doc(&v);
         assert_eq!(d.to_text().lines().count(), 1, "문단 하나로 묶인다");
+        // 다 실을 때도 문단 중간의 그 문장 앞에 시각이 있다 (근거 시각이 문단 첫 [00:00] 으로 가지 않게)
+        let c = context(&d, &Focus::Question("VPN 비용은?"), 1_000_000);
+        assert!(!c.partial);
+        assert!(c.text.contains(" [03:20] VPN 은 월 12만 원"), "{}", c.text);
+        assert!(c.text.contains("[00:00] 이낙원 실장님: 오늘 발표는"), "{}", c.text);
         let c = context(&d, &Focus::Question("VPN 비용은?"), 800);
         assert!(c.partial);
         assert!(c.text.contains("[03:20] 이낙원 실장님: VPN 은 월 12만 원"), "{}", c.text);
