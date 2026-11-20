@@ -704,6 +704,7 @@ function renderDock() {
   $('#fprog').hidden = !(S.fileMode && S.rec !== 'idle');
   renderProgress();
   renderMiniCap();
+  renderCatch();
   $('#btn-pin').classList.toggle('on', !!S.settings?.alwaysOnTop);
   $('#hotkey-hint').textContent = S.settings?.hotkey || '단축키 없음';
   const lbl = S.rec === 'stopping' ? '남은 발화를 정리하는 중…' : S.rec === 'starting' ? '준비하는 중…'
@@ -2205,6 +2206,42 @@ function askSuggestions(d) {
   return out;
 }
 const canAsk = (d) => !!(d && (d.utterances.length || (d.summary || '').trim() || (d.notes || '').trim()));
+// 지금까지 따라잡기 — 녹음 중에 늦게 들어왔거나 잠깐 자리를 비웠을 때. '지난 10분 정리'는 앱이 받아 적은 마지막 말에서
+// 10분 앞까지만 보내 빠르고 싸다(기록에는 이 이름으로 남고, 모델에게는 따라잡기 지시가 간다).
+// '지금까지 정해진 것'은 회의 전체에 묻는 보통 질문
+const CATCH_MINS = 10;
+const CATCH_RECENT = `지난 ${CATCH_MINS}분 정리`;
+const CATCH_DECIDED = '지금까지 정해진 것과 할 일만 정리해 줘';
+// 묻기 탭의 따라잡기 줄(녹음 중인 회의를 보고 있을 때) · 미니 창 ⏪ (녹음 중일 때)
+function renderCatch() {
+  const rec = S.rec !== 'idle' && !S.fileMode && !!S.liveDoc;
+  $('#ask-catch').hidden = !(rec && S.live);
+  $$('#ask-catch button').forEach((b) => (b.disabled = !!S.ask));
+  $('#btn-catch-recent').title = `지난 ${CATCH_MINS}분 동안 오간 이야기를 정리해요 — 지금 하는 이야기 · 흐름 · 정해진 것 (그 구간만 보내 빠르고 싸요)`;
+  const mb = $('#btn-catchup');
+  mb.hidden = !(S.rec === 'recording' && !S.fileMode);
+  mb.title = `지금까지 따라잡기 — 큰 창으로 돌아가 지난 ${CATCH_MINS}분을 정리해요`;
+}
+// kind: 'recent' (지난 10분 정리) · 'decided' (지금까지 정해진 것)
+function catchUp(kind = 'recent') {
+  if (S.rec === 'idle' || S.fileMode || !S.liveDoc) return;
+  // 미니 창이면 큰 창으로 돌아가서 — 답을 읽을 자리가 있게 (돌아오면 setMini 가 이어서 부른다)
+  if (S.mini) {
+    S.catchWanted = kind;
+    // 돌아왔다는 알림이 끝내 오지 않으면 나중에 손으로 창을 키울 때 저절로 묻지 않게 잠시 뒤 잊는다
+    call('set_mini', { mini: false }).catch(() => {}).finally(() => setTimeout(() => { S.catchWanted = null; }, 3000));
+    return;
+  }
+  // 지난 회의를 보고 있었으면 녹음 중인 회의로
+  if (!S.live) $('#btn-back-live').click();
+  if (!S.liveDoc.utterances.length) { toast('아직 받아 적은 말이 없어요'); return; }
+  openAsk();
+  if (kind === 'recent') askMeeting(CATCH_RECENT, { recentMins: CATCH_MINS });
+  else askMeeting(CATCH_DECIDED);
+}
+$('#btn-catch-recent').addEventListener('click', () => catchUp('recent'));
+$('#btn-catch-decided').addEventListener('click', () => catchUp('decided'));
+$('#btn-catchup').addEventListener('click', () => catchUp('recent'));
 // 같은 질문 · 답 (앱이 다시 읽어 준 사본은 객체가 달라 내용으로 본다)
 const sameQa = (x, y) => x.q === y.q && x.at === y.at && x.a === y.a;
 // 화면이 들고 있는 그 회의의 사본들 — 녹음 중인 회의 · 보던 회의 · 묻거나 지울 때 쥐고 있던 것.
@@ -2259,6 +2296,7 @@ function renderAskSend() {
   send.disabled = pend ? !!pend.cancelling : (!!S.ask || !canAsk(d) || !askInput.value.trim());
   askInput.disabled = !canAsk(d);
   $$('#ask-list [data-sug]').forEach((b) => (b.disabled = !!S.ask));
+  renderCatch();
 }
 // 받는 중인 답 — 글이 올 때마다 그 칸만 다시 그린다
 let askFrame = 0;
@@ -2290,7 +2328,8 @@ function fitAsk() {
   askInput.style.height = '';
   if (askInput.scrollHeight > askInput.clientHeight) askInput.style.height = `${Math.min(askInput.scrollHeight + 2, 132)}px`;
 }
-async function askMeeting(question) {
+// opts.recentMins: 지금까지 따라잡기 — 받아 적은 마지막 말에서 그 분 앞까지만 정리 (question 은 기록에 남길 이름)
+async function askMeeting(question, opts = {}) {
   const d = doc();
   const q = String(question || '').trim();
   if (!d || !q || !canAsk(d)) return;
@@ -2304,7 +2343,7 @@ async function askMeeting(question) {
   S.askTimer = setInterval(renderAskPending, 1000);
   renderAsk();
   try {
-    const item = await api.invoke('ask_meeting', { id: d.id, question: q, token: my.token });
+    const item = await api.invoke('ask_meeting', { id: d.id, question: q, token: my.token, recentMins: opts.recentMins ?? null });
     // 그 사이 앱이 기록을 다시 읽어 준 사본으로 바뀌었을 수 있다 → 그 회의의 사본마다, 이미 있으면 그대로
     for (const t of copiesOf(my.id, my.doc)) {
       if (!(t.qa || []).some((y) => sameQa(y, item))) t.qa = [...(t.qa || []), item];
@@ -2312,8 +2351,9 @@ async function askMeeting(question) {
   } catch (e) {
     const msg = String(e);
     if (msg !== ASK_CANCELLED) toast(msg, 'error');
-    // 다시 물을 수 있게 질문을 입력 칸에 돌려놓는다 (그 사이 새로 친 글이 없으면)
-    if (!askInput.value.trim() && doc()?.id === my.id) { askInput.value = q; fitAsk(); }
+    // 다시 물을 수 있게 질문을 입력 칸에 돌려놓는다 (그 사이 새로 친 글이 없으면). 따라잡기는 이름뿐이라
+    // 입력 칸으로 보내면 보통 질문이 되므로 돌려놓지 않는다 — 따라잡기 단추를 다시 누르면 된다
+    if (!opts.recentMins && !askInput.value.trim() && doc()?.id === my.id) { askInput.value = q; fitAsk(); }
   } finally {
     if (S.ask === my) S.ask = null;
     clearInterval(S.askTimer);
@@ -3317,6 +3357,12 @@ function setMini(on) {
   if (on) { closePanels(); hidePopovers(); hideNudge(); $('#findbar').hidden = true; S.findQ = ''; }
   renderDock();
   scheduleRender();
+  // 미니 창의 ⏪ 로 큰 창에 돌아왔으면 이어서 따라잡기
+  if (!on && S.catchWanted) {
+    const kind = S.catchWanted;
+    S.catchWanted = null;
+    setTimeout(() => catchUp(kind));
+  }
 }
 function renderMiniCap() {
   const cap = $('#mini-cap');
@@ -4096,14 +4142,17 @@ function createMock() {
   // 브라우저 미리보기: 읽는 척 잠깐 쉬었다가 답을 조금씩 보낸다 (?askslow 면 느리게 · ?askfail 이면 오류)
   const mockQa = {};
   let mockAskCancel = null;
-  async function mockAsk({ id, question, token }) {
+  async function mockAsk({ id, question, token, recentMins }) {
     const q = new URLSearchParams(location.search);
     const wait = (ms) => new Promise((r) => setTimeout(r, ms * (q.has('askslow') ? 4 : 1)));
     const send = (p) => handlers['bd://ask-progress'] && handlers['bd://ask-progress']({ payload: { id, token, ...p } });
     const check = () => { if (mockAskCancel === token) throw '답을 멈췄어요'; };
     await wait(1200); check();
     if (q.has('askfail')) throw 'AI API 오류 429: Rate limit reached (요청 한도를 넘었어요. 잠시 뒤 다시 시도해 주세요)';
-    const answer = /할 일|담당/.test(question)
+    // 따라잡기: 지금 하는 이야기 → 흐름 → 정해진 것
+    const answer = recentMins
+      ? '**지금**: 매장 피드백을 누가 정리할지 이야기 중이에요 (박 디자인) [00:46]\n- 결제 모듈은 금요일까지 배포하기로 했어요 (이 개발) [00:07]\n- 온보딩 시안 2종을 수요일까지 보기로 했어요 (박 디자인) [00:17]\n- 출시일은 15일, 목요일에 한 번 더 점검 (김 팀장) [00:25]\n- 키오스크 응답 속도를 2초 → 0.4초로 줄였어요 (이 개발) [00:34]\n\n**정해진 것**\n- 15일 출시 [00:25]\n- 결제 모듈 배포 — 이 개발, 금요일까지 [00:07]'
+      : /할 일|담당|정해진/.test(question)
       ? '- **결제 모듈 배포** — 이 개발, 금요일까지 [00:07]\n- **온보딩 시안 2종** — 박 디자인, 수요일까지 [00:17]\n- **매장 피드백 정리 · 공유** — 박 디자인, 금요일까지 [00:46] [00:52]'
       : '출시일은 **15일**로 정했고, 목요일에 한 번 더 점검하기로 했어요 [00:25]. 그 전에 키오스크 응답 속도는 인덱스를 추가해 평균 2초에서 0.4초로 줄였다고 이 개발이 말했어요 [00:34].';
     for (const piece of answer.match(/[\s\S]{1,9}/g)) { send({ delta: piece }); await wait(60); check(); }

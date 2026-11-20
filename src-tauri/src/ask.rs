@@ -5,6 +5,8 @@
 //! - 회의 기록이 제공자별 한 번에 보낼 크기([`summary::chunk_budget`])를 넘으면 녹취록은 질문과 겹치는 말이 많은
 //!   문단과 그 앞뒤를 골라 싣고, 남는 자리는 회의 전체에서 고르게 채운다 (요약 · 메모는 늘 싣는다)
 //! - 그래도 너무 크다고 거절되면 반씩 줄여 다시 보낸다
+//! - 지금까지 따라잡기: 받아 적은 마지막 말에서 몇 분 앞까지만 녹취록에 싣고, 앞선 질문 · 답 없이 정리하라는
+//!   지시([`prompts::catch_up`])를 보낸다 — 회의가 길어도 그 구간만 보내 빠르고 싸다
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -142,8 +144,34 @@ fn units(doc: &SessionDoc, cap: usize) -> Vec<String> {
     out
 }
 
-/// 회의 기록 덩어리. 다 실으면 `budget` 글자를 넘을 때 녹취록은 골라 싣는다
-fn context(doc: &SessionDoc, query: &str, budget: usize) -> Context {
+/// 따라잡기로 보낼 것: 그 구간 문장만 남긴 회의 기록, 녹취록이 시작하는 시각(앞을 잘랐을 때), 정리하라는 지시
+struct CatchUp {
+    doc: SessionDoc,
+    from: Option<u64>,
+    text: String,
+}
+
+/// 받아 적은 마지막 말에서 `mins` 분 앞부터 (그 시각에 걸친 문장까지). 회의가 그보다 짧으면 처음부터
+fn catch_up(doc: &SessionDoc, mins: u32) -> Result<CatchUp> {
+    let said = |u: &crate::session::Utterance| !u.text.trim().is_empty();
+    let end = doc.utterances.iter().filter(|u| said(u)).map(|u| u.end_ms).max();
+    let Some(end) = end else { bail!("아직 받아 적은 말이 없어요") };
+    let mins = mins.max(1);
+    let cut = end.saturating_sub(mins as u64 * 60_000);
+    let mut d = doc.clone();
+    d.utterances.retain(|u| said(u) && u.end_ms > cut);
+    let whole = d.utterances.len() == doc.utterances.iter().filter(|u| said(u)).count();
+    let from = d.utterances.iter().map(|u| u.start_ms).min().filter(|_| !whole);
+    let range = match from {
+        Some(ms) => format!("지난 {mins}분([{}]부터) 동안", fmt_time(ms)),
+        None => "회의 처음부터 지금까지".to_string(),
+    };
+    Ok(CatchUp { doc: d, from, text: prompts::catch_up().replace("{범위}", &range) })
+}
+
+/// 회의 기록 덩어리. 다 실으면 `budget` 글자를 넘을 때 녹취록은 골라 싣는다.
+/// `from` 이 있으면 녹취록이 그 시각부터라고 밝힌다 (따라잡기 — 앞부분은 일부러 뺐다)
+fn context(doc: &SessionDoc, query: &str, budget: usize, from: Option<u64>) -> Context {
     let mut head = format!("회의 제목: {}\n일시: {}", doc.title, doc.started_at);
     if doc.duration_ms > 0 {
         head.push_str(&format!(" · 길이 {}", fmt_time(doc.duration_ms)));
@@ -169,9 +197,14 @@ fn context(doc: &SessionDoc, query: &str, budget: usize) -> Context {
         head.push_str("## 녹취록\n(아직 받아 적은 문장이 없어요)\n");
         return Context { text: head, partial: false };
     }
+    let since = from.map(|ms| format!("[{}]부터", fmt_time(ms)));
     let head_len = head.chars().count();
     if head_len + transcript.chars().count() <= budget {
-        return Context { text: format!("{head}## 녹취록\n{transcript}"), partial: false };
+        let title = match &since {
+            Some(s) => format!("## 녹취록 ({s} — 그 앞은 싣지 않았어요)"),
+            None => "## 녹취록".to_string(),
+        };
+        return Context { text: format!("{head}{title}\n{transcript}"), partial: false };
     }
     // 요약 · 메모가 아주 길어도 녹취록 자리는 절반은 남긴다
     let room = budget.saturating_sub(head_len).max(budget / 2);
@@ -193,12 +226,12 @@ fn context(doc: &SessionDoc, query: &str, budget: usize) -> Context {
     if next < lines.len() {
         body.push_str("…\n");
     }
-    Context {
-        text: format!(
-            "{head}## 녹취록 (일부 — 회의가 길어 질문과 관련 있어 보이는 부분 위주로 골라 실었어요. '…' 줄은 건너뛴 곳)\n{body}"
-        ),
-        partial: true,
-    }
+    let title = match &since {
+        Some(s) => format!("## 녹취록 ({s}, 그 가운데 일부 — 길어서 고르게 골라 실었어요. '…' 줄은 건너뛴 곳)"),
+        None => "## 녹취록 (일부 — 회의가 길어 질문과 관련 있어 보이는 부분 위주로 골라 실었어요. '…' 줄은 건너뛴 곳)"
+            .to_string(),
+    };
+    Context { text: format!("{head}{title}\n{body}"), partial: true }
 }
 
 /// 앞 `n` 글자 (잘랐으면 끝에 …)
@@ -231,18 +264,22 @@ fn recent_within(past: &[(String, String)], cap: usize) -> Vec<(String, String)>
     out
 }
 
-/// 이 회의에 묻는다. 답은 받는 대로 `on_event` 로, 사용량은 요청이 성공할 때마다 `on_usage(제공자, 응답)` 로
+/// 이 회의에 묻는다. 답은 받는 대로 `on_event` 로, 사용량은 요청이 성공할 때마다 `on_usage(제공자, 응답)` 로.
+/// `recent_mins` 가 있으면 지금까지 따라잡기 — 받아 적은 마지막 말에서 그 분 앞까지만 정리한다
+/// (`question` 은 기록에 남길 이름 — "지난 10분 정리" — 이고 모델에게는 따라잡기 지시가 간다)
+#[allow(clippy::too_many_arguments)]
 pub fn ask(
     cfg: &SummarySettings,
     doc: &SessionDoc,
     question: &str,
+    recent_mins: Option<u32>,
     on_event: &mut dyn FnMut(Event),
     on_usage: &dyn Fn(&str, &Reply),
     cancel: &AtomicBool,
 ) -> Result<Answer> {
     let (provider, mut chat) = summary::chat_caller(cfg)?;
     let budget = summary::chunk_budget(&provider);
-    ask_with(&mut *chat, &provider, budget, doc, question, on_event, on_usage, cancel)
+    ask_with(&mut *chat, &provider, budget, doc, question, recent_mins, on_event, on_usage, cancel)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -252,6 +289,7 @@ fn ask_with(
     mut budget: usize,
     doc: &SessionDoc,
     question: &str,
+    recent_mins: Option<u32>,
     on_event: &mut dyn FnMut(Event),
     on_usage: &dyn Fn(&str, &Reply),
     cancel: &AtomicBool,
@@ -263,17 +301,28 @@ fn ask_with(
     if !doc.has_content() {
         bail!("아직 물어볼 회의 내용이 없어요");
     }
+    // 따라잡기: 그 구간만 남긴 회의 기록 + 정리하라는 지시. 앞선 질문 · 답은 잇지 않는다 (따로 서는 정리 —
+    // 보낼 글이 작아 빠르고 싸다)
+    let catch = recent_mins.map(|m| catch_up(doc, m)).transpose()?;
+    let (doc, from, question) = match &catch {
+        Some(c) => (&c.doc, c.from, c.text.as_str()),
+        None => (doc, None, question),
+    };
     // 앞선 질문 · 답 (최근 것) — "그건 누가 하기로 했어?" 처럼 이어 묻는 말을 알아듣게
-    let all_past: Vec<(String, String)> = doc
-        .qa
-        .iter()
-        .skip(doc.qa.len().saturating_sub(HISTORY))
-        .map(|x| (clip(&x.q, HISTORY_QUESTION_CHARS), clip(&x.a, HISTORY_ANSWER_CHARS)))
-        .collect();
-    // 녹취록을 고를 때는 바로 앞 질문도 함께 본다
-    let query = match all_past.last() {
-        Some((q, _)) => format!("{question}\n{q}"),
-        None => question.to_string(),
+    let all_past: Vec<(String, String)> = if catch.is_some() {
+        Vec::new()
+    } else {
+        doc.qa
+            .iter()
+            .skip(doc.qa.len().saturating_sub(HISTORY))
+            .map(|x| (clip(&x.q, HISTORY_QUESTION_CHARS), clip(&x.a, HISTORY_ANSWER_CHARS)))
+            .collect()
+    };
+    // 녹취록을 고를 때는 바로 앞 질문도 함께 본다. 따라잡기는 고를 말 없이 구간에서 고르게
+    let query = match (&catch, all_past.last()) {
+        (Some(_), _) => String::new(),
+        (None, Some((q, _))) => format!("{question}\n{q}"),
+        (None, None) => question.to_string(),
     };
     let mut waits = 0;
     loop {
@@ -285,9 +334,10 @@ fn ask_with(
         let past = recent_within(&all_past, budget / 3);
         let talk = past.iter().map(|(q, a)| q.chars().count() + a.chars().count()).sum::<usize>()
             + question.chars().count();
-        let ctx = context(doc, &query, budget.saturating_sub(talk).max(budget / 4));
+        let ctx = context(doc, &query, budget.saturating_sub(talk).max(budget / 4), from);
         let head = format!("다음은 이 회의의 기록입니다.\n\n{}", ctx.text);
-        let mut turns = vec![Turn { user: true, text: &head, cache: true }];
+        // 따라잡기 구간은 다시 쓸 일이 드물어 캐시에 두지 않는다 (캐시에 쓰는 값이 더 든다)
+        let mut turns = vec![Turn { user: true, text: &head, cache: catch.is_none() }];
         for (q, a) in &past {
             turns.push(Turn::user(q));
             turns.push(Turn { user: false, text: a, cache: false });
@@ -370,7 +420,7 @@ mod tests {
     #[test]
     fn short_meetings_are_sent_whole() {
         let d = meeting();
-        let c = context(&d, "VPN 비용", 1_000_000);
+        let c = context(&d, "VPN 비용", 1_000_000, None);
         assert!(!c.partial);
         assert!(c.text.contains("화자: 김성현 매니저, 이낙원 실장님") || c.text.contains("화자: 이낙원 실장님, 김성현 매니저"));
         assert!(c.text.contains("[08:20] 김성현 매니저: VPN 은 월 12만 원"));
@@ -380,7 +430,7 @@ mod tests {
     #[test]
     fn long_meetings_keep_the_lines_that_match_the_question() {
         let d = meeting();
-        let c = context(&d, "VPN 비용이 얼마였지?", 600);
+        let c = context(&d, "VPN 비용이 얼마였지?", 600, None);
         assert!(c.partial);
         assert!(c.text.contains("VPN 은 월 12만 원"), "{}", c.text);
         // 바로 뒤 문단(답하는 말)도 함께
@@ -398,12 +448,12 @@ mod tests {
         d.summary = Some("요약 ".repeat(3_000));
         d.notes = "메모 ".repeat(3_000);
         for budget in [4_000, 2_000] {
-            let n = context(&d, "VPN", budget).text.chars().count();
+            let n = context(&d, "VPN", budget, None).text.chars().count();
             assert!(n <= budget + 300, "{budget}: {n}");
         }
         let mut only_notes = doc(&[]);
         only_notes.notes = "메모 ".repeat(3_000);
-        let c = context(&only_notes, "VPN", 2_000);
+        let c = context(&only_notes, "VPN", 2_000, None);
         assert!(c.text.chars().count() <= 2_000 && c.text.contains("메모 메모"), "{}", c.text.chars().count());
     }
 
@@ -417,14 +467,14 @@ mod tests {
         v[40] = (200, 0, "VPN 은 월 12만 원에 도입했습니다");
         let d = doc(&v);
         assert_eq!(d.to_text().lines().count(), 1, "문단 하나로 묶인다");
-        let c = context(&d, "VPN 비용은?", 800);
+        let c = context(&d, "VPN 비용은?", 800, None);
         assert!(c.partial);
         assert!(c.text.contains("[03:20] 이낙원 실장님: VPN 은 월 12만 원"), "{}", c.text);
 
         // 나뉘지 않은 아주 긴 발화 하나도 잘라서, 질문과 맞는 조각을 싣는다
         let long = format!("{}VPN 은 월 12만 원{}", "가".repeat(3000), "나".repeat(3000));
         let d = doc(&[(0, 0, long.as_str())]);
-        let c = context(&d, "VPN 비용은?", 800);
+        let c = context(&d, "VPN 비용은?", 800, None);
         let body = c.text.split("## 녹취록").nth(1).unwrap();
         assert!(body.contains("VP"), "{body}");
         assert!(body.contains("(이어서)"));
@@ -470,6 +520,7 @@ mod tests {
             100_000,
             &d,
             "  그건 언제 다시 봐?  ",
+            None,
             &mut |e| {
                 if let Event::Text(t) = e {
                     got.push_str(t)
@@ -507,7 +558,7 @@ mod tests {
             }
             reply("답")
         };
-        ask_with(&mut chat, "groq", 4_000, &d, "VPN 비용?", &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).unwrap();
+        ask_with(&mut chat, "groq", 4_000, &d, "VPN 비용?", None, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).unwrap();
         // 첫 요청: 4천 자 자리 안쪽(머리말 · '…' 줄 몇 개 여유), 앞선 답은 1/3 자리만큼 최근 것만
         assert!(sent[0].0 <= 4_000 + 300, "{}", sent[0].0);
         assert!(sent[0].1 >= 1 && sent[0].1 < 6, "{}", sent[0].1);
@@ -542,6 +593,7 @@ mod tests {
             4_000,
             &d,
             "VPN 비용?",
+            None,
             &mut |e| events.push(format!("{e:?}")),
             &|_, _| {},
             &AtomicBool::new(false),
@@ -561,12 +613,63 @@ mod tests {
             calls += 1;
             reply("x")
         };
-        let e = ask_with(&mut chat, "groq", 4_000, &d, "질문", &mut |_| {}, &|_, _| {}, &AtomicBool::new(true)).unwrap_err();
+        let e = ask_with(&mut chat, "groq", 4_000, &d, "질문", None, &mut |_| {}, &|_, _| {}, &AtomicBool::new(true)).unwrap_err();
         assert_eq!(e.to_string(), summary::ASK_CANCELLED_MSG);
-        let e = ask_with(&mut chat, "groq", 4_000, &d, "   ", &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).unwrap_err();
+        let e = ask_with(&mut chat, "groq", 4_000, &d, "   ", None, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).unwrap_err();
         assert!(e.to_string().contains("물어볼 내용"));
         let empty = doc(&[]);
-        assert!(ask_with(&mut chat, "groq", 4_000, &empty, "질문", &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).is_err());
+        assert!(ask_with(&mut chat, "groq", 4_000, &empty, "질문", None, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).is_err());
         assert_eq!(calls, 0);
+    }
+
+    /// 따라잡기: 마지막 말에서 10분 앞부터만 싣고, 앞선 질문 · 답 없이 따라잡기 지시로 묻는다
+    #[test]
+    fn catch_up_sends_only_the_recent_part() {
+        // 20초마다 한 문장, 마지막 문장은 26:20 ~ 26:23
+        let mut d = meeting();
+        d.qa.push(QaItem { q: "VPN 은 얼마야?".into(), a: "월 12만 원이에요 [08:20]".into(), ..Default::default() });
+        let seen: std::cell::RefCell<Vec<(String, bool)>> = Default::default();
+        let mut chat = |s: &str, turns: &[Turn], _: &mut dyn FnMut(&str)| {
+            assert_eq!(s, prompts::ask(), "시스템 프롬프트는 회의에 묻기와 같다 (근거 시각 · 화자 규칙)");
+            *seen.borrow_mut() = turns.iter().map(|t| (t.text.to_string(), t.cache)).collect();
+            reply("**지금**: 일정 이야기 중 [26:20]")
+        };
+        let a = ask_with(
+            &mut chat,
+            "anthropic",
+            100_000,
+            &d,
+            "지난 10분 정리",
+            Some(10),
+            &mut |_| {},
+            &|_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!((a.text.as_str(), a.partial), ("**지금**: 일정 이야기 중 [26:20]", false));
+        assert_eq!(seen.borrow().len(), 2, "회의 기록 + 지시만 — 앞선 질문 · 답은 잇지 않는다");
+        let (record, cache) = seen.borrow()[0].clone();
+        assert!(!cache, "따라잡기 구간은 캐시에 두지 않는다");
+        // 26:23 에서 10분 앞(16:23) 뒤에 끝나는 문장부터: 16:20 문장(16:23 에 끝남)은 빠지고 16:40 부터
+        assert!(record.contains("## 녹취록 ([16:40]부터 — 그 앞은 싣지 않았어요)"), "{record}");
+        assert!(record.contains("[16:40] ") && record.contains("[26:20] "), "{record}");
+        assert!(!record.contains("[16:20] ") && !record.contains("VPN 은 월 12만 원"), "{record}");
+        let ask = seen.borrow()[1].0.clone();
+        assert!(ask.starts_with("회의에 늦게 들어왔거나") && ask.contains("지난 10분([16:40]부터) 동안"), "{ask}");
+        assert!(!ask.contains("{범위}") && !ask.contains("지난 10분 정리"), "기록에 남길 이름은 보내지 않는다");
+
+        // 회의가 10분보다 짧으면 처음부터 다
+        let short = doc(&[(0, 0, "시작할게요"), (90, 1, "네 오늘 안건은 두 가지예요")]);
+        ask_with(&mut chat, "groq", 4_000, &short, "지난 10분 정리", Some(10), &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
+            .unwrap();
+        assert!(seen.borrow()[0].0.contains("## 녹취록\n[00:00] 이낙원 실장님: 시작할게요"), "{}", seen.borrow()[0].0);
+        assert!(seen.borrow()[1].0.contains("회의 처음부터 지금까지 오간"), "{}", seen.borrow()[1].0);
+
+        // 받아 적은 말 없이 메모만 있으면 보내지 않고 알린다
+        let mut memo_only = doc(&[]);
+        memo_only.notes = "안건: 일정".into();
+        let e = ask_with(&mut chat, "groq", 4_000, &memo_only, "지난 10분 정리", Some(10), &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
+            .unwrap_err();
+        assert!(e.to_string().contains("받아 적은 말이 없어요"), "{e}");
     }
 }

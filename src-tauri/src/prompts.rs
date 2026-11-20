@@ -15,6 +15,10 @@ const FILES: &[(&str, &str)] = &[
     ("merge_final.md", include_str!("../prompts/merge_final.md")),
     ("shrink_note.md", include_str!("../prompts/shrink_note.md")),
     ("ask.md", include_str!("../prompts/ask.md")),
+    // 지금까지 따라잡기 — 녹음 중 "지난 10분"만 실어 묻는 지시 (사용자 글). `{범위}` 자리는 ask.rs 가
+    // "지난 10분([32:10]부터) 동안" · "회의 처음부터 지금까지" 로 채운다. 지금 하는 얘기를 맨 앞에 —
+    // 늦게 들어온 사람이 바로 대화에 끼어들 수 있게
+    ("catch_up.md", include_str!("../prompts/catch_up.md")),
     // 회의록 문체 — 서술형 문장이 아니라 개조식으로 가볍게. 회의록을 받아 본 사람의 피드백(2026-11-19):
     // 불릿마다 "~은 ~라고 말했습니다. 또 ~했습니다"처럼 두세 문장씩 풀어 써서 무겁고 읽기 느리다.
     // 화자는 앞("김 팀장:")이 아니라 요점 끝("(김 팀장)")에 — 요점이 먼저 읽히게 (2026-11-19 사수님 요청)
@@ -79,6 +83,10 @@ prompt!(
     /// 회의에 묻기
     ask = "ask.md"
 );
+prompt!(
+    /// 지금까지 따라잡기 — 실린 구간을 정리하라는 지시 (사용자 글, `{범위}` 자리를 채워 보낸다)
+    catch_up = "catch_up.md"
+);
 #[cfg(test)]
 prompt!(
     /// 다른 구간에서 풀린 남은 질문은 빼라는 규칙 (merge_notes · merge_final 에 들어 있다)
@@ -131,6 +139,13 @@ mod tests {
         }
         // 화면이 누를 수 있는 표기 — 회의에 묻기와 같은 [분:초]
         assert!(ask().contains("[12:34]"));
+    }
+
+    #[test]
+    fn catch_up_has_one_range_slot() {
+        // 따라잡기 지시는 회의에 묻기 시스템 프롬프트(근거 시각 · 화자 이름 규칙)와 함께 간다 — 채울 자리는 하나
+        assert_eq!(catch_up().matches("{범위}").count(), 1);
+        assert!(catch_up().contains("**지금**"));
     }
 
     #[test]

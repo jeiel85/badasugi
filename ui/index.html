@@ -166,6 +166,11 @@
       </div>
       <div class="notes-page ask-page" data-npage="ask" role="tabpanel" hidden>
         <div class="notes-scroll ask-list" id="ask-list" aria-live="polite"></div>
+        <!-- 지금까지 따라잡기: 녹음 중에만 — 늦게 들어왔거나 잠깐 자리를 비웠을 때 -->
+        <div class="ask-catch" id="ask-catch" hidden>
+          <button class="chip-btn" id="btn-catch-recent"><svg><use href="#i-rewind"/></svg><span>지난 10분 정리</span></button>
+          <button class="chip-btn" id="btn-catch-decided" title="지금까지 정해진 것과 할 일(담당 · 기한)만 모아요"><svg><use href="#i-check"/></svg>지금까지 정해진 것</button>
+        </div>
         <form class="ask-foot" id="ask-form">
           <textarea id="ask-input" rows="1" spellcheck="false" aria-label="회의에 물어볼 내용" placeholder="이 회의에 대해 물어보세요"></textarea>
           <button class="ask-send" id="ask-send" type="submit" title="보내기 (Enter)"><svg><use href="#i-send"/></svg></button>
@@ -221,6 +226,7 @@
         <button class="icon-btn" id="btn-save" title="파일로 저장"><svg><use href="#i-download"/></svg></button>
         <button class="icon-btn" id="btn-ask" title="회의에 묻기 — AI 에게 이 회의 내용을 물어봐요"><svg><use href="#i-ask"/></svg></button>
         <button class="icon-btn accent" id="btn-summary" title="AI 회의 요약"><svg><use href="#i-sparkles"/></svg></button>
+        <button class="icon-btn mini-only" id="btn-catchup" hidden><svg><use href="#i-rewind"/></svg></button>
         <button class="icon-btn mini-only" id="btn-expand" title="창 위치 복구 — 원래 크기·자리로 (더블클릭해도 돼요)"><svg><use href="#i-expand"/></svg></button>
         <button class="icon-btn mini-only" id="btn-mini-min" title="최소화 (작업 표시줄로)"><svg><use href="#i-minus"/></svg></button>
         <button class="icon-btn mini-only" id="btn-mini-hide" title="트레이로 숨기기"><svg><use href="#i-x"/></svg></button>
@@ -570,6 +576,7 @@
       <symbol id="i-restore" viewBox="0 0 24 24"><rect x="4" y="8" width="12" height="12" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></symbol>
       <symbol id="i-comment" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
       <symbol id="i-notes" viewBox="0 0 24 24"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.4 5.6a2.1 2.1 0 1 0-3-3l-5 5a2 2 0 0 0-.5.9l-.8 2.8a.5.5 0 0 0 .6.6l2.9-.8a2 2 0 0 0 .9-.5z"/></symbol>
+      <symbol id="i-rewind" viewBox="0 0 24 24"><path d="M11 18.5 3.5 12 11 5.5z"/><path d="M20.5 18.5 13 12l7.5-6.5z"/></symbol>
       <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
       <symbol id="i-ask" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M14.5 21.7a.5.5 0 0 0 .9-.1l6.5-19a.5.5 0 0 0-.6-.6l-19 6.5a.5.5 0 0 0-.1.9l7.9 3.2a2 2 0 0 1 1.1 1.1z"/><path d="m21.9 2.1-10.9 10.9"/></symbol>

@@ -516,6 +516,10 @@ mark.cur { background: var(--warn); color: #111; }
 .app.mini .dock-actions .icon-btn { width: 30px; height: 30px; }
 .app.mini #btn-save, .app.mini #btn-summary, .app.mini #btn-ask, .app.mini .engine-label { display: none; }
 .app.mini .mini-only { display: grid; }
+/* 녹음 중 미니 창은 단추가 일곱 개(일시정지 · ⭐ · 복사 · 따라잡기 ⏪ · 창 복구 · 최소화 · 숨기기) — 조금씩 좁히고
+   소리 막대를 다섯 칸으로 줄여 시간 · 소리 막대가 단추에 겹치지 않게 */
+.app.mini.recording .dock-actions .icon-btn { width: 28px; }
+.app.mini.recording .meter i:nth-child(n+6) { display: none; }
 .star-btn .star-ic, .chip-btn .star-ic { font-style: normal; line-height: 1; }
 .star-btn .star-ic { font-size: 15px; }
 .chip-btn .star-ic { font-size: 11px; }
@@ -780,6 +784,11 @@ ol.howto code, .desc code { font-family: var(--mono); font-size: 11.5px; backgro
 .qa-tail { display: flex; justify-content: flex-end; margin-top: -6px; }
 .qa-tail .link { font-size: 11.5px; color: var(--muted); }
 .qa-tail .link:hover { color: var(--rec); }
+.ask-catch { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; border-top: 1px solid var(--line); flex: none; }
+.ask-catch:not([hidden]) + .ask-foot { border-top: 0; padding-top: 6px; }
+.ask-catch .chip-btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px 4px 8px; }
+.ask-catch .chip-btn svg { width: 13px; height: 13px; }
+.ask-catch .chip-btn:disabled { opacity: .45; pointer-events: none; }
 .ask-foot { display: flex; align-items: flex-end; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid var(--line); flex: none; }
 .ask-foot textarea { flex: 1; min-width: 0; height: 36px; max-height: 132px; resize: none; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg); padding: 7px 10px; font-family: var(--font); font-size: 13px; line-height: 1.55; color: var(--text); outline: none; user-select: text; }
 .ask-foot textarea::placeholder { color: var(--muted); }
