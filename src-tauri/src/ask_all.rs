@@ -240,9 +240,13 @@ fn ask_all_with(
     let keep: Vec<&str> = last_sources.iter().map(|s| s.id.as_str()).collect();
     let asked = name_refs(question, last_sources);
     let question = asked.as_str();
-    let past: Vec<(String, String)> = recent_past
-        .iter()
-        .map(|p| (clip(&name_refs(&p.q, &p.sources), 500), clip(&name_refs(&p.a, &p.sources), 1_500)))
+    // 앞선 질문의 번호는 그 질문 바로 앞 답의 번호, 답의 번호는 그 답의 번호
+    let start = past.len().saturating_sub(HISTORY);
+    let past: Vec<(String, String)> = (start..past.len())
+        .map(|k| {
+            let before: &[Source] = if k > 0 { &past[k - 1].sources } else { &[] };
+            (clip(&name_refs(&past[k].q, before), 500), clip(&name_refs(&past[k].a, &past[k].sources), 1_500))
+        })
         .collect();
     // 회의를 고를 때는 바로 앞 질문도 함께 본다 ("그중 기한 있는 것만")
     let query = match past.last() {
@@ -423,17 +427,27 @@ mod tests {
             name_refs("월 12만 원 [회의 2 · 00:00], 예산은 회의 1 에서 [회의 1] · 회의 9 · 회의록", &before),
             "월 12만 원 [보안 점검 회의(2026-11-12) · 00:00], 예산은 예산 회의(2026-10-29) 에서 [예산 회의(2026-10-29)] · 회의 9 · 회의록"
         );
-        let mut seen: Vec<String> = Vec::new();
+        let seen: std::cell::RefCell<Vec<String>> = Default::default();
         let mut chat = |_: &str, turns: &[Turn], _: &mut dyn FnMut(&str)| {
-            seen = turns.iter().map(|t| t.text.to_string()).collect();
+            *seen.borrow_mut() = turns.iter().map(|t| t.text.to_string()).collect();
             Ok(Reply { text: "김 팀장".into(), ..Default::default() })
         };
         let past = vec![Past { q: "VPN 얘기 어디서 했지?".into(), a: "[회의 2 · 00:00] 에서".into(), sources: before.clone() }];
         let a = ask_all_with(&mut chat, "anthropic", 40_000, &docs(), "회의 2의 담당자는?", &past, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
             .unwrap();
         assert!(a.sources.iter().any(|s| s.id == "d3"), "앞 답에 실은 회의는 다시 {:?}", a.sources);
-        assert_eq!(seen[2], "[보안 점검 회의(2026-11-12) · 00:00] 에서", "앞 답의 번호 → 회의 이름");
-        assert_eq!(seen[3], "보안 점검 회의(2026-11-12)의 담당자는?", "새 질문의 번호도 앞 답의 번호로 읽는다");
+        assert_eq!(seen.borrow()[2], "[보안 점검 회의(2026-11-12) · 00:00] 에서", "앞 답의 번호 → 회의 이름");
+        assert_eq!(seen.borrow()[3], "보안 점검 회의(2026-11-12)의 담당자는?", "새 질문의 번호도 앞 답의 번호로 읽는다");
+
+        // 앞선 질문의 번호는 그 질문 바로 앞 답의 번호로 (그 질문의 답은 번호를 새로 매겼다)
+        let after = vec![src(1, "d3", "보안 점검 회의", "2026-11-12"), src(2, "d1", "예산 회의", "2026-10-29")];
+        let past = vec![
+            Past { q: "VPN 얘기 어디서 했지?".into(), a: "[회의 1] 과 [회의 2]".into(), sources: before.clone() },
+            Past { q: "회의 1 의 결론은?".into(), a: "[회의 2] 에서 정함".into(), sources: after },
+        ];
+        ask_all_with(&mut chat, "anthropic", 40_000, &docs(), "고마워", &past, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(seen.borrow()[3], "예산 회의(2026-10-29) 의 결론은?", "앞 답(before)의 1 = 예산 회의");
+        assert_eq!(seen.borrow()[4], "[예산 회의(2026-10-29)] 에서 정함", "그 답(after)의 2 = 예산 회의");
     }
 
     #[test]

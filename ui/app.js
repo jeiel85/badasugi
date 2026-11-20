@@ -2919,8 +2919,8 @@ async function askAll(question) {
   renderAllAsk();
   try {
     // 앞선 질문 · 답과 그때 실은 회의 — 앱이 답의 "회의 2" 를 회의 이름으로 바꿔 보내고 그 회의들을 다시 싣는다
-    // (물을 때마다 회의를 다시 골라 번호가 바뀐다)
-    const history = S.allQa.slice(-4).map((x) => ({ q: x.q, a: x.a, sources: x.sources }));
+    // (물을 때마다 회의를 다시 골라 번호가 바뀐다). 앱은 최근 4개를 보내되, 그 첫 질문의 번호를 읽으려고 하나 더
+    const history = S.allQa.slice(-5).map((x) => ({ q: x.q, a: x.a, sources: x.sources }));
     const r = await api.invoke('ask_all', { question: q, token: my.token, days: days || null, history });
     S.allQa.push({ q, a: r.a, sources: r.sources || [], considered: r.considered, recent: r.recent, at: r.at, model: r.model, days });
   } catch (e) {
