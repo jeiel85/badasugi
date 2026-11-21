@@ -73,13 +73,27 @@ pub fn mask(text: &str) -> (String, usize) {
     (out, n)
 }
 
-/// 기록 사본을 가린다: 문장 · 제목 · 요약 · 메모 · 묻고 답한 것 · 번역 (시각 · 화자 · id 는 그대로)
+/// 기록 사본을 가린다: 문장 · 제목 · 화자 이름 · 요약 · 메모 · 묻고 답한 것 · 번역 · 참석자 · 받아 적은 파일 이름
+/// (시각 · 화자 번호 · 배정 · id 는 그대로)
 pub fn mask_doc(doc: &SessionDoc) -> SessionDoc {
     let mut d = doc.clone();
     let m = |s: &mut String| *s = mask(s).0;
     m(&mut d.title);
     for u in &mut d.utterances {
         m(&mut u.text);
+    }
+    // 화자 이름을 메일 · 번호로 붙인 경우 — 녹취록 · AI 에 보내는 글의 "이름: 말" 에 들어간다
+    for name in d.speakers.values_mut() {
+        m(name);
+    }
+    for a in &mut d.attendees {
+        m(a);
+    }
+    if let Some(f) = d.source_file.as_mut() {
+        m(f);
+    }
+    for c in d.comments.values_mut() {
+        m(c);
     }
     if let Some(s) = d.summary.as_mut() {
         m(s);
@@ -108,6 +122,34 @@ pub fn for_ai(doc: SessionDoc, p: &PrivacySettings) -> SessionDoc {
     }
 }
 
+/// AI 로 보낼 글(직접 쓴 질문 등) — 설정에서 켰으면 가린 것. 기록에 남기는 것은 원래 글로
+pub fn for_ai_text(s: &str, p: &PrivacySettings) -> String {
+    if p.mask_ai {
+        mask(s).0
+    } else {
+        s.to_string()
+    }
+}
+
+/// 모든 회의에 묻기의 앞선 대화 — 질문 · 답 · 근거 회의 제목 (가리기를 켜기 전에 쌓인 대화도 보낼 때 가린다)
+pub fn for_ai_history(history: Vec<crate::ask_all::Past>, p: &PrivacySettings) -> Vec<crate::ask_all::Past> {
+    if !p.mask_ai {
+        return history;
+    }
+    let m = |s: &mut String| *s = mask(s).0;
+    history
+        .into_iter()
+        .map(|mut x| {
+            m(&mut x.q);
+            m(&mut x.a);
+            for s in x.sources.iter_mut().chain(x.q_sources.iter_mut()) {
+                m(&mut s.title);
+            }
+            x
+        })
+        .collect()
+}
+
 /// 기록 파일을 읽어 보관 기간이 지난 녹음이 있으면 (기록, 녹음 파일 이름).
 /// 기록마다 회의 날짜(startedAt)로 따진다. 다른 폴더를 가리키는 이름은 건드리지 않는다
 fn expired_doc(json: &std::path::Path, keep_days: u32, today: chrono::NaiveDate) -> Option<(SessionDoc, String)> {
@@ -134,7 +176,9 @@ pub fn expired(dir: &std::path::Path, keep_days: u32, today: chrono::NaiveDate) 
 }
 
 /// 기록 하나의 녹음 파일을 지운다 → 지웠나. 기록 잠금을 쥔 채 부른다 — 그 사이 저장과 엇갈리지 않게 파일을 다시 읽고,
-/// `skip`(녹음 중인 기록 id)은 건너뛴다. 기록의 녹음 이름을 먼저 비우고, 기록을 고칠 수 없으면 녹음도 지우지 않는다
+/// `skip`(녹음 중인 기록 id)은 건너뛴다.
+/// 녹음 파일을 먼저 지우고 그다음 기록의 녹음 이름을 비운다: 파일을 못 지우면(재생 중 · 권한) 이름을 그대로 둬 다음에
+/// 다시 하고, 이름을 비우다 실패해도 다음 차례에 "파일은 없고 이름만 남은" 기록으로 다시 잡혀 이름만 비운다
 pub fn expire_one(dir: &std::path::Path, json: &std::path::Path, keep_days: u32, today: chrono::NaiveDate, skip: Option<&str>) -> bool {
     let Some((mut doc, audio)) = expired_doc(json, keep_days, today) else {
         return false;
@@ -142,15 +186,19 @@ pub fn expire_one(dir: &std::path::Path, json: &std::path::Path, keep_days: u32,
     if skip == Some(doc.id.as_str()) {
         return false;
     }
+    let ap = dir.join(&audio);
+    let gone = ap.exists();
+    if gone {
+        if let Err(e) = std::fs::remove_file(&ap) {
+            log::warn!("녹음 보관 기간이 지났지만 녹음 파일을 지우지 못함 — 다음에 다시: {} ({e})", ap.display());
+            return false;
+        }
+        log::info!("녹음 보관 기간({keep_days}일)이 지나 지움: {}", ap.display());
+    }
     doc.audio_file = None;
     // 기록과 같은 방식으로 (다 쓴 뒤 바꿔치기 · Markdown 회의록도)
-    if crate::session::write_doc(dir, &doc).is_err() {
-        return false;
-    }
-    let ap = dir.join(&audio);
-    let gone = ap.exists() && std::fs::remove_file(&ap).is_ok();
-    if gone {
-        log::info!("녹음 보관 기간({keep_days}일)이 지나 지움: {}", ap.display());
+    if let Err(e) = crate::session::write_doc(dir, &doc) {
+        log::warn!("녹음 파일은 지웠지만 기록의 녹음 이름을 비우지 못함 — 다음에 다시: {e}");
     }
     gone
 }
@@ -202,6 +250,8 @@ mod tests {
     fn masked_doc_keeps_times_and_ids() {
         let d: SessionDoc = serde_json::from_value(serde_json::json!({
             "version": 1, "id": "m", "title": "010-1111-2222 고객 통화",
+            "speakers": { "1": "kim@example.com" }, "attendees": ["이 매니저 <lee@example.com>"],
+            "sourceFile": "010-9999-8888 통화.m4a",
             "utterances": [{ "id": 7, "startMs": 5000, "endMs": 9000, "speaker": 1, "text": "제 번호는 010-1234-5678 입니다" }],
             "summary": "- 고객 연락처 010-1234-5678 [00:05]", "notes": "a@b.com",
             "qa": [{ "q": "번호?", "a": "010-1234-5678 [00:05]", "at": "", "model": "" }]
@@ -209,8 +259,11 @@ mod tests {
         .unwrap();
         let m = mask_doc(&d);
         assert_eq!(m.title, "[전화번호] 고객 통화");
-        assert_eq!((m.utterances[0].id, m.utterances[0].start_ms), (7, 5000));
+        assert_eq!((m.utterances[0].id, m.utterances[0].start_ms, m.utterances[0].speaker), (7, 5000, Some(1)));
         assert_eq!(m.utterances[0].text, "제 번호는 [전화번호] 입니다");
+        assert_eq!(m.speaker_name(Some(1)), "[이메일]", "화자 이름도 (번호 · 배정은 그대로)");
+        assert_eq!(m.attendees, vec!["이 매니저 <[이메일]>".to_string()]);
+        assert_eq!(m.source_file.as_deref(), Some("[전화번호] 통화.m4a"));
         assert_eq!(m.summary.as_deref(), Some("- 고객 연락처 [전화번호] [00:05]"), "근거 시각은 그대로");
         assert_eq!(m.notes, "[이메일]");
         assert_eq!(m.qa[0].a, "[전화번호] [00:05]");
@@ -219,6 +272,27 @@ mod tests {
         assert_eq!(off.utterances[0].text, d.utterances[0].text);
         let on = for_ai(d, &PrivacySettings { mask_ai: true, ..Default::default() });
         assert_eq!(on.utterances[0].text, "제 번호는 [전화번호] 입니다");
+    }
+
+    #[test]
+    fn questions_and_past_talk_are_masked_only_when_sending() {
+        let on = PrivacySettings { mask_ai: true, ..Default::default() };
+        let off = PrivacySettings::default();
+        assert_eq!(for_ai_text("010-1234-5678 은 누구 번호?", &on), "[전화번호] 은 누구 번호?");
+        assert_eq!(for_ai_text("010-1234-5678 은 누구 번호?", &off), "010-1234-5678 은 누구 번호?");
+        let src = |title: &str| crate::ask_all::Source { n: 1, id: "d1".into(), title: title.into(), started_at: "2026-11-20 10:00".into() };
+        let past = vec![crate::ask_all::Past {
+            q: "a@b.com 로 보낸 건?".into(),
+            a: "[회의 1 · 00:05] 에서 010-1234-5678 로".into(),
+            sources: vec![src("010-1111-2222 고객 통화")],
+            q_sources: vec![src("kim@example.com 면담")],
+        }];
+        let m = for_ai_history(past.clone(), &on);
+        assert_eq!(m[0].q, "[이메일] 로 보낸 건?");
+        assert_eq!(m[0].a, "[회의 1 · 00:05] 에서 [전화번호] 로", "근거 표시는 그대로");
+        assert_eq!((m[0].sources[0].title.as_str(), m[0].q_sources[0].title.as_str()), ("[전화번호] 고객 통화", "[이메일] 면담"));
+        assert_eq!((m[0].sources[0].id.as_str(), m[0].sources[0].n), ("d1", 1));
+        assert_eq!(for_ai_history(past.clone(), &off)[0].q, past[0].q, "끄면 그대로");
     }
 
     /// 앱이 하는 대로: 잠금 없이 훑고 하나씩 지우기
@@ -254,6 +328,26 @@ mod tests {
         let old: SessionDoc = serde_json::from_str(&std::fs::read_to_string(dir.join("old.json")).unwrap()).unwrap();
         assert_eq!((old.audio_file, old.utterances.len()), (None, 1), "녹취록은 남기고 녹음 이름만 비운다");
         assert_eq!(expire_audio(&dir, 30, today, Some("live")), 0, "두 번 지우지 않는다");
+
+        // 녹음 파일을 지우지 못하면(재생 중 · 권한 — 여기선 같은 이름의 폴더로 흉내) 녹음 이름을 남겨 다음에 다시
+        mk("stuck", "2026-09-01", None);
+        std::fs::create_dir_all(dir.join("stuck.opus")).unwrap();
+        let mut s: SessionDoc = serde_json::from_str(&std::fs::read_to_string(dir.join("stuck.json")).unwrap()).unwrap();
+        s.audio_file = Some("stuck.opus".into());
+        std::fs::write(dir.join("stuck.json"), serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(expire_audio(&dir, 30, today, Some("live")), 0);
+        let s: SessionDoc = serde_json::from_str(&std::fs::read_to_string(dir.join("stuck.json")).unwrap()).unwrap();
+        assert_eq!(s.audio_file.as_deref(), Some("stuck.opus"), "못 지운 녹음은 이름을 지키고");
+        assert!(dir.join("stuck.opus").exists());
+        let stuck = |dir: &std::path::Path| expired(dir, 30, today).iter().any(|p| p.ends_with("stuck.json"));
+        assert!(stuck(&dir), "다음에 다시 잡는다");
+
+        // 파일은 이미 없고 이름만 남은 기록은 이름만 비운다
+        std::fs::remove_dir(dir.join("stuck.opus")).unwrap();
+        assert_eq!(expire_audio(&dir, 30, today, Some("live")), 0, "지운 파일 수는 0");
+        let s: SessionDoc = serde_json::from_str(&std::fs::read_to_string(dir.join("stuck.json")).unwrap()).unwrap();
+        assert_eq!(s.audio_file, None);
+        assert!(!stuck(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

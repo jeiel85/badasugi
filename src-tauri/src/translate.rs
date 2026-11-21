@@ -74,8 +74,10 @@ pub fn next_batch(doc: &SessionDoc, todo: &[u64], mask: bool) -> Option<(String,
     let at = us.iter().position(|u| u.id == first)?;
     let line = |u: &crate::session::Utterance| {
         let text = u.text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let text = if mask { crate::privacy::mask(&text).0 } else { text };
-        format!("{}: {text}", doc.speaker_name(doc.resolve(u.speaker)))
+        let name = doc.speaker_name(doc.resolve(u.speaker));
+        // 화자 이름도 메일 · 번호로 붙였을 수 있다
+        let (name, text) = if mask { (crate::privacy::mask(&name).0, crate::privacy::mask(&text).0) } else { (name, text) };
+        format!("{name}: {text}")
     };
     let mut s = String::new();
     if at > 0 {
@@ -281,6 +283,12 @@ mod tests {
         p.utterances[0].text = "Call me at 010-1234-5678.".into();
         let (text, _) = next_batch(&p, &[1], true).unwrap();
         assert_eq!(text, "[번역할 문장]\n[1] 화자 1: Call me at [전화번호].");
+        // 화자 이름을 메일로 붙였어도
+        p.speakers.insert(0, "kim@example.com".into());
+        let (text, _) = next_batch(&p, &[1], true).unwrap();
+        assert_eq!(text, "[번역할 문장]\n[1] [이메일]: Call me at [전화번호].");
+        let (text, _) = next_batch(&p, &[1], false).unwrap();
+        assert_eq!(text, "[번역할 문장]\n[1] kim@example.com: Call me at 010-1234-5678.", "끄면 그대로");
     }
 
     #[test]
