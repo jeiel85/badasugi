@@ -11,8 +11,13 @@ const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement',
   'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html', 'clear_translation']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
 const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all', 'translate_session']);
+// 저장된 기록을 읽어 결과를 만드는 명령 — 기다리던 편집 저장(debounce)을 먼저 보내 고친 내용으로 만들게 한다
+// (문장을 고치다 바로 '전체 복사'를 누르면 고치기 전 글이 복사됐다. 부르는 곳마다 챙기지 않아도 여기서 한 번에)
+const READ_CMDS = new Set(['session_text', 'export_session', 'export_html', 'share_info', 'share_messenger', 'open_mail_draft',
+  'export_todos_ics', 'summarize', 'ask_meeting', 'ask_all', 'translate_session']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
+  if (READ_CMDS.has(cmd)) flushSaves();
   if (AFTER_CMDS.has(cmd)) return orderedChain.then(() => T.core.invoke(cmd, args));
   if (!ORDERED_CMDS.has(cmd)) return T.core.invoke(cmd, args);
   const p = orderedChain.then(() => T.core.invoke(cmd, args));
@@ -1060,13 +1065,20 @@ function refreshLists() {
 // 뒤에서 요약한 회의를 보고 있으면 요약 칸에 바로 (직접 요약 · 요약 고치기 중이면 건드리지 않는다)
 function applyWatchSummary(e) {
   for (const d of [S.liveDoc, S.viewDoc]) {
-    if (!d || d.id !== e.id || (S.summarizing && S.sumId === d.id) || S.sumEdit?.doc === d) continue;
-    d.summary = e.text;
-    d.summaryEdited = false;
-    d.summaryTemplate = e.template;
-    if (e.title && d.autoTitle) { d.title = e.title; d.autoTitle = false; }
+    if (!d || d.id !== e.id || (S.summarizing && S.sumId === d.id)) continue;
+    // 요약을 고치는 중이면 지금은 두고 고치기를 마칠 때 넣는다 (고친 요약을 저장하면 그쪽이 이긴다).
+    // 그냥 건너뛰면 취소한 뒤 다른 것을 고쳐 저장할 때 화면 사본의 옛(빈) 요약이 앱이 만든 요약을 덮었다
+    if (S.sumEdit?.doc === d) { S.sumEdit.late = e; continue; }
+    takeWatchSummary(d, e);
   }
   if (doc()?.id === e.id) { renderMeta(); scheduleRender(); }
+}
+// 녹음 폴더 파일의 자동 요약을 화면 사본에 (앱은 이미 저장했다)
+function takeWatchSummary(d, e) {
+  d.summary = e.text;
+  d.summaryEdited = false;
+  d.summaryTemplate = e.template;
+  if (e.title && d.autoTitle) { d.title = e.title; d.autoTitle = false; }
 }
 // 녹음을 시작한 뒤 Outlook 일정에서 가져온 제목 · 참석자 — 화면 사본도 고쳐 둔다 (화면이 저장할 때 옛 제목으로 덮지 않게)
 function onCalendar(e) {
@@ -1074,7 +1086,12 @@ function onCalendar(e) {
   if (!d || d.id !== e.id) return;
   // 기다리는 사이 사람이 제목을 고쳤으면(아직 저장 전이어도) 그 제목을 지킨다 — 참석자만 받는다
   const keep = !d.autoTitle;
-  if (!keep) { d.title = e.title; d.autoTitle = !!e.autoTitle; }
+  if (!keep) {
+    d.title = e.title; d.autoTitle = !!e.autoTitle;
+    // 이 알림보다 먼저 떠난 화면 저장(옛 자동 제목)이 앱이 넣은 일정 제목을 덮었을 수 있다 → 일정 제목으로 한 번 더 저장
+    // (기다리던 다른 회의 저장은 먼저 보내고)
+    persistDoc.flush(); persistDoc(d); persistDoc.flush();
+  }
   d.attendees = e.attendees || [];
   renderMeta();
   const who = d.attendees.length ? `화자 이름을 바꿀 때 참석자 ${d.attendees.length}명 중에서 고를 수 있어요` : '';
@@ -1990,6 +2007,10 @@ function endSummaryEdit(save) {
     e.doc.summaryEdited = !!v.trim();
     persistDoc(e.doc);
     toast(v.trim() ? '요약을 저장했어요' : '요약을 비웠어요');
+  } else if (e.late) {
+    // 고치는 동안 자동 요약이 도착했고 고친 것은 없음 → 이제 화면에도 넣는다
+    takeWatchSummary(e.doc, e.late);
+    if (doc() === e.doc) renderMeta();
   }
   renderSummary();
 }

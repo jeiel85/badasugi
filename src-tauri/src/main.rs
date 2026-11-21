@@ -1591,8 +1591,21 @@ fn translate_step(
     let yielded = live && app.state::<AppState>().tr_busy.lock().contains(&doc.id);
     if !b.items.is_empty() && !yielded {
         let items: BTreeMap<u64, translate::TrItem> = b.items.iter().cloned().collect();
-        app.state::<AppState>().store.lock().update_translation(&doc.id, |t| translate::merge(t, lang, b.items))?;
-        let _ = app.emit("bd://translation", serde_json::json!({ "id": doc.id, "lang": lang, "items": items }));
+        // 위 확인은 '지금 단추가 도는가'만 본다 — 답을 기다리는 사이 단추가 다른 언어로 시작해 끝까지 마쳤으면 지나친다.
+        // 그래서 실시간 번역은 기록을 고치는 잠금 안에서 언어를 한 번 더 본다
+        let mut applied = true;
+        app.state::<AppState>().store.lock().update_translation(&doc.id, |t| {
+            if live {
+                applied = translate::merge_live(t, lang, b.items);
+            } else {
+                translate::merge(t, lang, b.items);
+            }
+        })?;
+        if applied {
+            let _ = app.emit("bd://translation", serde_json::json!({ "id": doc.id, "lang": lang, "items": items }));
+        } else {
+            log::info!("실시간 번역 답을 버림 — 그 사이 번역 단추가 다른 언어로 번역함");
+        }
     }
     Ok(b.sent)
 }
@@ -2121,6 +2134,16 @@ fn on_move_end(app: &AppHandle) {
 
 /// 배율(DPI) · 해상도 · 작업 표시줄이 바뀌었을 때 (원격 접속 ↔ 노트북 화면, 모니터 연결 등)
 /// 창 크기가 새 배율로 바뀐 뒤 자리를 다시 잡는다: 시계 위에 붙은 미니 창은 다시 붙이고, 나머지는 화면 안으로.
+/// 작업 표시줄 단추가 새로 생김 — 탐색기가 다시 켜지면 녹음 중 빨간 배지 · 업데이트 초록 배지가 지워진 채 남았다.
+/// 창 메시지 처리 중에 불리므로 다른 스레드에서, 단추가 다 만들어질 틈을 두고 다시 얹는다.
+fn on_taskbar_button(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        status::reapply_taskbar(&app);
+    });
+}
+
 fn on_display_change(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -2563,7 +2586,13 @@ fn main() {
                 // 끌어 옮길 때 화면 가장자리·작업 표시줄에 자석처럼 붙게
                 let h = handle.clone();
                 let h2 = handle.clone();
-                snap::install(&w, Box::new(move || on_move_end(&h)), Box::new(move || on_display_change(&h2)));
+                let h4 = handle.clone();
+                snap::install(
+                    &w,
+                    Box::new(move || on_move_end(&h)),
+                    Box::new(move || on_display_change(&h2)),
+                    Box::new(move || on_taskbar_button(&h4)),
+                );
                 // 녹음 중 PC 가 잠들면 일시정지 (덮개 닫고 가방에 넣었다 열었을 때 저절로 이어 녹음되지 않게)
                 let h3 = handle.clone();
                 power::install(&w, Box::new(move |ev| on_power(&h3, ev)));

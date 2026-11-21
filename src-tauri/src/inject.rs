@@ -291,6 +291,11 @@ mod imp {
     pub fn paste(text: &str) -> Result<(), String> {
         let v = 'V' as VIRTUAL_KEY;
         paste_with(text, || {
+            // 클립보드를 열고 저장하는 사이 단축키를 다시 눌렀을 수 있다 — 보내기 직전에 한 번 더 본다
+            // (Ctrl+Alt 를 누른 채면 Ctrl+V 가 Ctrl+Alt+V 로 들어가 Office 의 '선택하여 붙여넣기' 같은 창이 뜬다)
+            if !wait_keys_up(Duration::from_millis(300)) {
+                return Err("단축키(Ctrl · Alt 등)를 다시 누르고 있어 넣지 않았어요".into());
+            }
             send(&[key(VK_CONTROL, 0, 0), key(v, 0, 0), key(v, 0, KEYEVENTF_KEYUP), key(VK_CONTROL, 0, KEYEVENTF_KEYUP)])
         })
     }

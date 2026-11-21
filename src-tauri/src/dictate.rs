@@ -132,11 +132,6 @@ impl Dictate {
 /// 단축키를 눌렀다 — 듣기 시작 (톡 눌러 듣는 중이면 입력)
 pub fn press(app: &AppHandle) {
     let d = app.state::<Dictate>();
-    if d.finishing.load(Ordering::SeqCst) {
-        show(app, View::Error { message: "앞서 말한 글을 넣는 중이에요 — 잠시 뒤 다시 눌러 주세요".into() });
-        hide_later(app, Duration::from_secs(2));
-        return;
-    }
     let id = {
         let mut cur = d.cur.lock();
         if let Some(s) = cur.as_mut() {
@@ -148,6 +143,14 @@ pub fn press(app: &AppHandle) {
             if stop {
                 show(app, View::Working);
             }
+            return;
+        }
+        // 앞서 말한 글을 다듬어 넣는 중 — 잠금 안에서 본다 (`Stopped` 가 세션을 꺼내면서 같은 잠금 안에서 세우므로,
+        // 꺼낸 뒤 세우기 전 틈에 새로 누른 단축키가 빈 자리를 보고 시작하지 않는다)
+        if d.finishing.load(Ordering::SeqCst) {
+            drop(cur);
+            show(app, View::Error { message: "앞서 말한 글을 넣는 중이에요 — 잠시 뒤 다시 눌러 주세요".into() });
+            hide_later(app, Duration::from_secs(2));
             return;
         }
         let id = d.next.fetch_add(1, Ordering::SeqCst) + 1;
@@ -374,12 +377,15 @@ fn on_event(app: &AppHandle, id: u64, ev: Event) {
             let s = {
                 let mut cur = d.cur.lock();
                 match cur.as_ref() {
-                    Some(s) if s.id == id => cur.take(),
+                    Some(s) if s.id == id => {
+                        // 꺼내는 잠금 안에서 세운다 (press 가 같은 잠금 안에서 본다)
+                        d.finishing.store(true, Ordering::SeqCst);
+                        cur.take()
+                    }
                     _ => None,
                 }
             };
             if let Some(s) = s {
-                d.finishing.store(true, Ordering::SeqCst);
                 let app = app.clone();
                 std::thread::spawn(move || {
                     // 다듬기 · 넣기가 어떻게 끝나든(패닉 포함) 다시 들을 수 있게
