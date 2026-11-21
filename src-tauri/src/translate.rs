@@ -198,6 +198,17 @@ pub fn merge(slot: &mut Option<Translation>, lang: &str, items: Vec<(u64, TrItem
     t.items.extend(items);
 }
 
+/// 실시간 번역의 답을 넣는다 → 넣었으면 true.
+/// 실시간 번역은 회의의 번역 언어를 바꾸지 않는다 — 답을 기다리는 사이 번역 단추가 다른 언어로 번역을 마쳐 두었으면
+/// 그 번역을 지우지 않게 버린다 (실시간 번역도 다음 차례부터는 그 언어로 이어 간다)
+pub fn merge_live(slot: &mut Option<Translation>, lang: &str, items: Vec<(u64, TrItem)>) -> bool {
+    if slot.as_ref().is_some_and(|t| !t.items.is_empty() && t.lang != lang) {
+        return false;
+    }
+    merge(slot, lang, items);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +240,25 @@ mod tests {
         // 다른 언어로 넣으면 예전 번역은 버린다
         merge(&mut d.translation, "en", vec![(1, TrItem { src: "Let's start.".into(), text: "Let's start.".into() })]);
         assert_eq!(d.translation.as_ref().unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn late_live_reply_keeps_a_translation_in_another_language() {
+        let item = |s: &str| TrItem { src: s.into(), text: format!("[{s}]") };
+        // 처음(번역 없음) · 같은 언어면 넣는다
+        let mut slot = None;
+        assert!(merge_live(&mut slot, "ko", vec![(1, item("Let's start."))]));
+        assert!(merge_live(&mut slot, "ko", vec![(4, item("Any questions?"))]));
+        assert_eq!(slot.as_ref().unwrap().items.len(), 2);
+        // 답을 기다리는 사이 번역 단추가 일본어로 번역을 마침 → 늦게 온 한국어 답은 버리고 일본어 번역을 지킨다
+        merge(&mut slot, "ja", vec![(1, item("Let's start.")), (2, item("OK"))]);
+        assert!(!merge_live(&mut slot, "ko", vec![(4, item("Any questions?"))]));
+        let t = slot.as_ref().unwrap();
+        assert_eq!((t.lang.as_str(), t.items.len()), ("ja", 2));
+        // 비어 있는 번역(지운 뒤 등)이면 언어가 달라도 새로 넣는다
+        let mut empty = Some(Translation { lang: "ja".into(), items: BTreeMap::new() });
+        assert!(merge_live(&mut empty, "ko", vec![(1, item("Let's start."))]));
+        assert_eq!(empty.unwrap().lang, "ko");
     }
 
     #[test]

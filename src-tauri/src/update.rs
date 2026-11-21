@@ -2,7 +2,8 @@
 //!
 //! - 앱 시작 20초 뒤, 그리고 6시간마다 확인
 //! - "자동 업데이트" 가 켜져 있으면 새 버전을 백그라운드에서 미리 받아 두고,
-//!   녹음·요약·모델 다운로드 중이 아니고 창이 숨겨져 있을 때(트레이 · 최소화 · 미니 창) 조용히 설치 → 앱이 저절로 다시 켜진다
+//!   녹음·요약·모델 다운로드 중이 아니고 창이 숨겨져 있을 때(트레이 · 최소화 · 5분 넘게 자리를 비운 미니 창)
+//!   조용히 설치 → 앱이 저절로 다시 켜진다
 //! - 설치 조건은 녹음을 멈추거나 창을 숨길 때 바로 보고, 그 밖의 경우(요약이 끝남 · 미니 창으로 바꿈)도
 //!   놓치지 않게 준비된 업데이트가 있는 동안 1분마다 다시 본다 (이때 최소화만 한 창은 쓰는 중으로 본다)
 //! - 창이 보이는 동안에는 상단 배너로 알리고, 누르면 바로 설치
@@ -113,7 +114,7 @@ fn spawn_retry(app: AppHandle) {
         std::thread::sleep(RETRY);
         let updates = app.state::<Updates>();
         let resting = updates.auto_failed_at.lock().is_some_and(|t| t.elapsed() < RETRY_AFTER_FAIL);
-        if updates.is_ready() && !resting && (window_closed(&app) || mini_mode(&app)) {
+        if updates.is_ready() && !resting && (window_closed(&app) || mini_idle(&app)) {
             maybe_install(&app);
         }
     });
@@ -212,9 +213,31 @@ fn idle(app: &AppHandle) -> bool {
     rec == RecState::Idle && st.busy_ops.load(Ordering::SeqCst) == 0 && st.downloading.lock().is_none()
 }
 
-/// 미니 창은 늘 떠 있으므로, 쓰고 있지 않으면(대기 중) 숨겨진 창처럼 업데이트해도 된다
-fn mini_mode(app: &AppHandle) -> bool {
-    app.state::<AppState>().settings.lock().mini_mode
+/// 미니 창은 늘 떠 있으므로, 쓰고 있지 않으면(대기 중이고 자리를 비움) 숨겨진 창처럼 업데이트해도 된다.
+/// 대기 중인 것만 보면 회의를 기다리며 미니 창을 띄워 둔 사람이 녹음 단추를 누르려는 순간 앱이 꺼졌다 켜질 수 있어,
+/// PC 에 키보드 · 마우스 입력이 [`AWAY`] 넘게 없을 때만 그렇게 본다.
+fn mini_idle(app: &AppHandle) -> bool {
+    app.state::<AppState>().settings.lock().mini_mode && away_for().is_some_and(|t| t >= AWAY)
+}
+
+/// 미니 창을 띄워 둔 채 이만큼 아무 입력이 없으면 자리를 비운 것으로 본다
+const AWAY: Duration = Duration::from_secs(5 * 60);
+
+/// 마지막 키보드 · 마우스 입력에서 지난 시간 (이 로그인 세션 기준, 알 수 없으면 None)
+fn away_for() -> Option<Duration> {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::SystemInformation::GetTickCount;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+        let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+        if GetLastInputInfo(&mut info) == 0 {
+            return None;
+        }
+        // 둘 다 부팅 뒤 밀리초(49.7일마다 한 바퀴) — 빼기도 한 바퀴 돌려 맞춘다
+        Some(Duration::from_millis(GetTickCount().wrapping_sub(info.dwTime) as u64))
+    }
+    #[cfg(not(windows))]
+    None
 }
 
 fn window_hidden(app: &AppHandle) -> bool {
@@ -233,7 +256,7 @@ pub fn maybe_install(app: &AppHandle) {
     if !app.state::<AppState>().settings.lock().auto_update {
         return;
     }
-    if app.state::<Updates>().ready.lock().is_none() || !idle(app) || !(window_hidden(app) || mini_mode(app)) {
+    if app.state::<Updates>().ready.lock().is_none() || !idle(app) || !(window_hidden(app) || mini_idle(app)) {
         return;
     }
     // 이미 기다리는 중이면 그쪽에 맡긴다 (창 숨기기와 1분 확인이 겹쳐도 설치는 한 번)
@@ -245,7 +268,7 @@ pub fn maybe_install(app: &AppHandle) {
         // 숨기자마자 다시 여는 경우를 위해 잠깐 기다렸다가 한 번 더 확인
         std::thread::sleep(Duration::from_secs(8));
         let hidden = window_hidden(&app);
-        if idle(&app) && (hidden || mini_mode(&app)) {
+        if idle(&app) && (hidden || mini_idle(&app)) {
             if let Err(e) = install(&app, hidden) {
                 log::warn!("자동 업데이트 설치 실패: {e}");
                 *app.state::<Updates>().auto_failed_at.lock() = Some(Instant::now());

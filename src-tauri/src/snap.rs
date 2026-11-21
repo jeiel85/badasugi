@@ -4,6 +4,7 @@
 //!   착 달라붙게 한다. 작업 영역은 작업 표시줄을 뺀 영역이라, 아래쪽에 붙이면 작업 표시줄 바로 위에 붙는다.
 //! - 배율(DPI) · 해상도 · 작업 표시줄이 바뀌면(원격 접속 ↔ 노트북 화면 등) 알려 주어 창을 다시 자리 잡게 한다.
 //! - 모니터가 여러 개면 창이 가장 많이 걸친 모니터 기준.
+//! - 작업 표시줄 단추가 새로 생기면(탐색기가 다시 시작됨 등) 알려 주어 배지 · 진행 막대를 다시 얹게 한다.
 
 /// 창 이벤트를 받을 함수
 pub type Callback = Box<dyn Fn() + Send + Sync>;
@@ -65,6 +66,7 @@ fn popup_spot(size: (i32, i32), work: Rect4, avoid: Option<Rect4>, gap: i32) -> 
 
 #[cfg(windows)]
 mod imp {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::OnceLock;
 
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -75,9 +77,9 @@ mod imp {
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindow, HWND_TOPMOST, SPI_SETWORKAREA,
-        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_EXITSIZEMOVE,
-        WM_MOVING, WM_SETTINGCHANGE,
+        GetWindowRect, IsIconic, IsWindowVisible, RegisterWindowMessageW, SetWindowPos, ShowWindow, HWND_TOPMOST,
+        SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+        WM_EXITSIZEMOVE, WM_MOVING, WM_SETTINGCHANGE,
     };
 
     use super::{Callback, Rect4};
@@ -87,6 +89,9 @@ mod imp {
 
     static ON_MOVE_END: OnceLock<Callback> = OnceLock::new();
     static ON_DISPLAY: OnceLock<Callback> = OnceLock::new();
+    static ON_TASKBAR_BUTTON: OnceLock<Callback> = OnceLock::new();
+    /// "TaskbarButtonCreated" 메시지 번호 — 고정 번호가 아니라 실행할 때 등록해서 받는다 (0 = 아직 없음)
+    static TASKBAR_BUTTON_CREATED: AtomicU32 = AtomicU32::new(0);
 
     /// 창 사각형과 눈에 보이는 테두리 사이 여백 (왼쪽, 위, 오른쪽, 아래)
     unsafe fn insets(hwnd: HWND) -> (i32, i32, i32, i32) {
@@ -169,6 +174,15 @@ mod imp {
         _id: usize,
         _data: usize,
     ) -> LRESULT {
+        // 작업 표시줄 단추가 새로 생김 (탐색기가 다시 켜짐 · 창을 다시 보임): 단추에 얹었던 배지 · 진행 막대가 지워져 있다
+        let created = TASKBAR_BUTTON_CREATED.load(Ordering::Relaxed);
+        if created != 0 && msg == created {
+            let r = DefSubclassProc(hwnd, msg, wparam, lparam);
+            if let Some(f) = ON_TASKBAR_BUTTON.get() {
+                f();
+            }
+            return r;
+        }
         match msg {
             WM_MOVING if lparam != 0 => {
                 snap(hwnd, &mut *(lparam as *mut RECT));
@@ -199,10 +213,18 @@ mod imp {
         DefSubclassProc(hwnd, msg, wparam, lparam)
     }
 
-    pub fn install(hwnd: *mut core::ffi::c_void, on_move_end: Callback, on_display: Callback) {
+    pub fn install(
+        hwnd: *mut core::ffi::c_void,
+        on_move_end: Callback,
+        on_display: Callback,
+        on_taskbar_button: Callback,
+    ) {
         let _ = ON_MOVE_END.set(on_move_end);
         let _ = ON_DISPLAY.set(on_display);
+        let _ = ON_TASKBAR_BUTTON.set(on_taskbar_button);
         unsafe {
+            let name: Vec<u16> = "TaskbarButtonCreated\0".encode_utf16().collect();
+            TASKBAR_BUTTON_CREATED.store(RegisterWindowMessageW(name.as_ptr()), Ordering::Relaxed);
             SetWindowSubclass(hwnd as HWND, Some(subclass), 0x5341_5050, 0);
         }
     }
@@ -264,14 +286,15 @@ mod imp {
     }
 }
 
-/// 창에 자석 효과를 달고, 이동 끝 · 화면 구성 변경을 알려 받는다 (메인 스레드에서 한 번)
-pub fn install(window: &tauri::WebviewWindow, on_move_end: Callback, on_display: Callback) {
+/// 창에 자석 효과를 달고, 이동 끝 · 화면 구성 변경 · 작업 표시줄 단추 새로 생김을 알려 받는다 (메인 스레드에서 한 번).
+/// 알림 함수는 창 메시지 처리 중에 불리므로 오래 걸리는 일은 다른 스레드로 넘긴다.
+pub fn install(window: &tauri::WebviewWindow, on_move_end: Callback, on_display: Callback, on_taskbar_button: Callback) {
     #[cfg(windows)]
     if let Ok(h) = window.hwnd() {
-        imp::install(h.0, on_move_end, on_display);
+        imp::install(h.0, on_move_end, on_display, on_taskbar_button);
     }
     #[cfg(not(windows))]
-    let _ = (window, on_move_end, on_display);
+    let _ = (window, on_move_end, on_display, on_taskbar_button);
 }
 
 /// 작업 표시줄 시계 위(작업 영역 오른쪽 아래)로
