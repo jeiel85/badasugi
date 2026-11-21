@@ -552,6 +552,16 @@
           </section>
 
           <section>
+            <h4>개인정보</h4>
+            <p class="desc">전화번호 · 주민등록번호 · 카드번호 · 계좌번호 · 이메일처럼 보이는 숫자를 <code>[전화번호]</code> 같은 글로 가려요. 이 PC 안에서 규칙으로 가리고, 기록의 원문은 그대로예요. 숫자로 받아 적힌 것만 잡아요 ("공일공 …" 처럼 글자로 받아 적힌 번호는 못 잡아요). 음성 인식을 API 로 하면 소리는 그대로 보내져요.</p>
+            <div class="set-group">
+              <label class="row"><span>AI 로 보낼 때 가리기<small>요약 · 회의에 묻기 · 따라잡기 · 모든 회의에 묻기 · 번역 — 답의 근거 시각은 원문 문장으로 이어져요 · 말로 입력은 번호 · 메일이 있으면 AI 로 다듬지 않아요</small></span><input type="checkbox" class="switch" id="opt-mask-ai" /></label>
+              <label class="row"><span>내보낼 때 가리기<small>파일 내보내기(Markdown · Word · PDF · 텍스트 · 자막) · 복사(전체 · 요약 · 답) · 보내기(메신저 · 메일 · 일정) — JSON 은 원본 그대로</small></span><input type="checkbox" class="switch" id="opt-mask-export" /></label>
+              <label class="row"><span>녹음 파일 보관 기간<small>지나면 녹음 파일(.opus)만 지워요 · 녹취록 · 요약 · 메모는 남아요</small></span><select class="compact" id="opt-audio-keep"><option value="0">계속 보관</option><option value="7">7일</option><option value="30">30일</option><option value="90">90일</option><option value="365">1년</option></select></label>
+            </div>
+          </section>
+
+          <section>
             <h4>회의 시작 알림</h4>
             <div class="set-group">
               <label class="row"><span>회의가 시작되면 알려 주기<small>회의 앱이 마이크를 쓰기 시작하면 시계 위에서 받아쓸지 묻고, 마이크를 놓으면 멈출지 물어요 · 녹음을 저절로 시작하지는 않아요</small></span><input type="checkbox" class="switch" id="opt-meet" /></label>

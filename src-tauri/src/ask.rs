@@ -299,20 +299,27 @@ pub(crate) fn recent_within(past: &[(String, String)], cap: usize) -> Vec<(Strin
 
 /// 이 회의에 묻는다. 답은 받는 대로 `on_event` 로, 사용량은 요청이 성공할 때마다 `on_usage(제공자, 응답)` 로.
 /// `recent_mins` 가 있으면 지금까지 따라잡기 — 받아 적은 마지막 말에서 그 분 앞까지만 정리한다
-/// (`question` 은 기록에 남길 이름 — "지난 10분 정리" — 이고 모델에게는 따라잡기 지시가 간다)
+/// (`question` 은 기록에 남길 이름 — "지난 10분 정리" — 이고 모델에게는 따라잡기 지시가 간다).
+/// `mask`: 개인정보 가리기 — 구간은 원문으로 고르고 보내는 글만 가린다 ([`crate::privacy::masked_chat`])
 #[allow(clippy::too_many_arguments)]
 pub fn ask(
     cfg: &SummarySettings,
     doc: &SessionDoc,
     question: &str,
     recent_mins: Option<u32>,
+    mask: bool,
     on_event: &mut dyn FnMut(Event),
     on_usage: &dyn Fn(&str, &Reply),
     cancel: &AtomicBool,
 ) -> Result<Answer> {
     let (provider, mut chat) = summary::chat_caller(cfg)?;
     let budget = summary::chunk_budget(&provider);
-    ask_with(&mut *chat, &provider, budget, doc, question, recent_mins, on_event, on_usage, cancel)
+    if mask {
+        let mut chat = crate::privacy::masked_chat(&mut *chat);
+        ask_with(&mut chat, &provider, budget, doc, question, recent_mins, on_event, on_usage, cancel)
+    } else {
+        ask_with(&mut *chat, &provider, budget, doc, question, recent_mins, on_event, on_usage, cancel)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -740,5 +747,35 @@ mod tests {
         let e = ask_with(&mut chat, "groq", 4_000, &memo_only, "지난 10분 정리", Some(10), &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
             .unwrap_err();
         assert!(e.to_string().contains("받아 적은 말이 없어요"), "{e}");
+    }
+
+    /// 개인정보 가리기: 긴 회의에서 질문과 맞는 구간은 원문 번호로 고르고, 보내는 글(기록 · 앞선 대화 · 질문)만 가린다
+    #[test]
+    fn privacy_mask_picks_lines_by_the_real_number_and_hides_it_when_sending() {
+        let mut v = Vec::new();
+        for i in 0..300u64 {
+            let t = if i % 7 == 0 { "010-1111-2222 번호 고객에게 다시 전화하기로" } else { "오늘은 리포트 화면 배치와 일정 이야기를 이어서 했습니다" };
+            v.push((i * 10, (i % 2) as u32, t));
+        }
+        v.push((3_010, 0, "010-3333-4444 번호 고객은 계약서를 검토하기로 함"));
+        let mut d = doc(&v);
+        d.qa.push(QaItem { q: "kim@example.com 은 누구?".into(), a: "고객 담당".into(), ..Default::default() });
+        let mut seen: Vec<String> = Vec::new();
+        let mut inner = |_: &str, turns: &[Turn], _: &mut dyn FnMut(&str)| {
+            seen = turns.iter().map(|t| t.text.to_string()).collect();
+            reply("계약서 검토 [50:10]")
+        };
+        let mut chat = crate::privacy::masked_chat(&mut inner);
+        let a = ask_with(&mut chat, "groq", 4_000, &d, "010-3333-4444 고객은 뭐 하기로 했지?", None, &mut |_| {}, &|_, _| {}, &AtomicBool::new(false))
+            .unwrap();
+        drop(chat);
+        assert!(a.partial, "긴 회의라 일부만 실었다");
+        let all = seen.join("\n");
+        assert!(all.contains("[전화번호] 번호 고객은 계약서를 검토하기로 함"), "묻는 구간이 실린다");
+        for raw in ["010-3333-4444", "010-1111-2222", "kim@example.com"] {
+            assert!(!all.contains(raw), "보내는 글에 {raw} 가 남음");
+        }
+        assert_eq!(seen.last().map(String::as_str), Some("[전화번호] 고객은 뭐 하기로 했지?"), "직접 쓴 질문도");
+        assert!(seen.iter().any(|t| t == "[이메일] 은 누구?"), "앞선 질문도 {seen:?}");
     }
 }

@@ -82,6 +82,8 @@ pub struct Settings {
     pub summary: SummarySettings,
     /// 번역 (요약에 쓰는 AI 로)
     pub translate: TranslateSettings,
+    /// 개인정보 가리기 · 녹음 보관 기간 (privacy.rs)
+    pub privacy: crate::privacy::PrivacySettings,
     /// 사용량 금액을 원화로 보여 줄 때 쓰는 환율 (1달러 = ? 원)
     pub usd_krw: f64,
 }
@@ -195,6 +197,7 @@ impl Default for Settings {
             full_bounds: None,
             summary: SummarySettings::default(),
             translate: TranslateSettings::default(),
+            privacy: Default::default(),
             usd_krw: DEFAULT_USD_KRW,
         }
     }

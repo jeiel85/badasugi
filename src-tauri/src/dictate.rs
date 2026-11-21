@@ -423,11 +423,17 @@ fn finish(app: &AppHandle, s: Session) {
         unload_later(app);
         return;
     }
-    let (polish, mode) = {
+    let (mut polish, mode, mask_ai) = {
         let st = app.state::<AppState>();
         let s = st.settings.lock();
-        (s.dictation_polish, inject::Mode::from_setting(&s.dictation_insert))
+        (s.dictation_polish, inject::Mode::from_setting(&s.dictation_insert), s.privacy.mask_ai)
     };
+    // 개인정보 가리기(AI 로 보낼 때)를 켰는데 번호 · 메일이 들어 있으면 AI 로 보내지 않는다 — 가려 보내면
+    // 다듬은 글에 [전화번호] 같은 자리 글이 들어가 내가 말한 번호가 사라지므로, 규칙으로 다듬은 글을 그대로 넣는다
+    if polish && skip_polish(&text, mask_ai) {
+        log::info!("말로 입력: 개인정보처럼 보이는 번호 · 메일이 있어 AI 다듬기를 건너뜀 (개인정보 가리기)");
+        polish = false;
+    }
     if polish {
         show(app, View::Polishing);
         match polish_text(app, &text) {
@@ -465,6 +471,11 @@ fn finish(app: &AppHandle, s: Session) {
         }
     }
     unload_later(app);
+}
+
+/// AI 다듬기를 건너뛸까 — 개인정보 가리기(AI 로 보낼 때)를 켰고 글에 가릴 것(번호 · 메일)이 있으면 (privacy.rs)
+fn skip_polish(text: &str, mask_ai: bool) -> bool {
+    mask_ai && crate::privacy::mask(text).1 > 0
 }
 
 /// AI 로 맞춤법 · 띄어쓰기 · 문장부호를 다듬는다 (설정 › 요약의 AI). 시간이 걸리면 그만둔다
@@ -751,7 +762,15 @@ pub fn tidy(text: &str) -> String {
 
 #[cfg(test)]
 mod tidy_tests {
-    use super::tidy;
+    use super::{skip_polish, tidy};
+
+    #[test]
+    fn privacy_mask_skips_ai_polish_only_when_there_is_something_to_hide() {
+        assert!(skip_polish("제 번호는 010-1234-5678 이에요.", true));
+        assert!(skip_polish("kim@example.com 으로 보내 주세요.", true));
+        assert!(!skip_polish("제 번호는 010-1234-5678 이에요.", false), "가리기를 껐으면 그대로 다듬는다");
+        assert!(!skip_polish("내일 회의는 세 시로 하죠.", true), "가릴 것이 없으면 다듬는다");
+    }
 
     #[test]
     fn drops_fillers_and_keeps_meaningful_words() {

@@ -31,6 +31,8 @@ tauri-plugin-window-state = "2"
 # Word(.docx) 내보내기: zip 묶기 (deflate · crc32)
 flate2 = "1"
 crc32fast = "1"
+# 개인정보 가리기 (전화번호 · 주민번호 · 카드 · 계좌 · 이메일 규칙)
+regex = "1"
 
 [features]
 vulkan = ["badasugi-core/vulkan"]

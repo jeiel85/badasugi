@@ -1243,6 +1243,8 @@ impl SessionStore {
         doc.qa = old.qa.clone();
         // 번역도 앱만 고친다 (번역하는 동안 늦게 도착한 화면 사본이 새 번역을 지우지 않게)
         doc.translation = old.translation.clone();
+        // 녹음 파일 이름도 앱만 고친다 (보관 기간이 지나 녹음을 지운 뒤 늦게 도착한 화면 사본이 이름을 되살리지 않게)
+        doc.audio_file = old.audio_file.clone();
         if doc.speaker_rev < old.speaker_rev {
             // 화자 다시 정리 전에 만든 화면 사본이 늦게 저장됨: 화자 배정 · 이름은 저장된(정리된) 것을 지키고
             // 제목 · 글자 · 삭제만 반영한다
