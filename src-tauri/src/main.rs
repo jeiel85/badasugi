@@ -1407,6 +1407,8 @@ async fn export_html(app: AppHandle, id: String, tr: Option<String>) -> CmdResul
 #[tauri::command]
 async fn print_pdf(app: AppHandle, path: String, title: String) -> CmdResult<()> {
     off_main(move || {
+        // 페이지 머리글의 제목도 본문(export_html)처럼 — 화면은 원래 제목을 넘긴다
+        let title = if app.state::<AppState>().settings.lock().privacy.mask_export { privacy::mask(&title).0 } else { title };
         let w = app.get_webview_window("main").ok_or("창을 찾을 수 없어요")?;
         export::print_pdf(&w, Path::new(&path), &title)
     })
