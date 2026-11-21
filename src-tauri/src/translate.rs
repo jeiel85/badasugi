@@ -180,7 +180,12 @@ pub fn translate_batch(chat: &mut Chat, lang: &str, doc: &SessionDoc, todo: &[u6
         return Ok(Batch::default());
     };
     let by_id: std::collections::HashMap<u64, &crate::session::Utterance> = doc.utterances.iter().map(|u| (u.id, u)).collect();
-    let names: Vec<String> = ids.iter().map(|id| doc.speaker_name(doc.resolve(by_id[id].speaker))).collect();
+    // 답이 되풀이한 "이름:" 머리말을 떼려면 보낸 것과 같은 이름으로 (가리기를 켰으면 가린 이름)
+    let names: Vec<String> = ids
+        .iter()
+        .map(|id| doc.speaker_name(doc.resolve(by_id[id].speaker)))
+        .map(|n| if mask { crate::privacy::mask(&n).0 } else { n })
+        .collect();
     let reply = chat(&system(lang), &[Turn::user(&text)], &mut |_| {})?;
     let got = parse(&reply.text, &names);
     let items = ids
@@ -379,6 +384,23 @@ mod tests {
             b.items,
             vec![(2, TrItem { src: "OK,   the release is on Friday.".into(), text: "네, 출시는 금요일이에요.".into() })],
             "빠진 [2] 는 다음에 다시"
+        );
+    }
+
+    #[test]
+    fn masked_speaker_prefix_echoed_in_the_reply_is_dropped() {
+        let mut d = doc();
+        d.speakers.insert(1, "kim@example.com".into());
+        let mut chat: Chat = Box::new(|_: &str, turns: &[Turn], _: &mut dyn FnMut(&str)| {
+            assert!(turns[0].text.contains("[1] [이메일]: OK, the release is on Friday."), "{}", turns[0].text);
+            assert!(!turns[0].text.contains("kim@example.com"));
+            Ok(Reply { text: "[1] [이메일]: 네, 출시는 금요일이에요.".into(), model: "fake".into(), ..Default::default() })
+        });
+        let b = translate_batch(&mut chat, "ko", &d, &[2], true).unwrap();
+        assert_eq!(
+            b.items,
+            vec![(2, TrItem { src: "OK,   the release is on Friday.".into(), text: "네, 출시는 금요일이에요.".into() })],
+            "가린 이름 머리말을 떼고, 원문 짝은 원문 그대로"
         );
     }
 }

@@ -2235,7 +2235,8 @@ $('#btn-copy').addEventListener('click', async () => {
 });
 $('#btn-copy-summary').addEventListener('click', async () => {
   const d = doc();
-  if (d?.summary) { await navigator.clipboard.writeText(d.summary); toast('요약을 복사했어요'); }
+  // 바로 복사하는 글도 "내보낼 때 가리기" 를 따른다 (privacy.rs — 앱이 가려 돌려준다)
+  if (d?.summary) { await navigator.clipboard.writeText(await api.invoke('export_text', { text: d.summary })); toast('요약을 복사했어요'); }
 });
 $('#btn-fold-summary').addEventListener('click', () => $('#summary-card').classList.toggle('folded'));
 
@@ -2931,7 +2932,7 @@ askList.addEventListener('click', async (e) => {
   const x = d.qa?.[i];
   if (!x) return;
   if (act === 'copy') {
-    await navigator.clipboard.writeText(`Q. ${x.q}\n${x.a}`);
+    await navigator.clipboard.writeText(await api.invoke('export_text', { text: `Q. ${x.q}\n${x.a}` }));
     toast('질문과 답을 복사했어요');
   } else if (act === 'memo') {
     const cur = (d.notes || '').replace(/\s+$/, '');
@@ -3296,7 +3297,7 @@ haskList.addEventListener('click', async (e) => {
   if (!x) return;
   if (b.dataset.allqa === 'copy') {
     const refs = x.sources.map((s) => `회의 ${s.n}: ${s.title} (${whenLabel(s.startedAt)})`).join('\n');
-    await navigator.clipboard.writeText(`Q. ${x.q}\n${x.a}\n\n${refs}`);
+    await navigator.clipboard.writeText(await api.invoke('export_text', { text: `Q. ${x.q}\n${x.a}\n\n${refs}` }));
     toast('질문과 답을 복사했어요');
   } else if (b.dataset.allqa === 'del') {
     S.allQa.splice(i, 1);
@@ -5138,6 +5139,7 @@ function createMock() {
         return d;
       }
       if (cmd === 'session_text') return '데모';
+      if (cmd === 'export_text') return args.text;
       if (cmd === 'summarize') return mockSummarize(args);
       if (cmd === 'summary_templates') return mockTemplates();
       // 요약 보내기: 앱(share.rs)과 같은 모양의 예시

@@ -1478,6 +1478,16 @@ async fn export_todos_ics(app: AppHandle, id: String, path: String) -> CmdResult
     .await
 }
 
+/// 화면에서 바로 복사하는 글(요약 · 묻고 답한 것) — "내보낼 때 가리기" 를 켰으면 가린 것
+#[tauri::command]
+fn export_text(app: AppHandle, text: String) -> String {
+    if app.state::<AppState>().settings.lock().privacy.mask_export {
+        privacy::mask(&text).0
+    } else {
+        text
+    }
+}
+
 #[tauri::command]
 async fn session_text(app: AppHandle, id: String, format: String) -> CmdResult<String> {
     off_main(move || {
@@ -2734,6 +2744,7 @@ fn main() {
             open_mail_draft,
             export_todos_ics,
             session_text,
+            export_text,
             summarize,
             cancel_summary,
             ask_meeting,
