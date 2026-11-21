@@ -16,6 +16,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::session::SessionDoc;
+use crate::summary::{Reply, Turn};
 
 /// 개인정보 설정
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -122,32 +123,18 @@ pub fn for_ai(doc: SessionDoc, p: &PrivacySettings) -> SessionDoc {
     }
 }
 
-/// AI 로 보낼 글(직접 쓴 질문 등) — 설정에서 켰으면 가린 것. 기록에 남기는 것은 원래 글로
-pub fn for_ai_text(s: &str, p: &PrivacySettings) -> String {
-    if p.mask_ai {
-        mask(s).0
-    } else {
-        s.to_string()
+/// 보내는 글(차례마다)을 가려 `chat`(AI 와 주고받는 함수, summary::Chat 모양)으로 넘기는 함수 — 회의에 묻기 ·
+/// 모든 회의에 묻기. 질문과 맞는 회의 · 구간은 원문으로 고르고(번호 · 메일로 찾는 질문도 맞는 회의를 고르게),
+/// 고른 뒤 만든 글만 나갈 때 가린다: 회의 기록 덩어리 · 앞선 질문 · 답(가리기를 켜기 전 것도) · 직접 쓴 질문 모두
+pub fn masked_chat<F>(mut chat: F) -> impl FnMut(&str, &[Turn], &mut dyn FnMut(&str)) -> anyhow::Result<Reply>
+where
+    F: FnMut(&str, &[Turn], &mut dyn FnMut(&str)) -> anyhow::Result<Reply>,
+{
+    move |system: &str, turns: &[Turn], on_text: &mut dyn FnMut(&str)| {
+        let texts: Vec<String> = turns.iter().map(|t| mask(t.text).0).collect();
+        let masked: Vec<Turn> = turns.iter().zip(&texts).map(|(t, s)| Turn { user: t.user, text: s, cache: t.cache }).collect();
+        chat(system, &masked, on_text)
     }
-}
-
-/// 모든 회의에 묻기의 앞선 대화 — 질문 · 답 · 근거 회의 제목 (가리기를 켜기 전에 쌓인 대화도 보낼 때 가린다)
-pub fn for_ai_history(history: Vec<crate::ask_all::Past>, p: &PrivacySettings) -> Vec<crate::ask_all::Past> {
-    if !p.mask_ai {
-        return history;
-    }
-    let m = |s: &mut String| *s = mask(s).0;
-    history
-        .into_iter()
-        .map(|mut x| {
-            m(&mut x.q);
-            m(&mut x.a);
-            for s in x.sources.iter_mut().chain(x.q_sources.iter_mut()) {
-                m(&mut s.title);
-            }
-            x
-        })
-        .collect()
 }
 
 /// 기록 파일을 읽어 보관 기간이 지난 녹음이 있으면 (기록, 녹음 파일 이름).
@@ -272,27 +259,6 @@ mod tests {
         assert_eq!(off.utterances[0].text, d.utterances[0].text);
         let on = for_ai(d, &PrivacySettings { mask_ai: true, ..Default::default() });
         assert_eq!(on.utterances[0].text, "제 번호는 [전화번호] 입니다");
-    }
-
-    #[test]
-    fn questions_and_past_talk_are_masked_only_when_sending() {
-        let on = PrivacySettings { mask_ai: true, ..Default::default() };
-        let off = PrivacySettings::default();
-        assert_eq!(for_ai_text("010-1234-5678 은 누구 번호?", &on), "[전화번호] 은 누구 번호?");
-        assert_eq!(for_ai_text("010-1234-5678 은 누구 번호?", &off), "010-1234-5678 은 누구 번호?");
-        let src = |title: &str| crate::ask_all::Source { n: 1, id: "d1".into(), title: title.into(), started_at: "2026-11-20 10:00".into() };
-        let past = vec![crate::ask_all::Past {
-            q: "a@b.com 로 보낸 건?".into(),
-            a: "[회의 1 · 00:05] 에서 010-1234-5678 로".into(),
-            sources: vec![src("010-1111-2222 고객 통화")],
-            q_sources: vec![src("kim@example.com 면담")],
-        }];
-        let m = for_ai_history(past.clone(), &on);
-        assert_eq!(m[0].q, "[이메일] 로 보낸 건?");
-        assert_eq!(m[0].a, "[회의 1 · 00:05] 에서 [전화번호] 로", "근거 표시는 그대로");
-        assert_eq!((m[0].sources[0].title.as_str(), m[0].q_sources[0].title.as_str()), ("[전화번호] 고객 통화", "[이메일] 면담"));
-        assert_eq!((m[0].sources[0].id.as_str(), m[0].sources[0].n), ("d1", 1));
-        assert_eq!(for_ai_history(past.clone(), &off)[0].q, past[0].q, "끄면 그대로");
     }
 
     /// 앱이 하는 대로: 잠금 없이 훑고 하나씩 지우기

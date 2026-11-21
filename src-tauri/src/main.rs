@@ -1892,9 +1892,8 @@ async fn ask_meeting(
         let doc = st.store.lock().load(&id).map_err(err)?;
         (cfg, doc)
     };
-    // AI 로 보낼 사본만 가린다 (답은 묻고 답한 목록에만 저장 — 기록 원문 · 남기는 질문은 그대로)
-    let pv = st.settings.lock().privacy.clone();
-    let doc = privacy::for_ai(doc, &pv);
+    // 개인정보 가리기: 구간은 원문으로 고르고 AI 로 나가는 글만 가린다 (기록 원문 · 남기는 질문은 그대로)
+    let mask = st.settings.lock().privacy.mask_ai;
     let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     let (app2, id2, cancel2) = (app.clone(), id.clone(), cancel.clone());
     let mut on_event = move |e: ask::Event| {
@@ -1916,10 +1915,9 @@ async fn ask_meeting(
     let (tx, rx) = std::sync::mpsc::channel();
     {
         let cancel = cancel.clone();
-        // 직접 쓴 질문도 보낼 때만 가린다 — 묻고 답한 목록에는 쓴 그대로 남긴다 (`item.q`)
-        let question = privacy::for_ai_text(&question, &pv);
+        let question = question.clone();
         let _ = std::thread::Builder::new().name("bd-ask".into()).spawn(move || {
-            let _ = tx.send(ask::ask(&cfg, &doc, &question, recent_mins, &mut on_event, &on_usage, &cancel));
+            let _ = tx.send(ask::ask(&cfg, &doc, &question, recent_mins, mask, &mut on_event, &on_usage, &cancel));
         });
     }
     let res = tauri::async_runtime::spawn_blocking(move || loop {
@@ -1978,7 +1976,7 @@ async fn ask_all(
         let store = st.store.lock();
         (st.settings.lock().summary.clone(), store.dir.clone(), store.current_doc())
     };
-    let pv = st.settings.lock().privacy.clone();
+    let mask = st.settings.lock().privacy.mask_ai;
     let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     let (app2, cancel2) = (app.clone(), cancel.clone());
     let mut on_event = move |e: ask::Event| {
@@ -2011,22 +2009,9 @@ async fn ask_all(
                 let from = (chrono::Local::now().date_naive() - chrono::Duration::days(n as i64)).format("%Y-%m-%d").to_string();
                 docs.retain(|d| d.started_at.get(..10).is_some_and(|day| day >= from.as_str()));
             }
-            // AI 로 보낼 사본만 가린다 (설정에서 켰으면) — 회의 · 직접 쓴 질문 · 앞선 대화(가리기를 켜기 전 것도)
-            let titles: std::collections::HashMap<String, String> =
-                if pv.mask_ai { docs.iter().map(|d| (d.id.clone(), d.title.clone())).collect() } else { Default::default() };
-            let docs: Vec<SessionDoc> = docs.into_iter().map(|d| privacy::for_ai(d, &pv)).collect();
-            let question = privacy::for_ai_text(&question, &pv);
-            let history = privacy::for_ai_history(history, &pv);
-            let mut res = ask_all::ask_all(&cfg, &docs, &question, &history, &mut on_event, &on_usage, &cancel);
-            // 화면에 보일 근거 회의 제목은 원래 제목으로 (가린 것은 보낸 사본뿐)
-            if let Ok(a) = res.as_mut() {
-                for s in &mut a.sources {
-                    if let Some(t) = titles.get(&s.id) {
-                        s.title = t.clone();
-                    }
-                }
-            }
-            let _ = tx.send(res);
+            // 개인정보 가리기: 회의는 원문으로 고르고 AI 로 나가는 글만 가린다 — 회의 기록 · 직접 쓴 질문 · 앞선 대화
+            // (가리기를 켜기 전 것도). 화면에 돌려주는 근거 회의 제목은 원래 제목
+            let _ = tx.send(ask_all::ask_all(&cfg, &docs, &question, &history, mask, &mut on_event, &on_usage, &cancel));
         });
     }
     let res = tauri::async_runtime::spawn_blocking(move || loop {

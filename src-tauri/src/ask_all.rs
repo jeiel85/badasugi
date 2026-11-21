@@ -206,20 +206,27 @@ fn name_refs(text: &str, sources: &[Source]) -> String {
     out
 }
 
-/// 모든 회의에 묻는다. `docs` 는 물어볼 기간 안의 기록(최근 것이 앞), `past` 는 이 대화에서 앞서 묻고 받은 것
+/// 모든 회의에 묻는다. `docs` 는 물어볼 기간 안의 기록(최근 것이 앞), `past` 는 이 대화에서 앞서 묻고 받은 것.
+/// `mask`: 개인정보 가리기 — 회의는 원문으로 고르고 보내는 글만 가린다 ([`crate::privacy::masked_chat`])
 #[allow(clippy::too_many_arguments)]
 pub fn ask_all(
     cfg: &SummarySettings,
     docs: &[SessionDoc],
     question: &str,
     past: &[Past],
+    mask: bool,
     on_event: &mut dyn FnMut(Event),
     on_usage: &dyn Fn(&str, &Reply),
     cancel: &AtomicBool,
 ) -> Result<Answer> {
     let (provider, mut chat) = summary::chat_caller(cfg)?;
     let budget = summary::chunk_budget(&provider);
-    ask_all_with(&mut *chat, &provider, budget, docs, question, past, on_event, on_usage, cancel)
+    if mask {
+        let mut chat = crate::privacy::masked_chat(&mut *chat);
+        ask_all_with(&mut chat, &provider, budget, docs, question, past, on_event, on_usage, cancel)
+    } else {
+        ask_all_with(&mut *chat, &provider, budget, docs, question, past, on_event, on_usage, cancel)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -491,5 +498,44 @@ mod tests {
         assert!(ask_all_with(&mut chat, "groq", 4_000, &empty, "질문", &[], &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).is_err());
         assert!(ask_all_with(&mut chat, "groq", 4_000, &docs(), "  ", &[], &mut |_| {}, &|_, _| {}, &AtomicBool::new(false)).is_err());
         assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn privacy_mask_picks_meetings_by_the_real_number_and_hides_it_when_sending() {
+        // 번호만 다른 고객 통화 셋 — 가린 뒤에 고르면 모두 [전화번호] 라 최근 둘이 뽑혀 묻는 회의(c2)가 빠진다
+        let mut d = vec![
+            meeting("c1", "고객 통화", "2026-11-21", &["010-1111-2222 로 연락 달라고 함", "견적 다시 보내기"], None),
+            meeting("c3", "고객 통화", "2026-11-20", &["010-5555-6666 로 연락 달라고 함", "시연 일정 잡기"], None),
+            meeting("c2", "고객 통화", "2026-11-10", &["010-3333-4444 로 연락 달라고 함", "계약서 검토하기로 함"], None),
+        ];
+        d.extend(docs());
+        let mut seen: Vec<String> = Vec::new();
+        let mut inner = |_: &str, turns: &[Turn], _: &mut dyn FnMut(&str)| {
+            seen = turns.iter().map(|x| x.text.to_string()).collect();
+            Ok(Reply { text: "계약서 검토 [회의 1 · 00:20]".into(), model: "m".into(), ..Default::default() })
+        };
+        let mut chat = crate::privacy::masked_chat(&mut inner);
+        let past = vec![Past { q: "kim@example.com 은 누구?".into(), a: "고객 담당 [회의 1]".into(), ..Default::default() }];
+        let a = ask_all_with(
+            &mut chat,
+            "groq",
+            4_000,
+            &d,
+            "010-3333-4444 고객은 뭐 하기로 했지?",
+            &past,
+            &mut |_| {},
+            &|_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        drop(chat);
+        assert!(a.sources.iter().any(|s| s.id == "c2"), "원문 번호로 고른다 {:?}", a.sources);
+        let all = seen.join("\n");
+        for raw in ["010-3333-4444", "010-1111-2222", "kim@example.com"] {
+            assert!(!all.contains(raw), "보내는 글에 {raw} 가 남음:\n{all}");
+        }
+        assert!(all.contains("[전화번호] 로 연락 달라고 함") && all.contains("계약서 검토하기로 함"), "{all}");
+        assert_eq!(seen.last().map(String::as_str), Some("[전화번호] 고객은 뭐 하기로 했지?"), "직접 쓴 질문도");
+        assert!(seen.iter().any(|t| t == "[이메일] 은 누구?"), "앞선 대화도 {seen:?}");
     }
 }
