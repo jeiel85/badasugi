@@ -24,6 +24,7 @@ mod templates;
 mod translate;
 mod update;
 mod pricing;
+mod privacy;
 mod usage_book;
 mod voices;
 mod watch;
@@ -282,9 +283,15 @@ fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<()> {
     }
     // GPU 가속을 끄고 켠 것은 다음에 모델을 열 때부터 (열린 모델이 다른 장치면 다시 연다) — 녹음 · 파일 · 받아쓰기 입력 모두
     badasugi_core::asr::gpu::set_enabled(settings.gpu);
+    let keep_changed = st.settings.lock().privacy.audio_keep_days != settings.privacy.audio_keep_days;
     *st.settings.lock() = settings;
     // 녹음 폴더 지켜보기를 켰거나 폴더를 바꿨으면 바로 기준점을 잡게
     watch::wake(&app);
+    // 녹음 보관 기간을 바꾸면 바로 한 번 (기록을 모두 읽으므로 따로)
+    if keep_changed {
+        let app2 = app.clone();
+        let _ = std::thread::Builder::new().name("bd-expire-now".into()).spawn(move || expire_audio_now(&app2));
+    }
     hotkey_err.map_or(Ok(()), Err)
 }
 
@@ -1320,7 +1327,7 @@ async fn export_session(app: AppHandle, id: String, format: String, path: String
 
 /// `tr`: 녹취록을 원문 · 번역 · 둘 다 (번역이 없는 문장은 원문, JSON 은 늘 그대로)
 fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String, tr: session::TrMode) -> CmdResult<()> {
-    let doc = app.state::<AppState>().store.lock().load(id).map_err(err)?;
+    let doc = load_for_export(app, id, format != "json")?;
     if format == "docx" {
         return std::fs::write(path, export::docx(&doc, tr)).map_err(err);
     }
@@ -1340,11 +1347,57 @@ fn export_session_now(app: &AppHandle, id: &str, format: &str, path: String, tr:
     std::fs::write(path, bytes).map_err(err)
 }
 
+/// 내보낼 기록 — 설정에서 "내보낼 때 가리기" 를 켰으면 가린 사본 (`maskable`: JSON 은 원본 데이터라 그대로).
+/// 파일 내보내기 · PDF · 전체 복사 · 보내기(메신저 · 메일 초안 · 일정 파일) 모두 여기서
+fn load_for_export(app: &AppHandle, id: &str, maskable: bool) -> CmdResult<SessionDoc> {
+    let st = app.state::<AppState>();
+    let doc = st.store.lock().load(id).map_err(err)?;
+    let mask = maskable && st.settings.lock().privacy.mask_export;
+    Ok(if mask { privacy::mask_doc(&doc) } else { doc })
+}
+
+/// 보관 기간이 지난 녹음 파일을 지운다. 기록 폴더는 잠금 없이 훑고(기록이 많아도 녹음 · 저장을 붙잡지 않게),
+/// 지울 기록마다 잠금을 쥐고 다시 본다 — 그 사이 저장과 엇갈리지 않게, 녹음 중인 기록은 빼고
+fn expire_audio_now(app: &AppHandle) -> usize {
+    if smoke::enabled() {
+        return 0;
+    }
+    let st = app.state::<AppState>();
+    let days = st.settings.lock().privacy.audio_keep_days;
+    if days == 0 {
+        return 0;
+    }
+    let today = chrono::Local::now().date_naive();
+    let dir = st.store.lock().dir.clone();
+    let mut n = 0;
+    for json in privacy::expired(&dir, days, today) {
+        let store = st.store.lock();
+        let skip = store.current.as_ref().map(|d| d.id.clone());
+        if privacy::expire_one(&dir, &json, days, today, skip.as_deref()) {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        log::info!("녹음 보관 기간 {days}일: 녹음 파일 {n}개 지움");
+    }
+    n
+}
+
+/// 앱을 켤 때 · 6시간마다 보관 기간이 지난 녹음 파일을 지운다
+fn spawn_audio_expiry(app: AppHandle) {
+    let _ = std::thread::Builder::new().name("bd-expire".into()).spawn(move || loop {
+        // 켜자마자는 화면 · 모델을 먼저 — 1분 뒤에
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        expire_audio_now(&app);
+        std::thread::sleep(std::time::Duration::from_secs(6 * 3600 - 60));
+    });
+}
+
 /// PDF 로 낼 회의록 HTML — 화면이 인쇄용 칸(`#print-doc`)에 넣고 [`print_pdf`] 를 부른다
 #[tauri::command]
 async fn export_html(app: AppHandle, id: String, tr: Option<String>) -> CmdResult<String> {
     off_main(move || {
-        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        let doc = load_for_export(&app, &id, true)?;
         Ok(export::html(&doc, session::TrMode::parse(tr.as_deref())))
     })
     .await
@@ -1382,7 +1435,7 @@ async fn share_info(app: AppHandle, id: String) -> CmdResult<ShareInfo> {
 #[tauri::command]
 async fn share_messenger(app: AppHandle, id: String) -> CmdResult<String> {
     off_main(move || {
-        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        let doc = load_for_export(&app, &id, true)?;
         share::messenger(&doc).ok_or_else(|| "요약이 없어요. 먼저 요약해 주세요".to_string())
     })
     .await
@@ -1393,7 +1446,7 @@ async fn share_messenger(app: AppHandle, id: String) -> CmdResult<String> {
 #[tauri::command]
 async fn open_mail_draft(app: AppHandle, id: String) -> CmdResult<String> {
     off_main(move || {
-        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        let doc = load_for_export(&app, &id, true)?;
         let (subject, body) = share::email(&doc).ok_or_else(|| "요약이 없어요. 먼저 요약해 주세요".to_string())?;
         let safe: String = doc.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
         let path = std::env::temp_dir().join(format!("badasugi-mail-{safe}.eml"));
@@ -1411,7 +1464,7 @@ async fn open_mail_draft(app: AppHandle, id: String) -> CmdResult<String> {
 #[tauri::command]
 async fn export_todos_ics(app: AppHandle, id: String, path: String) -> CmdResult<usize> {
     off_main(move || {
-        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        let doc = load_for_export(&app, &id, true)?;
         let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
         let (text, n) = share::ics(&doc, &now);
         if n == 0 {
@@ -1426,7 +1479,8 @@ async fn export_todos_ics(app: AppHandle, id: String, path: String) -> CmdResult
 #[tauri::command]
 async fn session_text(app: AppHandle, id: String, format: String) -> CmdResult<String> {
     off_main(move || {
-        let doc = app.state::<AppState>().store.lock().load(&id).map_err(err)?;
+        // 전체 복사도 밖으로 나가는 글 — 내보낼 때 가리기를 따른다
+        let doc = load_for_export(&app, &id, true)?;
         Ok(match format.as_str() {
             "md" => doc.to_markdown(),
             _ => doc.to_text(),
@@ -1482,6 +1536,8 @@ pub(crate) async fn summarize_doc(
     log::info!("요약 틀: {} ({})", tpl.name, tpl.id);
     let tpl_id = tpl.id.clone();
     let doc2 = doc.clone();
+    // AI 로 보낼 사본만 가린다 (설정에서 켰으면) — 저장은 원본(doc2 · 최신 기록)에
+    let doc = privacy::for_ai(doc, &st.settings.lock().privacy);
     let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     // 진행을 화면에 알린다 (답을 쓰는 섹션 · 긴 회의는 구간까지).
     // 멈춘 요약은 보내 둔 요청의 답을 끝까지 받으므로 더 알리지 않고, 화면도 요약 번호로 가려 받는다
@@ -1583,7 +1639,8 @@ fn translate_step(
     todo: &[u64],
     live: bool,
 ) -> anyhow::Result<Vec<u64>> {
-    let b = translate::translate_batch(chat, lang, doc, todo)?;
+    let mask = app.state::<AppState>().settings.lock().privacy.mask_ai;
+    let b = translate::translate_batch(chat, lang, doc, todo, mask)?;
     let book = app.state::<usage_book::UsageBook>();
     book.summary(provider, &b.reply.model, b.reply.in_tokens, b.reply.out_tokens, b.reply.cache_write, b.reply.cache_read);
     book.save();
@@ -1823,6 +1880,8 @@ async fn ask_meeting(
         let doc = st.store.lock().load(&id).map_err(err)?;
         (cfg, doc)
     };
+    // AI 로 보낼 사본만 가린다 (답은 묻고 답한 목록에만 저장 — 기록 원문은 그대로)
+    let doc = privacy::for_ai(doc, &st.settings.lock().privacy);
     let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     let (app2, id2, cancel2) = (app.clone(), id.clone(), cancel.clone());
     let mut on_event = move |e: ask::Event| {
@@ -1905,6 +1964,7 @@ async fn ask_all(
         let store = st.store.lock();
         (st.settings.lock().summary.clone(), store.dir.clone(), store.current_doc())
     };
+    let pv = st.settings.lock().privacy.clone();
     let cancel = st.summary_cancel.lock().entry(token).or_default().clone();
     let (app2, cancel2) = (app.clone(), cancel.clone());
     let mut on_event = move |e: ask::Event| {
@@ -1937,6 +1997,8 @@ async fn ask_all(
                 let from = (chrono::Local::now().date_naive() - chrono::Duration::days(n as i64)).format("%Y-%m-%d").to_string();
                 docs.retain(|d| d.started_at.get(..10).is_some_and(|day| day >= from.as_str()));
             }
+            // AI 로 보낼 사본만 가린다 (설정에서 켰으면)
+            let docs: Vec<SessionDoc> = docs.into_iter().map(|d| privacy::for_ai(d, &pv)).collect();
             let _ = tx.send(ask_all::ask_all(&cfg, &docs, &question, &history, &mut on_event, &on_usage, &cancel));
         });
     }
@@ -2609,6 +2671,7 @@ fn main() {
             status::spawn_ticker(handle.clone());
             meeting::spawn(handle.clone());
             watch::spawn(handle.clone());
+            spawn_audio_expiry(handle.clone());
             if let Some(file) = audio_arg(&std::env::args().collect::<Vec<_>>()) {
                 open_file_from_cli(handle.clone(), file);
             }

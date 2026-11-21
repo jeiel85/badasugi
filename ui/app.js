@@ -4289,6 +4289,9 @@ function renderSettings() {
   if (!tl.options.length) tl.innerHTML = trOptions();
   tl.value = s.translate?.lang || 'ko';
   $('#opt-tr-live').checked = !!s.translate?.live;
+  $('#opt-mask-ai').checked = !!s.privacy?.maskAi;
+  $('#opt-mask-export').checked = !!s.privacy?.maskExport;
+  $('#opt-audio-keep').value = String(s.privacy?.audioKeepDays || 0);
 
   renderHotkey();
   $('#opt-top').checked = s.alwaysOnTop;
@@ -4648,6 +4651,15 @@ bind('opt-tr-live', (t) => {
 });
 bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
 bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
+// 개인정보 (privacy.rs): AI 로 보낼 때 · 내보낼 때 가리기, 녹음 파일 보관 기간
+const privacy = () => (S.settings.privacy ||= { maskAi: false, maskExport: false, audioKeepDays: 0 });
+bind('opt-mask-ai', (t) => (privacy().maskAi = t.checked));
+bind('opt-mask-export', (t) => (privacy().maskExport = t.checked));
+bind('opt-audio-keep', (t) => {
+  const days = Number(t.value) || 0;
+  privacy().audioKeepDays = days;
+  if (days) toast(`회의 날짜가 ${days}일 지난 녹음 파일을 지워요 — 녹취록 · 요약 · 메모는 남아요`, '', 5500);
+});
 bind('opt-unload', (t) => (S.settings.unloadWhenIdle = t.checked));
 bind('opt-autoupdate', (t) => { S.settings.autoUpdate = t.checked; renderAbout(); });
 bind('opt-meet', (t) => {
@@ -5063,6 +5075,7 @@ function createMock() {
       autoUpdate: true, lastVersion: '', miniMode: false, miniPos: null, fullBounds: null,
       summary: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'exaone3.5:7.8b', groqModel: 'openai/gpt-oss-120b', geminiModel: 'gemini-flash-latest', openaiModel: 'gpt-5-mini', anthropicModel: 'claude-opus-5-5', customUrl: '', customModel: '', template: 'meeting', templates: [] },
       translate: { lang: 'ko', live: false },
+      privacy: { maskAi: false, maskExport: false, audioKeepDays: 0 },
       usdKrw: 1360,
     },
     rec: 'idle',

@@ -65,14 +65,17 @@ pub fn pending(doc: &SessionDoc, lang: &str) -> Vec<u64> {
     us.into_iter().filter(|u| tr.and_then(|t| t.get(u.id, &u.text)).is_none()).map(|u| u.id).collect()
 }
 
-/// 보낼 묶음 하나: (사용자 글, 묶음에 든 문장 id — 번호 1부터 차례로). `todo` 는 번역할 문장 id (시간 순)
-pub fn next_batch(doc: &SessionDoc, todo: &[u64]) -> Option<(String, Vec<u64>)> {
+/// 보낼 묶음 하나: (사용자 글, 묶음에 든 문장 id — 번호 1부터 차례로). `todo` 는 번역할 문장 id (시간 순).
+/// `mask`: 개인정보를 가려 보낸다 (privacy.rs — 기록의 원문 · 번역의 src 는 그대로)
+pub fn next_batch(doc: &SessionDoc, todo: &[u64], mask: bool) -> Option<(String, Vec<u64>)> {
     let mut us: Vec<_> = doc.utterances.iter().filter(|u| !u.text.trim().is_empty()).collect();
     us.sort_by_key(|u| (u.start_ms, u.id));
     let first = *todo.first()?;
     let at = us.iter().position(|u| u.id == first)?;
     let line = |u: &crate::session::Utterance| {
-        format!("{}: {}", doc.speaker_name(doc.resolve(u.speaker)), u.text.split_whitespace().collect::<Vec<_>>().join(" "))
+        let text = u.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = if mask { crate::privacy::mask(&text).0 } else { text };
+        format!("{}: {text}", doc.speaker_name(doc.resolve(u.speaker)))
     };
     let mut s = String::new();
     if at > 0 {
@@ -170,8 +173,8 @@ pub struct Batch {
 }
 
 /// 번역할 문장(`todo`, 시간 순)에서 한 묶음을 번역한다
-pub fn translate_batch(chat: &mut Chat, lang: &str, doc: &SessionDoc, todo: &[u64]) -> Result<Batch> {
-    let Some((text, ids)) = next_batch(doc, todo) else {
+pub fn translate_batch(chat: &mut Chat, lang: &str, doc: &SessionDoc, todo: &[u64], mask: bool) -> Result<Batch> {
+    let Some((text, ids)) = next_batch(doc, todo, mask) else {
         return Ok(Batch::default());
     };
     let by_id: std::collections::HashMap<u64, &crate::session::Utterance> = doc.utterances.iter().map(|u| (u.id, u)).collect();
@@ -264,15 +267,20 @@ mod tests {
     #[test]
     fn batch_has_context_numbers_and_speakers() {
         let d = doc();
-        let (text, ids) = next_batch(&d, &[2, 4]).unwrap();
+        let (text, ids) = next_batch(&d, &[2, 4], false).unwrap();
         assert_eq!(ids, vec![2, 4]);
         assert_eq!(
             text,
             "[앞 이야기 — 번역하지 마세요]\n화자 1: Let's start.\n\n[번역할 문장]\n[1] Kim: OK, the release is on Friday.\n[2] 화자 1: Any questions?"
         );
-        let (text, ids) = next_batch(&d, &[1]).unwrap();
+        let (text, ids) = next_batch(&d, &[1], false).unwrap();
         assert_eq!((text.as_str(), ids), ("[번역할 문장]\n[1] 화자 1: Let's start.", vec![1]));
-        assert!(next_batch(&d, &[]).is_none());
+        assert!(next_batch(&d, &[], false).is_none());
+        // 개인정보 가리기를 켜면 보내는 글만 가린다
+        let mut p = d.clone();
+        p.utterances[0].text = "Call me at 010-1234-5678.".into();
+        let (text, _) = next_batch(&p, &[1], true).unwrap();
+        assert_eq!(text, "[번역할 문장]\n[1] 화자 1: Call me at [전화번호].");
     }
 
     #[test]
@@ -282,9 +290,9 @@ mod tests {
             .map(|i| crate::session::Utterance { id: i, start_ms: i * 1000, end_ms: i * 1000 + 900, speaker: Some(0), text: format!("문장 {i}") })
             .collect();
         let todo: Vec<u64> = (0..40).collect();
-        assert_eq!(next_batch(&d, &todo).unwrap().1.len(), MAX_ITEMS);
+        assert_eq!(next_batch(&d, &todo, false).unwrap().1.len(), MAX_ITEMS);
         d.utterances[0].text = "가".repeat(3000);
-        assert_eq!(next_batch(&d, &todo).unwrap().1, vec![0], "아주 긴 문장도 하나는 보낸다");
+        assert_eq!(next_batch(&d, &todo, false).unwrap().1, vec![0], "아주 긴 문장도 하나는 보낸다");
     }
 
     #[test]
@@ -331,7 +339,7 @@ mod tests {
             if todo.is_empty() {
                 break;
             }
-            let b = translate_batch(&mut chat, &lang, &d, &todo).unwrap();
+            let b = translate_batch(&mut chat, &lang, &d, &todo, false).unwrap();
             batches += 1;
             eprintln!("[{provider} {}] 보냄 {} · 받음 {} · 입력 {} · 출력 {}", b.reply.model, b.sent.len(), b.items.len(), b.reply.in_tokens, b.reply.out_tokens);
             let got: std::collections::HashSet<u64> = b.items.iter().map(|x| x.0).collect();
@@ -356,7 +364,7 @@ mod tests {
             assert!(turns[0].text.contains("[2] 화자 1: Any questions?"));
             Ok(Reply { text: "[1] 네, 출시는 금요일이에요.".into(), model: "fake".into(), ..Default::default() })
         });
-        let b = translate_batch(&mut chat, "ko", &d, &[2, 4]).unwrap();
+        let b = translate_batch(&mut chat, "ko", &d, &[2, 4], false).unwrap();
         assert_eq!(b.reply.model, "fake");
         assert_eq!(b.sent, vec![2, 4]);
         assert_eq!(
