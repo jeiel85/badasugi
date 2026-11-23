@@ -8,6 +8,7 @@ default-run = "badasugi"
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
+serde_json = "1"
 
 [dependencies]
 badasugi-core = { path = "../crates/badasugi-core" }

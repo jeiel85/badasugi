@@ -8,6 +8,8 @@ mod calendar;
 mod dictate;
 mod inject;
 mod export;
+#[cfg(windows)]
+mod forward;
 mod logging;
 mod meeting;
 mod power;
@@ -2328,12 +2330,17 @@ fn request_quit(app: &AppHandle) {
 
 // ───────────────────────── 창 · 트레이 ─────────────────────────
 
-pub(crate) fn show_main(app: &AppHandle) {
+/// 창만 앞으로 (메인 스레드에서 부르면 메시지를 거치지 않고 그 자리에서 보인다)
+fn raise_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+pub(crate) fn show_main(app: &AppHandle) {
+    raise_main(app);
     // 숨겨져 있던 창은 작업 표시줄 단추가 새로 생기면서 배지 · 진행 막대가 비어 있다
     status::reapply_taskbar(app);
     update::check_if_stale(app);
@@ -2473,8 +2480,15 @@ fn open_file_from_cli(app: AppHandle, file: PathBuf) {
 }
 
 fn main() {
-    logging::init();
     let smoke = smoke::enabled();
+    // 이미 떠 있으면 tauri 를 준비하기 전에 명령만 넘기고 끝낸다 — 바로 가기를 눌렀을 때 창이 빨리 뜨게 (forward.rs)
+    // main 에서 돌아가면 C/C++ 라이브러리(ONNX Runtime · whisper.cpp)의 정적 소멸자가 돌며 실행 파일을 더 읽으므로 곧장 끝낸다.
+    // 자동 점검은 사용 중인 앱과 따로 돈다
+    #[cfg(windows)]
+    if !smoke && forward::to_running_app() {
+        std::process::exit(0);
+    }
+    logging::init();
 
     let mut builder = tauri::Builder::default();
     // 자동 점검은 사용 중인 앱과 따로 돈다 (명령이 사용 중인 앱으로 넘어가지 않게)
@@ -2483,6 +2497,12 @@ fn main() {
         // 두 번째 실행은 이미 떠 있는 앱으로 전달된다: `badasugi --toggle | --start | --stop | --pause`
         // (Stream Deck · 배치 파일 · 바로 가기 등에서 녹음 제어)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 그냥 다시 실행(바로 가기 · 시작 메뉴 · 파일 열기)이면 창부터 띄운다 — 이 콜백은 메인 스레드라 작업 스레드를
+            // 거치지 않고 곧장 보인다. 작업 표시줄 배지 등 나머지는 아래 handle_forwarded 가 마저 한다 (다시 띄워도 그대로)
+            let ready = app.try_state::<AppState>().is_some_and(|st| st.ui_ready.load(Ordering::SeqCst));
+            if ready && argv.iter().skip(1).all(|a| !a.starts_with("--")) {
+                raise_main(app);
+            }
             let app = app.clone();
             // 앱이 막 켜지는 중(setup 전)에 들어온 명령도 놓치지 않도록, 준비될 때까지 기다렸다가 처리
             std::thread::spawn(move || {
