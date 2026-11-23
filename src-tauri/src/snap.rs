@@ -2,6 +2,9 @@
 //!
 //! - 창을 끌어서 옮길 때(Windows 이동 루프의 WM_MOVING) 화면 작업 영역 가장자리에 가까워지면
 //!   착 달라붙게 한다. 작업 영역은 작업 표시줄을 뺀 영역이라, 아래쪽에 붙이면 작업 표시줄 바로 위에 붙는다.
+//! - 붙인 창은 마우스가 가장자리에서 붙을 때와 같은 거리만큼 벗어나면 떨어진다. Windows 가 주는 끌기 사각형은
+//!   "직전 위치(우리가 붙여 놓은 자리) + 마우스 이동량"이라 그대로 쓰면 천천히 끌 때마다 다시 붙어 떨어지지 않으므로,
+//!   마우스 위치에서 끌기 시작 때 잡은 자리를 빼서 창이 원래 갈 자리를 다시 구한 뒤 붙인다.
 //! - 배율(DPI) · 해상도 · 작업 표시줄이 바뀌면(원격 접속 ↔ 노트북 화면 등) 알려 주어 창을 다시 자리 잡게 한다.
 //! - 모니터가 여러 개면 창이 가장 많이 걸친 모니터 기준.
 //! - 작업 표시줄 단추가 새로 생기면(탐색기가 다시 시작됨 등) 알려 주어 배지 · 진행 막대를 다시 얹게 한다.
@@ -31,6 +34,36 @@ fn snap_offset(visible: Rect4, work: Rect4, d: i32) -> (i32, i32) {
         0
     };
     (dx, dy)
+}
+
+/// 끌기를 시작할 때 마우스가 잡은 자리: 창 사각형 왼쪽 위에서 떨어진 거리와 그때 창 크기
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Grip {
+    dx: i32,
+    dy: i32,
+    w: i32,
+    h: i32,
+}
+
+impl Grip {
+    /// 창 사각형 `rect` 를 마우스 `cursor` 로 잡았다
+    fn new(rect: Rect4, cursor: (i32, i32)) -> Self {
+        let (l, t, r, b) = rect;
+        Grip { dx: cursor.0 - l, dy: cursor.1 - t, w: r - l, h: b - t }
+    }
+
+    /// 마우스가 `cursor` 에 있을 때 크기 `size` 인 창이 놓일 왼쪽 위 — 잡은 자리가 마우스 밑에 그대로 있게.
+    /// 배율이 다른 모니터로 넘어가 창 크기가 바뀌면 잡은 자리도 같은 비율로 옮긴다
+    fn origin(self, cursor: (i32, i32), size: (i32, i32)) -> (i32, i32) {
+        let scale = |d: i32, old: i32, new: i32| {
+            if old > 0 && old != new {
+                (d as f64 * new as f64 / old as f64).round() as i32
+            } else {
+                d
+            }
+        };
+        (cursor.0 - scale(self.dx, self.w, size.0), cursor.1 - scale(self.dy, self.h, size.1))
+    }
 }
 
 /// 보이는 창이 작업 영역 밖으로 삐져나갔으면 안으로 들여올 거리 (dx, dy).
@@ -66,10 +99,11 @@ fn popup_spot(size: (i32, i32), work: Rect4, avoid: Option<Rect4>, gap: i32) -> 
 
 #[cfg(windows)]
 mod imp {
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::OnceLock;
 
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -77,15 +111,21 @@ mod imp {
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, IsIconic, IsWindowVisible, RegisterWindowMessageW, SetWindowPos, ShowWindow, HWND_TOPMOST,
-        SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DISPLAYCHANGE, WM_DPICHANGED,
-        WM_EXITSIZEMOVE, WM_MOVING, WM_SETTINGCHANGE,
+        GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, RegisterWindowMessageW, SetWindowPos, ShowWindow,
+        HWND_TOPMOST, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_DISPLAYCHANGE,
+        WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_MOVING, WM_SETTINGCHANGE,
     };
 
-    use super::{Callback, Rect4};
+    use super::{Callback, Grip, Rect4};
 
-    /// 이만큼(96 DPI 기준 픽셀) 가까워지면 달라붙는다
+    /// 이만큼(96 DPI 기준 픽셀) 가까워지면 달라붙고, 붙은 뒤 마우스가 이만큼 넘게 벗어나면 떨어진다
     const SNAP_PX: i32 = 18;
+
+    thread_local! {
+        /// 지금 끌고 있는 창을 마우스가 잡은 자리 (끌기 중이 아니거나 아직 첫 WM_MOVING 전이면 None).
+        /// 창 메시지는 늘 창을 만든 스레드에서 오므로 스레드마다 둔다
+        static GRIP: Cell<Option<Grip>> = const { Cell::new(None) };
+    }
 
     static ON_MOVE_END: OnceLock<Callback> = OnceLock::new();
     static ON_DISPLAY: OnceLock<Callback> = OnceLock::new();
@@ -148,6 +188,28 @@ mod imp {
         }
     }
 
+    /// Windows 가 준 끌기 사각형(직전 위치 + 마우스 이동량)을 "지금 마우스 위치 − 잡은 자리"로 바꾼다.
+    /// 직전 위치는 우리가 가장자리에 붙여 놓은 자리라, 그대로 쓰면 천천히 끌 때마다 다시 붙어서 떨어지지 않는다.
+    /// 이번 끌기의 첫 WM_MOVING 사각형은 아직 손대기 전이라 거기서 잡은 자리를 잰다
+    /// (최대화된 창을 끌어 원래 크기로 돌아온 뒤의 사각형이라 그 크기 기준).
+    unsafe fn follow_cursor(r: &mut RECT) {
+        let mut pt: POINT = std::mem::zeroed();
+        if GetCursorPos(&mut pt) == 0 {
+            return;
+        }
+        let cursor = (pt.x, pt.y);
+        let size = (r.right - r.left, r.bottom - r.top);
+        let grip = GRIP.with(|g| {
+            g.get().unwrap_or_else(|| {
+                let grip = Grip::new((r.left, r.top, r.right, r.bottom), cursor);
+                g.set(Some(grip));
+                grip
+            })
+        });
+        let (x, y) = grip.origin(cursor, size);
+        *r = RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 };
+    }
+
     unsafe fn snap(hwnd: HWND, r: &mut RECT) {
         let Some(work) = work_area(MonitorFromRect(r, MONITOR_DEFAULTTONEAREST)) else {
             return;
@@ -185,10 +247,15 @@ mod imp {
         }
         match msg {
             WM_MOVING if lparam != 0 => {
-                snap(hwnd, &mut *(lparam as *mut RECT));
+                let r = &mut *(lparam as *mut RECT);
+                follow_cursor(r);
+                snap(hwnd, r);
                 return 1;
             }
+            // 새 끌기 시작: 잡은 자리는 첫 WM_MOVING 에서 다시 잰다
+            WM_ENTERSIZEMOVE => GRIP.with(|g| g.set(None)),
             WM_EXITSIZEMOVE => {
+                GRIP.with(|g| g.set(None));
                 if let Some(f) = ON_MOVE_END.get() {
                     f();
                 }
@@ -341,7 +408,7 @@ pub fn docked_bottom_right(window: &tauri::WebviewWindow) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_offset, popup_spot, snap_offset};
+    use super::{clamp_offset, popup_spot, snap_offset, Grip};
 
     const WORK: (i32, i32, i32, i32) = (0, 0, 1920, 1032); // 작업 표시줄 48px 를 뺀 1080p
 
@@ -358,6 +425,37 @@ mod tests {
         assert_eq!(snap_offset((500, 300, 920, 980), WORK, 18), (0, 0));
         // 딱 경계를 넘은 거리
         assert_eq!(snap_offset((19, 300, 439, 980), WORK, 18), (0, 0));
+    }
+
+    #[test]
+    fn window_follows_the_grip_point() {
+        // 창(300,200)-(672,284) 의 제목 줄 (100,20) 지점을 잡음
+        let grip = Grip::new((300, 200, 672, 284), (400, 220));
+        assert_eq!(grip.origin((400, 220), (372, 84)), (300, 200));
+        assert_eq!(grip.origin((350, 260), (372, 84)), (250, 240));
+        // 배율 150% → 100% 모니터로 넘어가 창이 2/3 로 줄면 잡은 자리도 2/3 로
+        assert_eq!(grip.origin((900, 500), (248, 56)), (900 - 67, 500 - 13));
+    }
+
+    #[test]
+    fn slow_drag_detaches_at_the_same_distance_it_snapped() {
+        // 왼쪽 가장자리에서 40px 떨어진 창을 1px 씩 천천히 끌어 붙였다가 다시 1px 씩 떼어 낸다.
+        // Windows 가 주는 "직전 위치 + 이동량" 을 쓰던 때는 붙은 뒤 1px 씩으로는 영영 떨어지지 않았다.
+        let (w, h) = (372, 84);
+        let grip = Grip::new((40, 500, 40 + w, 500 + h), (140, 515));
+        let place = |cx: i32| {
+            let (x, y) = grip.origin((cx, 515), (w, h));
+            let (dx, _) = snap_offset((x, y, x + w, y + h), WORK, 18);
+            (x, x + dx)
+        };
+        let path = (110..=140).rev().chain(110..=160);
+        for cx in path {
+            let (free, left) = place(cx);
+            let want = if free <= 18 { 0 } else { free };
+            assert_eq!(left, want, "마우스 x={cx}");
+        }
+        // 다 떼고 나면 창이 처음 잡은 자리 그대로 마우스를 따라온다 (어긋남 없음)
+        assert_eq!(place(160), (60, 60));
     }
 
     #[test]
