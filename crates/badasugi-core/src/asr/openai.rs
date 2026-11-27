@@ -56,26 +56,8 @@ impl ApiTranscriber {
         if !self.api_key.is_empty() {
             rb = rb.bearer_auth(&self.api_key);
         }
-        let resp = rb.send().map_err(|e| ApiError::Network(describe_http_error(&e)))?;
-        // 공급자가 알려 주는 남은 한도 (설정 › 사용량)
-        crate::usage::record_headers(&self.url, resp.headers());
-        let status = resp.status();
-        let retry_after = retry_after(resp.headers());
-        let body = resp.text().map_err(|e| ApiError::Network(describe_http_error(&e)))?;
-        if !status.is_success() {
-            let message = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-                .unwrap_or_else(|| body.chars().take(300).collect());
-            return Err(ApiError::Status {
-                status: status.as_u16(),
-                retry_after,
-                message,
-            }
-            .into());
-        }
-        let v: serde_json::Value =
-            serde_json::from_str(&body).map_err(|_| anyhow!("API 응답 해석 실패: {}", body.chars().take(200).collect::<String>()))?;
+        let body = send(rb, crate::usage::provider_of(&self.url), |v| v["error"]["message"].as_str().map(str::to_string))?;
+        let v = parse_json(&body)?;
         Ok(v["text"].as_str().unwrap_or_default().to_string())
     }
 }
@@ -83,35 +65,72 @@ impl ApiTranscriber {
 impl Transcriber for ApiTranscriber {
     fn transcribe(&mut self, req: &AsrRequest) -> Result<String> {
         let wav = crate::wav::encode_pcm16(req.samples)?;
-        // 미리 보기는 한 번만 보낸다 — 다시 보내거나 요청 한도(Retry-After)를 기다리면 확정 문장을 받아 적을 워커가
-        // 수십 초씩 묶이고, 녹음을 멈출 때도 그만큼 기다린다. 실패하면 파이프라인이 미리 보기를 끈다.
-        if req.preview.is_some() {
-            return self.call(&wav, req);
-        }
-        let mut last_err = None;
-        for attempt in 0..3u32 {
-            match self.call(&wav, req) {
-                Ok(t) => return Ok(t),
-                Err(e) => {
-                    // 인증·요청 오류는 다시 보내도 소용없다
-                    if !super::retryable(&e) {
-                        return Err(e);
-                    }
-                    // 요청 한도(429)면 공급자가 알려 준 만큼 기다린다 (너무 길면 20초까지만 — 나머지는 파이프라인이 맡는다)
-                    let wait = e
-                        .downcast_ref::<ApiError>()
-                        .and_then(ApiError::retry_after)
-                        .map(|d| d.min(MAX_RETRY_WAIT))
-                        .unwrap_or(Duration::from_millis(600 * u64::from(attempt + 1)));
-                    last_err = Some(e);
-                    if attempt < 2 {
-                        std::thread::sleep(wait);
-                    }
+        with_retries(req.preview.is_some(), || self.call(&wav, req))
+    }
+}
+
+/// 요청을 보내고 성공한 응답의 본문을 돌려준다. 서버에 닿지 못했으면 [`ApiError::Network`],
+/// 오류 상태면 [`ApiError::Status`] — 메시지는 `message` 로 응답 JSON 에서 고르고, 못 고르면 본문 앞부분.
+/// 공급자가 응답 헤더로 알려 주는 남은 한도는 `provider` 이름으로 기억한다 (설정 › 사용량).
+pub(crate) fn send(
+    rb: reqwest::blocking::RequestBuilder,
+    provider: &str,
+    message: impl Fn(&serde_json::Value) -> Option<String>,
+) -> Result<String, ApiError> {
+    let resp = rb.send().map_err(|e| ApiError::Network(describe_http_error(&e)))?;
+    crate::usage::record_headers_for(provider, resp.headers());
+    let status = resp.status();
+    let retry_after = retry_after(resp.headers());
+    let body = resp.text().map_err(|e| ApiError::Network(describe_http_error(&e)))?;
+    if status.is_success() {
+        return Ok(body);
+    }
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| message(&v))
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| body.chars().take(300).collect());
+    Err(ApiError::Status {
+        status: status.as_u16(),
+        retry_after,
+        message,
+    })
+}
+
+/// 성공한 응답 본문을 JSON 으로 — 해석하지 못하면 본문 앞부분을 보여 준다
+pub(crate) fn parse_json(body: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(body).map_err(|_| anyhow!("API 응답 해석 실패: {}", body.chars().take(200).collect::<String>()))
+}
+
+/// 확정 문장은 세 번까지 보낸다 — 연결 문제 · 요청 한도 · 서비스 장애일 때만 다시 (인증 · 요청 오류는 다시 보내도 소용없다).
+/// 요청 한도(429)면 공급자가 알려 준 만큼 기다린다 (너무 길면 20초까지만 — 나머지는 파이프라인이 맡는다).
+/// 미리 보기(`preview`)는 한 번만 보낸다 — 다시 보내거나 요청 한도(Retry-After)를 기다리면 확정 문장을 받아 적을 워커가
+/// 수십 초씩 묶이고, 녹음을 멈출 때도 그만큼 기다린다. 실패하면 파이프라인이 미리 보기를 끈다.
+pub(crate) fn with_retries(preview: bool, mut call: impl FnMut() -> Result<String>) -> Result<String> {
+    if preview {
+        return call();
+    }
+    let mut last_err = None;
+    for attempt in 0..3u32 {
+        match call() {
+            Ok(t) => return Ok(t),
+            Err(e) => {
+                if !super::retryable(&e) {
+                    return Err(e);
+                }
+                let wait = e
+                    .downcast_ref::<ApiError>()
+                    .and_then(ApiError::retry_after)
+                    .map(|d| d.min(MAX_RETRY_WAIT))
+                    .unwrap_or(Duration::from_millis(600 * u64::from(attempt + 1)));
+                last_err = Some(e);
+                if attempt < 2 {
+                    std::thread::sleep(wait);
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("알 수 없는 API 오류")))
     }
+    Err(last_err.unwrap_or_else(|| anyhow!("알 수 없는 API 오류")))
 }
 
 /// OpenAI 의 새 음성 인식 모델(gpt-transcribe, 2026-07) — 언어를 `languages[]` 로 받고(`language` 와 함께 보내면 안 됨)
@@ -173,9 +192,9 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    /// 같은 요청을 다시 보내도 결과가 같을 오류 (키 · 모델 이름 · 요청 형식)
+    /// 같은 요청을 다시 보내도 결과가 같을 오류 (키 · 크레딧 · 모델 이름 · 요청 형식)
     pub fn is_fatal(&self) -> bool {
-        matches!(self, ApiError::Status { status, .. } if matches!(status, 400 | 401 | 403 | 404 | 413 | 415 | 422))
+        matches!(self, ApiError::Status { status, .. } if matches!(status, 400 | 401 | 402 | 403 | 404 | 413 | 415 | 422))
     }
 
     pub fn retry_after(&self) -> Option<Duration> {
@@ -193,6 +212,7 @@ impl std::fmt::Display for ApiError {
             ApiError::Status { status, message, .. } => {
                 let hint = match status {
                     401 | 403 => " — API 키를 확인해 주세요",
+                    402 => " — 크레딧(잔액)을 확인해 주세요",
                     404 => " — 주소나 모델 이름을 확인해 주세요",
                     429 => " — 요청 한도에 걸렸어요",
                     500..=599 => " — 서비스 쪽 문제예요",

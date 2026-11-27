@@ -49,6 +49,9 @@ const KEY_STEPS = {
   openai: '<ol class="howto"><li><button class="link" data-url="https://platform.openai.com/api-keys">platform.openai.com</button> 에 로그인</li><li><b>Billing</b> 에서 결제 수단 등록 (사용한 만큼 과금)</li><li><b>Create new secret key</b> → 키(<code>sk-…</code>)를 복사해 붙여 넣기</li></ol>',
   gemini: '<ol class="howto"><li><button class="link" data-url="https://aistudio.google.com/apikey">aistudio.google.com</button> 에 구글 계정으로 로그인</li><li><b>Create API key</b> (또는 Get API key)</li><li>나온 키(<code>AIza…</code>)를 복사해 아래 칸에 붙여 넣기</li></ol>',
   anthropic: '<ol class="howto"><li><button class="link" data-url="https://console.anthropic.com/settings/keys">console.anthropic.com</button> 에 가입 · 로그인</li><li><b>Billing</b> 에서 크레딧 충전 (사용한 만큼 차감)</li><li><b>Create Key</b> → 키(<code>sk-ant-…</code>)를 복사해 붙여 넣기</li></ol>',
+  elevenlabs: '<ol class="howto"><li><button class="link" data-url="https://elevenlabs.io/app/settings/api-keys">elevenlabs.io</button> 에 가입 · 로그인</li><li><b>Create API Key</b> → 권한에서 <b>Speech to Text</b> 를 켜기</li><li>나온 키를 복사해 아래 칸에 붙여 넣기</li></ol>',
+  rtzr: '<ol class="howto"><li><button class="link" data-url="https://developers.rtzr.ai/signup">developers.rtzr.ai</button> 에 가입 · 로그인</li><li><b>콘솔</b>에서 <b>애플리케이션 등록</b> (처음 한 번 600분 무료)</li><li>나온 <b>Client ID</b> 와 <b>Client Secret</b> 을 아래 두 칸에 붙여 넣기</li></ol>',
+  clova: '<ol class="howto"><li><button class="link" data-url="https://console.ncloud.com/">네이버 클라우드 콘솔</button> 에 로그인 (결제 수단 등록)</li><li><b>AI Services › CLOVA Speech</b> 이용 신청 → Object Storage 버킷을 먼저 만들고 <b>도메인 생성</b> (<b>장문 인식</b> · Free 플랜은 한 달 20분 무료)</li><li><b>빌더 실행 › 설정 › 연동 정보</b>에서 <b>Invoke URL</b> 과 <b>Secret Key</b> 를 복사해 아래 두 칸에 붙여 넣기</li></ol>',
 };
 const KEY_NOTE = '<span class="keynote">키는 이 PC의 Windows 자격 증명 관리자에만 보관돼요.</span>';
 const ANT_LOGIN = '<span class="keynote"><b>키 대신 로그인</b>: <button class="link" data-url="https://github.com/anthropics/anthropic-cli/releases/latest">Anthropic CLI(ant) ↗</button>의 windows_amd64.zip 을 풀어 <code>ant.exe</code> 를 PATH 폴더(또는 <code>%LOCALAPPDATA%\\Programs\\ant</code>)에 두고, 명령 프롬프트에서 <code>ant auth login</code> → 저장된 키가 없으면 그 로그인으로 요약해요 (저장한 키는 <b>지우기</b> 로 지워요). 과금은 키와 같은 Console 크레딧이에요.</span>';
@@ -66,6 +69,9 @@ const ENGINE_DESC = {
   local: '인터넷 없이 이 PC에서 인식합니다. 회의 내용이 밖으로 나가지 않아요. 첫 사용 때 모델을 한 번 내려받습니다.',
   openai: 'OpenAI gpt-transcribe — 한국어 정확도가 가장 높아요. 용어집 낱말을 따로 챙겨 듣고, 바로 앞 문장에 맞춰 문장부호·띄어쓰기를 이어 가요. 사용한 만큼 과금돼요(1시간 약 $0.27). 회의 소리가 OpenAI 로 전송돼요.' + KEY_STEPS.openai + KEY_NOTE,
   groq: 'Groq Whisper — 매우 빨라 회의가 길어도 밀리지 않아요. <b>무료 등급</b>으로 시작할 수 있어요(사용량 한도 있음). 회의 소리가 Groq 로 전송돼요.' + KEY_STEPS.groq + KEY_NOTE,
+  elevenlabs: 'ElevenLabs Scribe — Artificial Analysis 음성 인식 비교에서 정확도 1위예요. 용어집 낱말을 따로 챙겨 들어요(100개까지 · 넣으면 시간당 $0.05 더). 사용한 만큼 과금돼요(1시간 약 $0.20). 무료 플랜은 상업적 이용이 안 돼요. 회의 소리가 ElevenLabs 로 전송돼요.' + KEY_STEPS.elevenlabs + KEY_NOTE,
+  rtzr: '리턴제로 Sommers — 한국어로 학습한 엔진이라 회의 말투에 강해요. 용어집은 <b>한글로만 된 용어</b>(20자 이하, 100개까지)를 더 잘 알아들어요. 1시간 1,000원(부가세 별도, 처음 600분 무료)이고 10초보다 짧은 발화도 10초로 매겨요. 회의 소리가 리턴제로로 전송돼요.' + KEY_STEPS.rtzr + KEY_NOTE,
+  clova: '네이버 CLOVA Speech — 한국어 대화체에 강해요. 용어집을 한글 · 영어 모두 더 잘 알아들어요(한 글자 용어는 빼요). 15초에 5원(1시간 약 1,200원, 부가세 별도) · 발화마다 15초 단위로 올려 매기고, Free 플랜 도메인은 한 달 20분 무료예요. 회의 소리가 네이버 클라우드로 전송돼요.' + KEY_STEPS.clova + KEY_NOTE,
   custom: 'OpenAI 호환 음성 인식 서버(faster-whisper-server, LocalAI, 사내 서버 등)를 사용합니다.',
 };
 
@@ -677,6 +683,15 @@ function newMeeting() {
   toast('화면을 비웠어요.\n방금 회의는 회의 기록에 남아 있어요');
 }
 
+// API 엔진마다 받아야 할 키 (get_state keys 필드) · 시작 카드 문구
+const ENGINE_KEYS = {
+  openai: { name: 'OpenAI', what: 'API 키가', keys: ['openai'], url: 'https://platform.openai.com/api-keys', how: 'OpenAI 사이트에서 키를 만들어' },
+  groq: { name: 'Groq', what: 'API 키가', keys: ['groq'], url: 'https://console.groq.com/keys', how: 'Groq 사이트에서 무료로 키를 만들어' },
+  elevenlabs: { name: 'ElevenLabs', what: 'API 키가', keys: ['elevenlabs'], url: 'https://elevenlabs.io/app/settings/api-keys', how: 'ElevenLabs 사이트에서 키를 만들어' },
+  rtzr: { name: '리턴제로', what: 'Client ID · Secret 이', keys: ['rtzrId', 'rtzr'], url: 'https://developers.rtzr.ai/console/', how: '리턴제로 콘솔에서 애플리케이션을 등록하고 두 값을' },
+  clova: { name: 'CLOVA Speech', what: 'Invoke URL · Secret Key 가', keys: ['clova'], url: 'https://console.ncloud.com/', how: '네이버 클라우드 콘솔에서 CLOVA Speech 도메인을 만들고 연동 정보의 두 값을' },
+};
+
 function renderSetup() {
   const box = $('#setup');
   if (!S.app || !S.settings) return;
@@ -703,10 +718,9 @@ function renderSetup() {
       cards.push('<div class="setup-card"><b>모델을 선택해 주세요</b><p>설정에서 음성 인식 모델을 고를 수 있어요.</p><div class="actions"><button class="btn sm" data-open-settings>설정 열기</button></div></div>');
     }
   } else {
-    const keyName = { openai: 'openai', groq: 'groq' }[s.engine];
-    if (keyName && !S.app.keys[keyName]) {
-      const keyUrl = s.engine === 'openai' ? 'https://platform.openai.com/api-keys' : 'https://console.groq.com/keys';
-      cards.push(`<div class="setup-card"><b>${s.engine === 'openai' ? 'OpenAI' : 'Groq'} API 키가 필요해요</b><p>${s.engine === 'openai' ? 'OpenAI 사이트에서 키를 만들어' : 'Groq 사이트에서 무료로 키를 만들어'} 설정에 붙여 넣으면 바로 쓸 수 있어요. 키는 Windows 자격 증명 관리자에 안전하게 보관됩니다.</p><div class="actions"><button class="btn sm" data-url="${keyUrl}">키 받기 ↗</button><button class="link" data-open-settings>설정 열기</button></div></div>`);
+    const need = ENGINE_KEYS[s.engine];
+    if (need && (need.keys.some((k) => !S.app.keys[k]) || (s.engine === 'clova' && !s.clovaUrl?.trim()))) {
+      cards.push(`<div class="setup-card"><b>${need.name} ${need.what} 필요해요</b><p>${need.how} 설정에 붙여 넣으면 바로 쓸 수 있어요. 키는 Windows 자격 증명 관리자에 안전하게 보관됩니다.</p><div class="actions"><button class="btn sm" data-url="${need.url}">키 받기 ↗</button><button class="link" data-open-settings>설정 열기</button></div></div>`);
     }
   }
   box.innerHTML = cards.join('');
@@ -761,8 +775,8 @@ function engineLabel() {
     const m = S.app?.models.find((x) => x.id === s.localModel);
     return `로컬 · ${m ? m.label : s.localModel}${spk}`;
   }
-  const model = { openai: s.openaiModel, groq: s.groqModel, custom: s.customModel }[s.engine];
-  const name = { openai: 'OpenAI', groq: 'Groq', custom: '사용자 지정' }[s.engine];
+  const model = { openai: s.openaiModel, groq: s.groqModel, custom: s.customModel, elevenlabs: s.elevenlabsModel, rtzr: 'Sommers', clova: '장문 인식' }[s.engine];
+  const name = { openai: 'OpenAI', groq: 'Groq', custom: '사용자 지정', elevenlabs: 'ElevenLabs', rtzr: '리턴제로', clova: 'CLOVA Speech' }[s.engine];
   return `${name} · ${model}${spk}`;
 }
 
@@ -4383,6 +4397,8 @@ const KEY_INPUTS = [
   ['key-groq', 'groq', 'groq'], ['key-groq-llm', 'groq', 'groq'],
   ['key-custom', 'custom', 'custom'], ['key-anthropic', 'anthropic', 'anthropic'],
   ['key-gemini', 'gemini', 'gemini'], ['key-llm-custom', 'llm-custom', 'llmCustom'],
+  ['key-elevenlabs', 'elevenlabs', 'elevenlabs'], ['key-rtzr-id', 'rtzr-id', 'rtzrId'],
+  ['key-rtzr', 'rtzr', 'rtzr'], ['key-clova', 'clova', 'clova'],
 ];
 const saveSettings = debounce(async () => {
   try {
@@ -4418,6 +4434,8 @@ function renderSettings() {
   $('#opt-groq-model').value = s.groqModel;
   $('#opt-custom-url').value = s.customUrl;
   $('#opt-custom-model').value = s.customModel;
+  $('#opt-clova-url').value = s.clovaUrl || '';
+  $('#opt-elevenlabs-model').value = s.elevenlabsModel || 'scribe_v3';
   for (const [k, id] of KEY_INPUTS.map(([id, , k]) => [k, id])) {
     const el = $(`#${id}`);
     el.value = '';
@@ -4618,6 +4636,9 @@ const PROVIDER = {
   openai: { name: 'OpenAI', url: 'https://platform.openai.com/usage', link: '사용량 · 잔액 ↗' },
   anthropic: { name: 'Claude', url: 'https://console.anthropic.com/settings/usage', link: '사용량 · 잔액 ↗' },
   gemini: { name: 'Gemini', url: 'https://aistudio.google.com/apikey', link: '키 · 사용량 ↗' },
+  elevenlabs: { name: 'ElevenLabs', url: 'https://elevenlabs.io/app/subscription', link: '크레딧 · 사용량 ↗' },
+  rtzr: { name: '리턴제로', url: 'https://developers.rtzr.ai/console/', link: '콘솔 · 사용량 ↗' },
+  clova: { name: 'CLOVA Speech', url: 'https://console.ncloud.com/', link: '콘솔 · 이용 요금 ↗' },
   custom: { name: '사용자 지정 서버', url: '', link: '' },
 };
 const LIMIT_LABEL = { requests: '요청', tokens: '토큰', 'input-tokens': '입력 토큰', 'output-tokens': '출력 토큰', 'audio-seconds': '오디오(초)' };
@@ -4650,11 +4671,17 @@ function tallyLines(t, c) {
 // 카드 아래 덧붙임 — 이번 달 기준 (오늘은 이번 달에 들어 있다)
 function costNotes(id, t, c) {
   const out = [];
-  // Groq 는 짧은 요청도 10초로 매겨, 요금이 매겨진 길이가 실제보다 꽤 길 수 있다
+  // Groq · 리턴제로는 짧은 요청도 10초로, CLOVA Speech 는 15초 단위로 매겨 요금이 매겨진 길이가 실제보다 꽤 길 수 있다
   const billed = c?.sttBilledSecs || 0;
-  if (id === 'groq' && billed > (t?.sttSecs || 0) * 1.05 + 1) {
-    out.push(`Groq 는 10초보다 짧은 음성 인식 요청도 10초로 매겨, 이번 달은 ${minutes(billed)}어치로 셈했어요.`);
+  const MIN_NOTE = {
+    groq: 'Groq 는 10초보다 짧은 음성 인식 요청도 10초로 매겨',
+    rtzr: '리턴제로는 10초보다 짧은 발화도 10초로 매겨',
+    clova: 'CLOVA Speech 는 발화마다 15초 단위로 올려 매겨',
+  };
+  if (MIN_NOTE[id] && billed > (t?.sttSecs || 0) * 1.05 + 1) {
+    out.push(`${MIN_NOTE[id]}, 이번 달은 ${minutes(billed)}어치로 셈했어요.`);
   }
+  if ((id === 'rtzr' || id === 'clova') && t?.sttRequests) out.push('원화 단가로 셈했고 부가세(10%)는 빠져 있어요.');
   if (c?.estimated) out.push('모델을 기록하기 전(v0.4.6까지) 사용분은 지금 설정한 모델 단가로 셈했어요.');
   if (c?.unpriced?.length) out.push(`단가를 몰라 금액에서 뺐어요: ${c.unpriced.join(', ')}`);
   return out;
@@ -4806,6 +4833,8 @@ bind('opt-gpu', (t) => (S.settings.gpu = t.checked));
 bind('opt-openai-model', (t) => (S.settings.openaiModel = t.value));
 bind('opt-groq-model', (t) => (S.settings.groqModel = t.value));
 bind('opt-custom-url', (t) => (S.settings.customUrl = t.value.trim()));
+bind('opt-clova-url', (t) => (S.settings.clovaUrl = t.value.trim()));
+bind('opt-elevenlabs-model', (t) => (S.settings.elevenlabsModel = t.value));
 bind('opt-custom-model', (t) => (S.settings.customModel = t.value.trim()));
 bind('opt-diar', (t) => { S.settings.diarization.enabled = t.checked; $('#diar-tune').classList.toggle('off', !t.checked); });
 bind('opt-thr', (t) => { S.settings.diarization.threshold = +t.value; $('#thr-label').textContent = (+t.value).toFixed(2); }, 'input');
@@ -5247,7 +5276,7 @@ function createMock() {
   const st = {
     settings: {
       engine: 'local', localModel: 'large-v3-turbo-q5_0', beamSize: 1, threads: 0,
-      openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
+      openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '', clovaUrl: '', elevenlabsModel: 'scribe_v3',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
       saveAudio: false, unloadWhenIdle: true, livePreview: 'auto', gpu: true, redoModel: '', hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
@@ -5267,7 +5296,7 @@ function createMock() {
       { id: 'medium-q5_0', label: 'Medium (q5)', note: '중간 사양 PC', size: 539212467, ready: false },
     ],
     customModels: [], speakerModelReady: true,
-    keys: { openai: false, groq: false, custom: false, anthropic: false, gemini: false, llmCustom: false },
+    keys: { openai: false, groq: false, custom: false, anthropic: false, gemini: false, llmCustom: false, rtzrId: false, rtzr: false, clova: false, elevenlabs: false },
     autostart: false, version: '0.2.0', current: null, elapsedMs: 0,
     paused: false, fileMode: false, recSource: null, update: null, updatedFrom: null,
     audioExts: ['wav', 'mp3', 'm4a', 'mp4', 'mov', 'aac', 'flac', 'ogg', 'oga', 'opus'],

@@ -112,11 +112,11 @@ impl Cost {
         }
     }
 
-    fn add_model(&mut self, provider: &str, model: &str, t: &ModelTally) {
+    fn add_model(&mut self, provider: &str, model: &str, t: &ModelTally, usd_krw: f64) {
         if t.stt_requests > 0 || t.stt_billed_secs > 0.0 {
             self.stt_billed_secs += t.stt_billed_secs;
             match pricing::audio_price(provider, model) {
-                Some(per_hour) => self.stt_usd += t.stt_billed_secs / 3600.0 * per_hour,
+                Some(per_hour) => self.stt_usd += t.stt_billed_secs / 3600.0 * per_hour.usd(usd_krw),
                 None => self.unpriced(model),
             }
         }
@@ -135,12 +135,13 @@ impl Cost {
         }
     }
 
-    /// 제공자 하나의 사용량을 금액으로. `legacy(쓰임새)` 는 모델 기록 전 사용분에 쓸 모델(지금 설정)
-    pub fn of(provider: &str, t: &Tally, legacy: &dyn Fn(Use) -> Option<String>) -> Cost {
+    /// 제공자 하나의 사용량을 금액으로. `legacy(쓰임새)` 는 모델 기록 전 사용분에 쓸 모델(지금 설정),
+    /// `usd_krw` 는 원화 단가(리턴제로 · CLOVA Speech)를 달러로 바꿀 환율
+    pub fn of(provider: &str, t: &Tally, legacy: &dyn Fn(Use) -> Option<String>, usd_krw: f64) -> Cost {
         let mut c = Cost::default();
         let mut known = ModelTally::default();
         for (model, m) in &t.models {
-            c.add_model(provider, model, m);
+            c.add_model(provider, model, m, usd_krw);
             known.add(m);
         }
         // 합계에는 있는데 모델별 기록에 없는 양 = 모델을 기록하기 전 사용분
@@ -160,7 +161,7 @@ impl Cost {
         if rest.stt_requests > 0 || rest.stt_secs >= 0.5 {
             c.estimated = true;
             match legacy(Use::Stt) {
-                Some(model) => c.add_model(provider, &model, &rest),
+                Some(model) => c.add_model(provider, &model, &rest, usd_krw),
                 None => c.unpriced("이전 기록"),
             }
         }
@@ -172,7 +173,7 @@ impl Cost {
         if rest.in_tokens > 0 || rest.out_tokens > 0 {
             c.estimated = true;
             match legacy(Use::Summary) {
-                Some(model) => c.add_model(provider, &model, &rest),
+                Some(model) => c.add_model(provider, &model, &rest, usd_krw),
                 None => c.unpriced("이전 기록"),
             }
         }
@@ -275,8 +276,9 @@ impl UsageBook {
         }
     }
 
-    /// 오늘 · 이번 달 사용량과 금액. `legacy(제공자, 쓰임새)` 는 모델을 기록하기 전 사용분에 쓸 모델(지금 설정)
-    pub fn report(&self, legacy: &dyn Fn(&str, Use) -> Option<String>) -> UsageReport {
+    /// 오늘 · 이번 달 사용량과 금액. `legacy(제공자, 쓰임새)` 는 모델을 기록하기 전 사용분에 쓸 모델(지금 설정),
+    /// `usd_krw` 는 원화 단가를 달러로 바꿀 환율 (설정 › 사용량)
+    pub fn report(&self, legacy: &dyn Fn(&str, Use) -> Option<String>, usd_krw: f64) -> UsageReport {
         let days = self.days.lock();
         let t = today();
         let month = &t[..7];
@@ -288,7 +290,7 @@ impl UsageBook {
         }
         let today = days.get(&t).cloned().unwrap_or_default();
         let cost = |tallies: &BTreeMap<String, Tally>| -> BTreeMap<String, Cost> {
-            tallies.iter().map(|(p, t)| (p.clone(), Cost::of(p, t, &|u| legacy(p, u)))).collect()
+            tallies.iter().map(|(p, t)| (p.clone(), Cost::of(p, t, &|u| legacy(p, u), usd_krw))).collect()
         };
         UsageReport {
             today_cost: cost(&today),
@@ -308,6 +310,29 @@ mod tests {
         None
     }
 
+    const KRW: f64 = crate::settings::DEFAULT_USD_KRW;
+
+    #[test]
+    fn korean_services_are_priced_in_won_with_their_minimums() {
+        let book = UsageBook::load(std::env::temp_dir().join("bd-usage-nofile-krw/usage.json"));
+        // 리턴제로: 4초도 10초로 · 시간당 1,000원
+        book.stt("rtzr", "sommers", 4.0);
+        book.stt("rtzr", "sommers", 20.0);
+        // CLOVA Speech: 15초 단위 올림 · 15초 5원
+        book.stt("clova", "장문 인식", 3.0);
+        book.stt("clova", "장문 인식", 16.0);
+        // ElevenLabs: 초 단위 · 용어를 보내면 시간당 $0.25
+        book.stt("elevenlabs", "scribe_v3+keyterms", 36.0);
+        // 환율을 바꿔도 원화 금액은 그대로
+        let r = book.report(&no_legacy, 1500.0);
+        let won = |p: &str| r.today_cost[p].stt_usd * 1500.0;
+        assert!((r.today_cost["rtzr"].stt_billed_secs - 30.0).abs() < 1e-9);
+        assert!((won("rtzr") - 30.0 / 3600.0 * 1000.0).abs() < 1e-9);
+        assert!((r.today_cost["clova"].stt_billed_secs - 45.0).abs() < 1e-9);
+        assert!((won("clova") - 15.0).abs() < 1e-9, "15초 세 번어치 = 15원");
+        assert!((r.today_cost["elevenlabs"].stt_usd - 36.0 / 3600.0 * 0.25).abs() < 1e-12);
+    }
+
     #[test]
     fn counts_api_use_by_provider_and_skips_local() {
         let dir = std::env::temp_dir().join(format!("bd-usage-test-{}", std::process::id()));
@@ -320,7 +345,7 @@ mod tests {
         book.summary("ollama", "exaone3.5:7.8b", 999, 999, 0, 0); // 로컬은 세지 않음
         book.save();
         let again = UsageBook::load(path);
-        let r = again.report(&no_legacy);
+        let r = again.report(&no_legacy, KRW);
         let g = &r.today["groq"];
         assert_eq!((g.stt_requests, g.stt_failures), (3, 1), "실패한 요청도 요청 수에");
         assert!((g.stt_secs - 5.5).abs() < 1e-9);
@@ -342,7 +367,7 @@ mod tests {
         t.sum_requests = 2;
         t.sum_in_tokens = 51_788;
         t.sum_out_tokens = 11_674;
-        let c = Cost::of("anthropic", &t, &|_| None);
+        let c = Cost::of("anthropic", &t, &|_| None, KRW);
         assert!((c.sum_usd - (51_788.0 * 4.0 + 11_674.0 * 20.0) / 1e6).abs() < 1e-9);
         assert!(!c.estimated && c.unpriced.is_empty());
 
@@ -350,7 +375,7 @@ mod tests {
         let book = UsageBook::load(std::env::temp_dir().join("bd-usage-nofile-cache/usage.json"));
         book.summary("anthropic", "claude-opus-5-5", 100, 50, 20_000, 0);
         book.summary("anthropic", "claude-opus-5-5", 120, 60, 0, 20_000);
-        let r = book.report(&no_legacy);
+        let r = book.report(&no_legacy, KRW);
         assert_eq!(r.today["anthropic"].sum_in_tokens, 40_220, "입력 합계에는 캐시로 읽고 쓴 것까지");
         let c = &r.today_cost["anthropic"];
         let want = (220.0 * 4.0 + 20_000.0 * 4.0 * 1.25 + 20_000.0 * 0.20 + 110.0 * 20.0) / 1e6;
@@ -361,7 +386,7 @@ mod tests {
         let book = UsageBook::load(std::env::temp_dir().join("bd-usage-nofile/usage.json"));
         book.stt("groq", "whisper-large-v3-turbo", 3.0);
         book.stt("groq", "whisper-large-v3-turbo", 30.0);
-        let r = book.report(&no_legacy);
+        let r = book.report(&no_legacy, KRW);
         let c = &r.today_cost["groq"];
         assert!((c.stt_billed_secs - 40.0).abs() < 1e-9);
         assert!((c.stt_usd - 40.0 / 3600.0 * 0.04).abs() < 1e-12);
@@ -380,14 +405,14 @@ mod tests {
                 Use::Summary => "openai/gpt-oss-120b".to_string(),
             })
         };
-        let c = Cost::of("groq", &old, &legacy);
+        let c = Cost::of("groq", &old, &legacy, KRW);
         assert!(c.estimated);
         // 성공 4회 · 40초 → 요청마다 10초 최소라 40초
         assert!((c.stt_billed_secs - 40.0).abs() < 1e-9);
         assert!((c.sum_usd - 0.15).abs() < 1e-9);
 
         // 지금 설정에서도 모델을 모르면 금액에서 빼고 알린다
-        let c = Cost::of("custom", &old, &|_| None);
+        let c = Cost::of("custom", &old, &|_| None, KRW);
         assert_eq!(c.unpriced, vec!["이전 기록".to_string()]);
         assert_eq!(c.stt_usd + c.sum_usd, 0.0);
     }

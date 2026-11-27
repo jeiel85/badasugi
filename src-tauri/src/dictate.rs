@@ -264,11 +264,8 @@ fn begin(app: &AppHandle, id: u64) -> Result<(), String> {
             return Err("로컬 음성 인식 모델이 없어요 — 설정 › 녹음에서 내려받아 주세요".into());
         }
     }
-    let api = match &engine {
-        EngineConfig::Api { base_url, model, .. } => Some((badasugi_core::usage::provider_of(base_url), model.trim().to_string())),
-        _ => None,
-    };
     let terms = crate::glossary_terms(&s.glossary);
+    let api = engine.usage(&terms);
     let mut diarization = s.diarization.clone();
     diarization.enabled = false;
     let cfg = PipelineConfig {

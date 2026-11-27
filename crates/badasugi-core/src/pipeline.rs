@@ -400,7 +400,7 @@ impl Pipeline {
         let hints = SharedHints::default();
         let every = match cfg.engine {
             EngineConfig::Local { .. } => PREVIEW_EVERY,
-            EngineConfig::Api { .. } => PREVIEW_EVERY_API,
+            EngineConfig::Api { .. } | EngineConfig::Service { .. } => PREVIEW_EVERY_API,
         };
         let preview = cfg.preview.then(|| Arc::new(PreviewCtl::new(every)));
         let backend = spawn_backend(&cfg, diarizer, sink.clone(), None, hints.clone(), None, preview.clone());
@@ -538,6 +538,8 @@ fn validate(cfg: &PipelineConfig) -> Result<()> {
                 return Err(anyhow!("API 주소를 입력해 주세요."));
             }
         }
+        // 키 · 주소는 엔진을 만들 때 본다 (asr::create)
+        EngineConfig::Service { .. } => {}
     }
     Ok(())
 }

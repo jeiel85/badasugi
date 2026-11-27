@@ -338,10 +338,13 @@
         <div class="set-page" data-page="record" role="tabpanel">
           <section>
             <h4>음성 인식 엔진</h4>
-            <div class="seg" id="seg-engine">
+            <div class="seg seg-wrap seg-4" id="seg-engine">
               <button data-v="local">로컬</button>
               <button data-v="openai">OpenAI</button>
               <button data-v="groq">Groq</button>
+              <button data-v="elevenlabs">ElevenLabs</button>
+              <button data-v="rtzr">리턴제로</button>
+              <button data-v="clova">CLOVA</button>
               <button data-v="custom">사용자 지정</button>
             </div>
             <p class="desc" id="engine-desc"></p>
@@ -373,6 +376,23 @@
                   <option value="whisper-large-v3">whisper-large-v3 (더 정확)</option>
                 </select>
               </label>
+            </div>
+            <div class="set-group" data-engine="elevenlabs">
+              <label class="field"><span>API 키 <button class="link" data-url="https://elevenlabs.io/app/settings/api-keys">키 만들기 ↗</button></span><input type="password" id="key-elevenlabs" placeholder="sk_…" autocomplete="off" /></label>
+              <label class="field"><span>모델</span>
+                <select id="opt-elevenlabs-model">
+                  <option value="scribe_v3">scribe_v3 (추천 · 가장 정확)</option>
+                  <option value="scribe_v2">scribe_v2</option>
+                </select>
+              </label>
+            </div>
+            <div class="set-group" data-engine="rtzr">
+              <label class="field"><span>Client ID <button class="link" data-url="https://developers.rtzr.ai/console/">콘솔 열기 ↗</button></span><input type="password" id="key-rtzr-id" autocomplete="off" /></label>
+              <label class="field"><span>Client Secret</span><input type="password" id="key-rtzr" autocomplete="off" /></label>
+            </div>
+            <div class="set-group" data-engine="clova">
+              <label class="field"><span>Invoke URL <small>도메인 › 빌더 › 설정 › 연동 정보</small></span><input id="opt-clova-url" placeholder="https://clovaspeech-gw.ncloud.com/external/v1/…" spellcheck="false" /></label>
+              <label class="field"><span>Secret Key <button class="link" data-url="https://console.ncloud.com/">콘솔 열기 ↗</button></span><input type="password" id="key-clova" autocomplete="off" /></label>
             </div>
             <div class="set-group" data-engine="custom">
               <label class="field"><span>주소</span><input id="opt-custom-url" placeholder="http://localhost:8000/v1" /></label>
