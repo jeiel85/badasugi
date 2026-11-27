@@ -215,7 +215,7 @@
   - **ElevenLabs**(`elevenlabs.rs`): `scribe_v3`, `tag_audio_events=false` · `no_verbatim=true`. 용어(`keyterms`)는 100개를 넘으면 요청마다 최소 20초로 매겨 100개까지만.
   - 설정 › 녹음에서 고르고, 키는 자격 증명 관리자에(`rtzr-id` · `rtzr` · `clova` · `elevenlabs`), CLOVA Invoke URL 은 설정 파일에. 연결 테스트는 1초 무음을 한 번 보낸다. 사용량은 서비스 이름으로 세고, 원화 단가(리턴제로 · CLOVA)는 환율과 상관없이 원화 그대로 보이게 셈한다.
 - **실제 키로 확인할 것**: 리턴제로 스트리밍에 소리를 실시간보다 빨리 몰아 보내도 되는지(공식 예제는 실시간 속도로 나눠 보냄), CLOVA 장문 sync 의 짧은 발화 지연, ElevenLabs 무료 플랜의 API 사용 가능 여부(문서끼리 다름).
-- **하지 않은 것**: Qwen3-ASR(로컬) — whisper.cpp 로 돌릴 수 없고 새 실행 엔진이 필요해 "가벼움" 원칙과 부딪친다. Mistral Voxtral Transcribe 3 — 주소(`https://api.mistral.ai/v1/audio/transcriptions`) · Bearer 인증 · `file` · `model` · `language` · 응답 `text` 가 OpenAI 와 같아 **사용자 지정** 엔진으로 붙일 수 있어 보이지만, 앱이 함께 보내는 `response_format` · `prompt`(용어집)를 받는지 문서에 없다 — 실제 키로 한 번 확인할 것(용어집은 `context_bias` 로 따로 받는다).
+- **하지 않은 것**: Qwen3-ASR(로컬) — whisper.cpp 로 돌릴 수 없고 새 실행 엔진이 필요해 "가벼움" 원칙과 부딪친다. Mistral Voxtral Transcribe 3 — 시험하지 않기로 했다(2026-11-27). 주소(`https://api.mistral.ai/v1/audio/transcriptions`) · Bearer 인증 · `file` · `model` · `language` · 응답 `text` 가 OpenAI 와 같아 **사용자 지정** 엔진으로 붙일 수 있어 보이지만, 앱이 함께 보내는 `response_format` · `prompt`(용어집)는 문서에 없고 용어집은 `context_bias` 로 따로 받아 실제 키로 확인해야 한다. 그런데 무료 API 가 없고(결제 수단 + 선불 크레딧) 요금도 시간당 약 $0.21(Mini) · $0.24(Small)로 ElevenLabs 와 비슷해 키를 따로 받을 이유가 약했다.
 
 ## 하지 않기로 한 것
 
