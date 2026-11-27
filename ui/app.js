@@ -1413,14 +1413,23 @@ function adoptRedo(id, fresh) {
 }
 // 지금 고치고 있어 넣지 않고 들고 있는 다시 받아 적기 결과: '기록 id:문장 id' → { before, text }
 const redoHeld = new Map();
-// 문장 고치기가 끝났다 — 고치지 않고 끝냈으면(글이 그대로면) 들고 있던 결과를 이제 넣고, 고쳤으면 버린다
-// (넣지 않은 채 두면 이 사본은 다시 받아 적은 글까지 받은 것으로 되어 있어, 다음 저장이 원래 글로 덮는다)
+// 들고 있는 결과가 있는 동안 받은 마지막 번호: 기록 id → redoRev. 그동안은 사본의 번호를 올리지 않는다 —
+// 올리면 다른 문장을 저장할 때 들고 있는 문장의 옛 글이 '다 받은 사본'의 글로 가서 다시 받아 적은 글을 덮는다
+const redoRevHeld = new Map();
+const holding = (docId) => [...redoHeld.keys()].some((k) => k.startsWith(`${docId}:`));
+// 문장 고치기가 끝났다 — 고치지 않고 끝냈으면(글이 그대로면) 들고 있던 결과를 이제 넣고, 고쳤으면 버린다.
+// 들고 있던 것이 다 정해지면 미뤄 둔 번호를 올리고 저장한다
 function settleRedo(d, u) {
   const k = `${d.id}:${u.id}`;
   const held = redoHeld.get(k);
   if (!held) return;
   redoHeld.delete(k);
   if (d.utterances.includes(u) && u.text === held.before) { u.text = held.text; invalidateTranscript(); }
+  if (!holding(d.id) && redoRevHeld.has(d.id)) {
+    d.redoRev = Math.max(d.redoRev || 0, redoRevHeld.get(d.id));
+    redoRevHeld.delete(d.id);
+    persistDoc(d);
+  }
 }
 function onRedo(p) {
   const id = p.id;
@@ -1438,8 +1447,12 @@ function onRedo(p) {
           if (String(ed.id) === typing) redoHeld.set(`${d.id}:${u.id}`, { before: ed.before, text: ed.text });
           else { u.text = ed.text; n++; }
         }
-        // 이 사본은 여기까지 받았다 — 이 뒤에 원래 글로 고쳐 저장해도 사람이 고친 것으로 본다 (session.rs save_doc)
-        if (p.rev != null) d.redoRev = p.rev;
+        // 이 사본은 여기까지 받았다 — 이 뒤에 원래 글로 고쳐 저장해도 사람이 고친 것으로 본다 (session.rs save_doc).
+        // 고치고 있어 들고 있는 결과가 있으면 그게 정해질 때까지 미룬다 (settleRedo)
+        if (p.rev != null) {
+          if (holding(d.id)) redoRevHeld.set(d.id, Math.max(redoRevHeld.get(d.id) || 0, p.rev));
+          else d.redoRev = p.rev;
+        }
       }
       if (n) { invalidateTranscript(); scheduleRender(); }
       return;

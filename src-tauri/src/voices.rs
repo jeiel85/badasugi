@@ -414,6 +414,7 @@ mod tests {
             end_ms: id * 5000 + 4000,
             speaker: Some(speaker),
             text: "문장".into(),
+            edited: false,
         };
         d.utterances = vec![u(0, 0), u(1, 1), u(2, 0)];
         d.speakers.insert(0, "김 팀장".into());

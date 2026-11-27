@@ -332,7 +332,8 @@ fn run_one(app: &AppHandle, id: &str, used: &mut Option<PathBuf>) -> Result<Outc
     let spans: Vec<Span> = doc
         .utterances
         .iter()
-        .filter(|u| from.is_none_or(|f| u.start_ms > f))
+        // 사람이 고친 문장은 다시 받아 적지 않는다
+        .filter(|u| !u.edited && from.is_none_or(|f| u.start_ms > f))
         .map(|u| Span {
             id: u.id,
             start_ms: u.start_ms,

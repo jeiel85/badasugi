@@ -899,6 +899,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
                     end_ms: *end_ms,
                     speaker,
                     text: text.clone(),
+                    edited: false,
                 });
             }
             store.mark_dirty();
