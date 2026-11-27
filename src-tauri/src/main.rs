@@ -2292,7 +2292,9 @@ fn on_display_change(app: &AppHandle) {
 /// 화면 스크립트가 시작을 끝냈다는 신호 (스크립트 오류로 화면이 비면 오지 않는다)
 /// 설정 › 사용량: 이 앱으로 쓴 양(오늘 · 이번 달) + 공급자가 알려 준 남은 한도
 #[tauri::command]
-fn get_usage(app: AppHandle) -> usage_book::UsageReport {
+/// `usd_krw`: 화면이 원화를 셈하는 환율 — 원화 단가(리턴제로 · CLOVA)를 같은 환율로 달러로 바꿔야 원화가 그대로 보인다
+/// (환율 칸을 바꾸면 설정이 저장되기 전에 다시 그리므로 저장된 값을 쓰면 어긋난다)
+fn get_usage(app: AppHandle, usd_krw: Option<f64>) -> usage_book::UsageReport {
     let book = app.state::<usage_book::UsageBook>();
     book.save();
     // 모델을 기록하기 전(v0.4.6 까지) 사용분은 지금 설정한 모델 단가로 셈한다
@@ -2314,7 +2316,7 @@ fn get_usage(app: AppHandle) -> usage_book::UsageReport {
             m => Some(m.to_string()),
         }
     };
-    book.report(&legacy, s.usd_krw)
+    book.report(&legacy, usd_krw.filter(|r| r.is_finite() && *r > 0.0).unwrap_or(s.usd_krw))
 }
 
 #[tauri::command]

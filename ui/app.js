@@ -4737,7 +4737,8 @@ async function renderUsage() {
   const box = $('#usage-box');
   if (!box) return;
   let r;
-  try { r = await api.invoke('get_usage'); } catch { r = null; }
+  // 원화 단가(리턴제로 · CLOVA)를 화면과 같은 환율로 셈하게 — 환율 칸을 바꾼 직후엔 설정이 아직 저장 전이다
+  try { r = await api.invoke('get_usage', { usdKrw: usdKrw() }); } catch { r = null; }
   if (!r) { box.innerHTML = '<div class="usage-empty">사용량을 불러오지 못했어요</div>'; return; }
   const ids = [...new Set([...Object.keys(r.month || {}), ...Object.keys(r.today || {}), ...(r.rates || []).map((x) => x.provider)])];
   if (!ids.length) {
