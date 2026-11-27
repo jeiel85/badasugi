@@ -279,15 +279,18 @@ impl Saver<'_> {
             r.model = model.to_string();
             r.done_ms = last.or(r.done_ms);
             r.finished = finished;
-            (edits, r.changed.len())
+            let changed = r.changed.len();
+            (edits, changed, d.redo_rev)
         });
         self.last_save = Instant::now();
         match r {
-            Ok((edits, changed)) => {
+            Ok((edits, changed, rev)) => {
                 if !edits.is_empty() {
-                    let _ = self
-                        .app
-                        .emit("bd://redo", serde_json::json!({ "kind": "edits", "id": self.id, "edits": edits }));
+                    // rev: 화면 사본이 이 글까지 받았다는 표시 (늦게 저장된 옛 사본과 가른다)
+                    let _ = self.app.emit(
+                        "bd://redo",
+                        serde_json::json!({ "kind": "edits", "id": self.id, "edits": edits, "rev": rev }),
+                    );
                 }
                 changed
             }

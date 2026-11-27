@@ -78,6 +78,14 @@ pub struct SessionDoc {
     /// 녹음 뒤 더 정확한 모델로 다시 받아 적기 (redo.rs). 앱만 고친다 — 화면 사본을 저장할 때는 저장된 것을 지킨다
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redo: Option<Redo>,
+    /// 다시 받아 적은 글을 넣거나 되돌릴 때마다 1씩 오른다 (화면에도 알린다). 이보다 오래된 화면 사본이 늦게 저장되면
+    /// 고치지 않은 문장은 다시 받아 적은 글을 지킨다 — 다시 받아 적은 뒤의 사본에서 원래 글로 고친 것은 그대로
+    #[serde(skip_serializing_if = "is_zero")]
+    pub redo_rev: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// 녹음 뒤 다시 받아 적기의 진행 · 바꾼 문장
@@ -680,6 +688,9 @@ impl SessionDoc {
                 text: new.clone(),
             });
         }
+        if !edits.is_empty() {
+            self.redo_rev += 1;
+        }
         edits
     }
 
@@ -694,6 +705,7 @@ impl SessionDoc {
                 n += 1;
             }
         }
+        self.redo_rev += 1;
         Some(n)
     }
 
@@ -1322,10 +1334,11 @@ impl SessionStore {
         doc.translation = old.translation.clone();
         // 녹음 파일 이름도 앱만 고친다 (보관 기간이 지나 녹음을 지운 뒤 늦게 도착한 화면 사본이 이름을 되살리지 않게)
         doc.audio_file = old.audio_file.clone();
-        // 다시 받아 적기도 앱만 고친다. 다시 받아 적은 글이 들어가기 전에 만든 화면 사본이 늦게 도착하면,
-        // 화면에서 고치지 않은 문장(원래 글 그대로)은 다시 받아 적은 글을 지킨다
+        // 다시 받아 적기도 앱만 고친다. 다시 받아 적은 글이 들어가기 전에 만든 화면 사본이 늦게 도착하면
+        // (화면이 받은 마지막 다시 받아 적기 번호가 저장된 것보다 작으면), 화면에서 고치지 않은 문장(원래 글 그대로)은
+        // 다시 받아 적은 글을 지킨다. 다시 받아 적은 뒤의 사본이면 원래 글로 고친 것도 사람이 고친 것이므로 그대로 둔다
         doc.redo = old.redo.clone();
-        if let Some(redo) = &old.redo {
+        if let Some(redo) = old.redo.as_ref().filter(|_| doc.redo_rev < old.redo_rev) {
             let saved: HashMap<u64, &str> = old.utterances.iter().map(|u| (u.id, u.text.as_str())).collect();
             for u in doc.utterances.iter_mut() {
                 if let (Some(ch), Some(&now)) = (redo.changed.get(&u.id), saved.get(&u.id)) {
@@ -1335,6 +1348,7 @@ impl SessionStore {
                 }
             }
         }
+        doc.redo_rev = old.redo_rev;
         if doc.speaker_rev < old.speaker_rev {
             // 화자 다시 정리 전에 만든 화면 사본이 늦게 저장됨: 화자 배정 · 이름은 저장된(정리된) 것을 지키고
             // 제목 · 글자 · 삭제만 반영한다
@@ -1879,6 +1893,13 @@ mod tests {
         let saved = store.load(&d.id).unwrap();
         assert_eq!(saved.utterances.iter().map(|u| u.text.as_str()).collect::<Vec<_>>(), ["가가", "나 (고침)"]);
         assert!(saved.redo.is_some(), "다시 받아 적기 기록은 앱만 고친다");
+        // 다시 받아 적은 글까지 받은 사본에서 사람이 원래 글로 되돌려 고친 문장은 그대로 둔다
+        let mut fresh = saved.clone();
+        fresh.utterances[0].text = "가".into();
+        store.save_doc(fresh).unwrap();
+        assert_eq!(store.load(&d.id).unwrap().utterances[0].text, "가");
+        // (되돌리기를 보려고 다시 받아 적은 글로)
+        store.update_saved(&d.id, |doc| doc.utterances[0].text = "가가".into()).unwrap();
         // 되돌리면 고치지 않은 문장만 원래 글로
         let (back, n) = store.undo_redo(&d.id).unwrap();
         assert_eq!(n, 1);

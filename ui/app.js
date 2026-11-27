@@ -8,13 +8,15 @@ const T = window.__TAURI__;
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
 // (요약 보내기도 기록을 읽는다 — 요약을 고치고 바로 보내도 고친 요약으로)
 const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
-  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html', 'clear_translation']);
+  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html', 'clear_translation',
+  // 다시 받아 적기: 시작할 때의 글 · 되돌리기가 앞서 보낸 편집 저장 뒤에 오게 (저장이 되돌린 글을 다시 덮지 않게)
+  'redo_session', 'undo_redo']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
 const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all', 'translate_session']);
 // 저장된 기록을 읽어 결과를 만드는 명령 — 기다리던 편집 저장(debounce)을 먼저 보내 고친 내용으로 만들게 한다
 // (문장을 고치다 바로 '전체 복사'를 누르면 고치기 전 글이 복사됐다. 부르는 곳마다 챙기지 않아도 여기서 한 번에)
 const READ_CMDS = new Set(['session_text', 'export_session', 'export_html', 'share_info', 'share_messenger', 'open_mail_draft',
-  'export_todos_ics', 'summarize', 'ask_meeting', 'ask_all', 'translate_session']);
+  'export_todos_ics', 'summarize', 'ask_meeting', 'ask_all', 'translate_session', 'redo_session', 'undo_redo']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
   if (READ_CMDS.has(cmd)) flushSaves();
@@ -1422,6 +1424,8 @@ function onRedo(p) {
           const u = d.utterances.find((x) => x.id === ed.id);
           if (u && u.text === ed.before && String(ed.id) !== typing) { u.text = ed.text; n++; }
         }
+        // 이 사본은 여기까지 받았다 — 이 뒤에 원래 글로 고쳐 저장해도 사람이 고친 것으로 본다 (session.rs save_doc)
+        if (p.rev != null) d.redoRev = p.rev;
       }
       if (n) { invalidateTranscript(); scheduleRender(); }
       return;
@@ -1438,10 +1442,17 @@ function onRedo(p) {
       toast(p.message, 'warn', 8000);
       break;
   }
-  // 앱이 기록에 남긴 진행 · 바꾼 문장(되돌리기)을 화면 사본에도
+  // 앱이 기록에 남긴 진행 · 바꾼 문장(되돌리기)만 화면 사본에 옮긴다 — 기록을 통째로 바꾸면 지금 고치고 있는
+  // 문장이 옛 사본에 저장돼 사라질 수 있다 (글은 'edits' 로 이미 받았다)
   if (shown.length) {
-    flushSaves();
-    api.invoke('load_session', { id }).then((fresh) => adoptRedo(id, fresh)).catch(() => {});
+    api.invoke('load_session', { id }).then((fresh) => {
+      for (const d of [S.liveDoc, S.viewDoc]) {
+        if (d?.id !== id) continue;
+        // 번호(redoRev)는 옮기지 않는다 — 화면이 받은 글까지만 받았다고 해야 늦은 저장이 다시 받아 적은 글을 덮지 않는다
+        d.redo = fresh.redo;
+      }
+      renderMeta();
+    }).catch(() => {});
   }
 }
 function onRedoStatus(st) {
