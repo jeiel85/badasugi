@@ -248,6 +248,7 @@ pub fn test_connection(base_url: &str, api_key: &str, model: &str) -> Result<()>
         keywords: &[],
         context: "",
         preview: None,
+        abort: None,
     };
     t.call(&wav, &req).map(|_| ())
 }
@@ -266,6 +267,7 @@ mod tests {
             keywords,
             context,
             preview: None,
+            abort: None,
         }
     }
 
@@ -334,6 +336,7 @@ mod tests {
             keywords: &[],
             context: "",
             preview: Some(&abort),
+            abort: None,
         };
         let t0 = std::time::Instant::now();
         assert!(t.transcribe(&req).is_err());
@@ -354,6 +357,7 @@ mod tests {
             keywords: &[],
             context: "",
             preview: None,
+            abort: None,
         };
         assert_eq!(names(&form_fields("gpt-transcribe", &r)), ["model", "response_format", "temperature"]);
     }

@@ -8,13 +8,15 @@ const T = window.__TAURI__;
 // (편집을 저장하고 바로 다시 읽어도 저장된 내용을 받게)
 // (요약 보내기도 기록을 읽는다 — 요약을 고치고 바로 보내도 고친 요약으로)
 const ORDERED_CMDS = new Set(['save_session', 'load_session', 'undo_refinement', 'delete_session', 'export_session', 'session_text', 'session_audio', 'delete_qa',
-  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html', 'clear_translation']);
+  'share_info', 'share_messenger', 'open_mail_draft', 'export_todos_ics', 'export_html', 'clear_translation',
+  // 다시 받아 적기: 시작할 때의 글 · 되돌리기가 앞서 보낸 편집 저장 뒤에 오게 (저장이 되돌린 글을 다시 덮지 않게)
+  'redo_session', 'undo_redo']);
 // 앞서 보낸 기록 명령(편집 저장 등)이 끝난 뒤에 시작하지만, 뒤에 오는 명령은 붙잡지 않는다 (요약 · 묻기는 몇 분 걸릴 수 있다)
 const AFTER_CMDS = new Set(['summarize', 'ask_meeting', 'ask_all', 'translate_session']);
 // 저장된 기록을 읽어 결과를 만드는 명령 — 기다리던 편집 저장(debounce)을 먼저 보내 고친 내용으로 만들게 한다
 // (문장을 고치다 바로 '전체 복사'를 누르면 고치기 전 글이 복사됐다. 부르는 곳마다 챙기지 않아도 여기서 한 번에)
 const READ_CMDS = new Set(['session_text', 'export_session', 'export_html', 'share_info', 'share_messenger', 'open_mail_draft',
-  'export_todos_ics', 'summarize', 'ask_meeting', 'ask_all', 'translate_session']);
+  'export_todos_ics', 'summarize', 'ask_meeting', 'ask_all', 'translate_session', 'redo_session', 'undo_redo']);
 let orderedChain = Promise.resolve();
 function orderedInvoke(cmd, args) {
   if (READ_CMDS.has(cmd)) flushSaves();
@@ -452,7 +454,7 @@ function renderMeta() {
     })
     .join('')
     + (showStats ? '<button class="link spk-stats-btn" id="btn-spk-stats" title="화자마다 말한 시간 · 비율 · 발언 수 · 가장 긴 발언">발언 통계</button>' : '')
-    + undo;
+    + undo + redoLinks(d);
   // 녹음 중에는 문장마다 다시 그리게 되므로 바뀐 때만 (칩에 올린 마우스 · 열린 메뉴가 흔들리지 않게)
   // (이름 바꾸기 · 합치기 뒤에는 칩을 비워 다시 그리게 한다)
   if (box.dataset.html !== html || !box.children.length) { box.innerHTML = html; box.dataset.html = html; }
@@ -1308,6 +1310,8 @@ $('#pop-spk').addEventListener('click', (e) => {
 });
 $('#speakers').addEventListener('click', (e) => {
   if (e.target.closest('#btn-undo-refine')) return undoRefine();
+  const rb = e.target.closest('[data-redo]');
+  if (rb) return redoAction(rb.dataset.redo);
   const sb = e.target.closest('#btn-spk-stats');
   if (sb) { const open = !$('#pop-stats').hidden; hidePopovers(); if (!open) showStats(sb); return; }
   const c = e.target.closest('.spk-chip');
@@ -1331,6 +1335,175 @@ async function undoRefine() {
   } catch (err) {
     toast(String(err), 'error');
   }
+}
+
+/* ───────────── 녹음 뒤 다시 받아 적기 (설정 › 녹음) ─────────────
+   녹음 중엔 빠른 모델로 받아 적고, 녹음이 끝나면 앱이 저장된 녹음을 더 정확한 모델로 다시 받아 적어 글만 바꾼다
+   (redo.rs). 화면은 진행을 보여 주고, 바뀐 문장을 받아 그 자리에서 바꾼다 — 그 사이 화면에서 고친 문장은 그대로. */
+// 다시 받아 적을 모델 (로컬 엔진에서 녹음 때와 다른 모델을 골랐고 설치돼 있을 때) → 이름, 아니면 null
+function redoModel() {
+  const s = S.settings, a = S.app;
+  if (!s || !a || s.engine !== 'local' || !s.redoModel || s.redoModel === s.localModel) return null;
+  const m = a.models.find((x) => x.id === s.redoModel);
+  if (m) return m.ready ? m.label : null;
+  return a.customModels.includes(s.redoModel) ? s.redoModel : null;
+}
+// 회의 화자 줄 끝: 다시 받아 적는 중 · 기다리는 중 · 다시 받아 적기 · 이어서 하기 · 되돌리기
+function redoLinks(d) {
+  if (!d || (S.live && S.rec !== 'idle' && S.liveDoc?.id === d.id)) return '';
+  const st = S.app?.redo || {};
+  const run = st.running?.id === d.id ? st.running : null;
+  if (run) {
+    const pct = run.total ? Math.round((run.done / run.total) * 100) : 0;
+    const what = st.waiting ? `다시 받아 적기 ${pct}% — 녹음 · 말로 입력이 끝나면 이어서 해요` : `더 정확한 모델로 다시 받아 적는 중 ${pct}%`;
+    return `<span class="redo-st">${what}<button class="link" data-redo="stop" title="다시 받아 적은 데까지는 남기고 멈춰요 — 나중에 이어서 할 수 있어요">멈추기</button></span>`;
+  }
+  if (st.queued?.includes(d.id)) {
+    return '<span class="redo-st">다시 받아 적기 차례를 기다리는 중<button class="link" data-redo="stop">빼기</button></span>';
+  }
+  const r = d.redo;
+  const changed = Object.keys(r?.changed || {}).length;
+  const name = redoModel();
+  // 처음부터 그 모델로 받아 적은 기록(녹음 파일 받아쓰기 등)은 다시 받아 적을 까닭이 없다
+  const sameModel = !!name && (d.engine || '').endsWith(S.settings.redoModel);
+  const can = !!name && !sameModel && !!(d.audioFile || d.sourcePath);
+  const undo = changed
+    ? `<button class="link spk-undo" data-redo="undo" title="다시 받아 적은 문장 ${changed}개를 녹음 중에 받아 적은 글로 되돌려요 — 그 뒤 직접 고친 문장은 그대로">다시 받아 적기 되돌리기</button>`
+    : '';
+  if (r && !r.finished && can) {
+    return `<button class="link spk-undo" data-redo="go" title="${esc(name)}(으)로 멈춘 데부터 이어서 다시 받아 적어요">다시 받아 적기 이어서 하기</button>${undo}`;
+  }
+  if (!r && can) {
+    return `<button class="link spk-undo" data-redo="go" title="저장된 녹음을 ${esc(name)}(으)로 다시 받아 적어 글을 바꿔요 — 화자 · 시각은 그대로, 직접 고친 문장은 두고">더 정확한 모델로 다시 받아 적기</button>`;
+  }
+  return undo;
+}
+async function redoAction(act) {
+  const d = doc();
+  if (!d) return;
+  if (act === 'stop') return call('cancel_redo', { id: d.id }).catch(() => {});
+  if (act === 'undo') {
+    const ok = await api.ask('다시 받아 적은 글을 되돌릴까요?\n녹음 중에 받아 적은 글로 돌아가요. 다시 받아 적은 뒤 직접 고친 문장은 그대로예요.', { title: '받아쓰기', kind: 'info' });
+    if (!ok) return;
+    commitEdits();
+    try {
+      const fresh = await api.invoke('undo_redo', { id: d.id });
+      adoptRedo(d.id, fresh);
+      toast('다시 받아 적기 전 글로 되돌렸어요');
+    } catch (err) {
+      toast(String(err), 'error');
+    }
+    return;
+  }
+  // 기다리던 저장을 먼저 보낸다 — 다시 받아 적기가 시작할 때의 글이 화면 글과 같게 (고친 문장을 덮지 않게)
+  commitEdits();
+  try {
+    await api.invoke('redo_session', { id: d.id });
+  } catch (err) {
+    toast(String(err), 'error');
+  }
+}
+// 앱이 다시 읽어 준 기록으로 화면의 같은 회의를 바꾼다
+function adoptRedo(id, fresh) {
+  if (S.liveDoc?.id === id) S.liveDoc = adoptFresh(S.liveDoc, fresh);
+  if (S.viewDoc?.id === id) S.viewDoc = adoptFresh(S.viewDoc, fresh);
+  invalidateTranscript();
+  scheduleRender();
+  renderMeta();
+}
+// 지금 고치고 있어 넣지 않고 들고 있는 다시 받아 적기 결과: '기록 id:문장 id' → { before, text }
+const redoHeld = new Map();
+// 들고 있는 결과가 있는 동안 받은 마지막 번호: 기록 id → redoRev. 그동안은 사본의 번호를 올리지 않는다 —
+// 올리면 다른 문장을 저장할 때 들고 있는 문장의 옛 글이 '다 받은 사본'의 글로 가서 다시 받아 적은 글을 덮는다
+const redoRevHeld = new Map();
+const holding = (docId) => [...redoHeld.keys()].some((k) => k.startsWith(`${docId}:`));
+// 문장 고치기가 끝났다 — 고치지 않고 끝냈으면(글이 그대로면) 들고 있던 결과를 이제 넣고, 고쳤으면 버린다.
+// 들고 있던 것이 다 정해지면 미뤄 둔 번호를 올리고 저장한다
+function settleRedo(d, u) {
+  const k = `${d.id}:${u.id}`;
+  const held = redoHeld.get(k);
+  if (!held) return;
+  redoHeld.delete(k);
+  if (d.utterances.includes(u) && u.text === held.before) { u.text = held.text; invalidateTranscript(); }
+  if (!holding(d.id) && redoRevHeld.has(d.id)) {
+    d.redoRev = Math.max(d.redoRev || 0, redoRevHeld.get(d.id));
+    redoRevHeld.delete(d.id);
+    persistDoc(d);
+  }
+}
+function onRedo(p) {
+  const id = p.id;
+  const shown = [S.liveDoc, S.viewDoc].filter((x) => x?.id === id);
+  switch (p.kind) {
+    case 'edits': {
+      // 화면도 바꾸기 전 글 그대로일 때만 — 그 사이 화면에서 고친(아직 저장 전인) 문장은 그대로,
+      // 지금 고치고 있는 문장은 들고 있다가 고치기가 끝나면 정한다 (settleRedo)
+      const typing = $('#transcript [contenteditable="true"]')?.dataset.id;
+      let n = 0;
+      for (const d of shown) {
+        for (const ed of p.edits || []) {
+          const u = d.utterances.find((x) => x.id === ed.id);
+          if (!u || u.text !== ed.before) continue;
+          if (String(ed.id) === typing) redoHeld.set(`${d.id}:${u.id}`, { before: ed.before, text: ed.text });
+          else { u.text = ed.text; n++; }
+        }
+        // 이 사본은 여기까지 받았다 — 이 뒤에 원래 글로 고쳐 저장해도 사람이 고친 것으로 본다 (session.rs save_doc).
+        // 고치고 있어 들고 있는 결과가 있으면 그게 정해질 때까지 미룬다 (settleRedo)
+        if (p.rev != null) {
+          if (holding(d.id)) redoRevHeld.set(d.id, Math.max(redoRevHeld.get(d.id) || 0, p.rev));
+          else d.redoRev = p.rev;
+        }
+      }
+      if (n) { invalidateTranscript(); scheduleRender(); }
+      return;
+    }
+    case 'finished':
+      toast(p.changed
+        ? `더 정확한 모델로 다시 받아 적었어요 — ${p.total}문장 중 ${p.changed}문장이 바뀌었어요\n마음에 들지 않으면 화자 옆 '다시 받아 적기 되돌리기'를 눌러 주세요`
+        : `더 정확한 모델로 다시 받아 적었어요 — 바뀐 문장은 없어요`, '', 7000);
+      break;
+    case 'stopped':
+      toast('다시 받아 적기를 멈췄어요 — 회의 화면에서 이어서 할 수 있어요');
+      break;
+    case 'error':
+      toast(p.message, 'warn', 8000);
+      break;
+  }
+  // 앱이 기록에 남긴 진행 · 바꾼 문장(되돌리기)만 화면 사본에 옮긴다 — 기록을 통째로 바꾸면 지금 고치고 있는
+  // 문장이 옛 사본에 저장돼 사라질 수 있다 (글은 'edits' 로 이미 받았다)
+  if (shown.length) {
+    api.invoke('load_session', { id }).then((fresh) => {
+      for (const d of [S.liveDoc, S.viewDoc]) {
+        if (d?.id !== id) continue;
+        // 번호(redoRev)는 옮기지 않는다 — 화면이 받은 글까지만 받았다고 해야 늦은 저장이 다시 받아 적은 글을 덮지 않는다
+        d.redo = fresh.redo;
+      }
+      renderMeta();
+    }).catch(() => {});
+  }
+}
+function onRedoStatus(st) {
+  if (S.app) S.app.redo = st;
+  renderMeta();
+}
+function renderRedoSetting() {
+  const sel = $('#opt-redo-model');
+  const s = S.settings, a = S.app;
+  if (!sel || !s || !a) return;
+  const opts = [['', '끄기']];
+  for (const m of a.models) if (m.ready && m.id !== s.localModel) opts.push([m.id, m.label]);
+  for (const f of a.customModels) if (f !== s.localModel) opts.push([f, f]);
+  sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+  // 고른 모델을 지웠거나 녹음 모델과 같아졌으면 '끄기'로 보인다 (다시 받거나 녹음 모델을 바꾸면 그대로 살아난다)
+  const on = !!redoModel();
+  sel.value = on ? s.redoModel : '';
+  $('#redo-desc').textContent = opts.length < 2
+    ? '더 정확한 모델(Large v3 등)을 위 목록에서 받으면 고를 수 있어요'
+    : !on
+      ? '녹음 중엔 빠른 모델로, 끝나면 더 정확한 모델로 다시 받아 적어요'
+      : s.saveAudio
+        ? '끝나면 이 모델로 다시 받아 적어 글을 바꿔요 · 회의 길이의 절반~1배쯤 걸려요'
+        : '설정 › 일반 › 녹음 파일도 저장을 켜야 녹음 뒤에 다시 받아 적어요';
 }
 $('#transcript').addEventListener('click', (e) => {
   const n = e.target.closest('.g-name');
@@ -1505,6 +1678,7 @@ function startEdit(el) {
       persistDoc(d);
       suggestFromEdit(d, u.id, before, v);
     }
+    settleRedo(d, u);
     scheduleRender();
   };
   el.addEventListener('keydown', (k) => {
@@ -4595,6 +4769,8 @@ function renderModels() {
     S.app.speakerModelReady ? '<span class="badge ok">설치됨</span>'
       : sdl ? `<span class="badge">${Math.round((sdl.done / Math.max(sdl.total, 1)) * 100)}%</span>`
         : '<button class="btn sm" data-dl="campplus-zh-en">받기</button>'}`;
+  // 설치된 모델 · 녹음 모델이 바뀌면 다시 받아 적을 모델 목록도
+  renderRedoSetting();
 }
 
 $('#model-list').addEventListener('click', async (e) => {
@@ -4651,7 +4827,8 @@ bind('opt-tr-live', (t) => {
   if (t.checked) toast(S.rec !== 'idle' ? '다음 녹음부터 실시간으로 번역해요' : '녹음하면 문장이 확정되는 대로 번역해 문단 아래에 보여 줘요');
 });
 bind('opt-top', (t) => (S.settings.alwaysOnTop = t.checked));
-bind('opt-audio', (t) => (S.settings.saveAudio = t.checked));
+bind('opt-audio', (t) => { S.settings.saveAudio = t.checked; renderRedoSetting(); });
+bind('opt-redo-model', (t) => { S.settings.redoModel = t.value; renderRedoSetting(); renderMeta(); });
 // 개인정보 (privacy.rs): AI 로 보낼 때 · 내보낼 때 가리기, 녹음 파일 보관 기간
 const privacy = () => (S.settings.privacy ||= { maskAi: false, maskExport: false, audioKeepDays: 0 });
 bind('opt-mask-ai', (t) => (privacy().maskAi = t.checked));
@@ -4910,6 +5087,8 @@ $('#btn-quit').addEventListener('click', () => call('quit_app'));
   await api.listen('bd://update', (e) => onUpdate(e.payload));
   await api.listen('bd://watch', (e) => onWatch(e.payload || {}));
   await api.listen('bd://calendar', (e) => onCalendar(e.payload || {}));
+  await api.listen('bd://redo', (e) => onRedo(e.payload || {}));
+  await api.listen('bd://redo-status', (e) => onRedoStatus(e.payload || {}));
   await refreshState();
   loadTemplates();
   syncMaxed();
@@ -5069,7 +5248,7 @@ function createMock() {
       openaiModel: 'gpt-transcribe', groqModel: 'whisper-large-v3-turbo', customUrl: '', customModel: '',
       source: 'mic', micDevice: null, language: 'ko', glossary: '',
       diarization: { enabled: true, threshold: 0.45, maxSpeakers: 0, splitTurns: true }, rememberVoices: true,
-      saveAudio: false, unloadWhenIdle: true, livePreview: 'auto', gpu: true, hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
+      saveAudio: false, unloadWhenIdle: true, livePreview: 'auto', gpu: true, redoModel: '', hotkey: 'Ctrl+Alt+R', starHotkey: 'Ctrl+Alt+B', alwaysOnTop: false,
       meetingAlert: false, meetingApps: ['zoom', 'teams', 'browser', 'webex'], theme: 'system',
       watchFolder: false, watchDir: '', watchSummarize: true, calendar: false,
       dictation: false, dictationHotkey: 'Ctrl+Alt+Space', dictationInsert: 'paste', dictationPolish: false,

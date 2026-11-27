@@ -17,6 +17,9 @@ pub struct Utterance {
     pub end_ms: u64,
     pub speaker: Option<u32>,
     pub text: String,
+    /// 사람이 글을 고친 문장 (화면에서 고쳐 저장할 때 앱이 표시한다) — 녹음 뒤 다시 받아 적기가 건드리지 않는다
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub edited: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +78,58 @@ pub struct SessionDoc {
     /// 문장 번역 (녹음 중 실시간 번역 · 번역 단추). 앱만 고친다 — 화면 사본을 저장할 때는 저장된 것을 지킨다
     #[serde(skip_serializing_if = "Option::is_none")]
     pub translation: Option<crate::translate::Translation>,
+    /// 녹음 뒤 더 정확한 모델로 다시 받아 적기 (redo.rs). 앱만 고친다 — 화면 사본을 저장할 때는 저장된 것을 지킨다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redo: Option<Redo>,
+    /// 다시 받아 적은 글을 넣거나 되돌릴 때마다 1씩 오른다 (화면에도 알린다). 이보다 오래된 화면 사본이 늦게 저장되면
+    /// 고치지 않은 문장은 다시 받아 적은 글을 지킨다 — 다시 받아 적은 뒤의 사본에서 원래 글로 고친 것은 그대로
+    #[serde(skip_serializing_if = "is_zero")]
+    pub redo_rev: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// 녹음 뒤 다시 받아 적기의 진행 · 바꾼 문장
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Redo {
+    /// 다시 받아 적는 모델 (설정의 모델 id 또는 모델 폴더의 파일 이름)
+    pub model: String,
+    /// 이 시각(ms)에 시작하는 문장까지 다시 받아 적었다 — 멈췄다 이어서 할 때 그 뒤부터
+    pub done_ms: Option<u64>,
+    pub finished: bool,
+    /// 바꾼 문장: 발화 id → 원래 글 · 바꾼 글 (되돌리기 · 늦게 도착한 화면 사본 맞추기)
+    pub changed: BTreeMap<u64, RedoChange>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RedoChange {
+    /// 처음 글 (되돌리면 이 글로)
+    pub before: String,
+    pub after: String,
+    /// 그 사이 다시 받아 적기가 바꾼 중간 글 (모델을 바꿔 다시 받아 적은 경우) — 늦게 도착한 옛 사본의 글인지 가린다
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub between: Vec<String>,
+}
+
+impl RedoChange {
+    /// 다시 받아 적기가 이 문장에서 바꿔 치운 글인지 (처음 글 · 중간 글)
+    fn replaced(&self, text: &str) -> bool {
+        self.before == text || self.between.iter().any(|t| t == text)
+    }
+}
+
+/// 다시 받아 적어 바꾼 문장 하나 (화면에 알린다)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedoEdit {
+    pub id: u64,
+    /// 바꾸기 전 글 — 화면도 이 글 그대로일 때만 바꾼다 (그 사이 화면에서 고친 문장은 두게)
+    pub before: String,
+    pub text: String,
 }
 
 /// 내보내기의 녹취록 — 원문 · 번역 · 둘 다 (번역이 없는 문장은 원문)
@@ -618,6 +673,58 @@ impl SessionDoc {
         !self.utterances.is_empty()
             || !self.notes.trim().is_empty()
             || self.summary.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// 다시 받아 적은 글을 넣는다. `results` 는 (발화 id, 다시 받아 적기를 시작할 때의 글, 새 글) —
+    /// 그 사이 사람이 고친 문장 · 지운 문장은 두고 넘어간다. 바꾼 문장을 돌려준다.
+    pub fn apply_redo(&mut self, model: &str, results: &[(u64, String, String)]) -> Vec<RedoEdit> {
+        let redo = self.redo.get_or_insert_with(|| Redo {
+            model: model.to_string(),
+            ..Default::default()
+        });
+        let mut edits = Vec::new();
+        for (id, seen, new) in results {
+            let Some(u) = self.utterances.iter_mut().find(|u| u.id == *id) else {
+                continue;
+            };
+            // 사람이 고친 문장 · 다시 받아 적는 사이 바뀐 문장은 두고, 같은 글이면 넘어간다
+            if u.edited || u.text != *seen || u.text == *new {
+                continue;
+            }
+            // 두 번 다시 받아 적어도 되돌릴 글은 처음 글 (그 사이 글은 중간 글로 기억한다)
+            let ch = redo.changed.entry(*id).or_insert_with(|| RedoChange {
+                before: u.text.clone(),
+                ..Default::default()
+            });
+            if !ch.after.is_empty() && !ch.replaced(&u.text) {
+                ch.between.push(u.text.clone());
+            }
+            ch.after = new.clone();
+            edits.push(RedoEdit {
+                id: *id,
+                before: std::mem::replace(&mut u.text, new.clone()),
+                text: new.clone(),
+            });
+        }
+        if !edits.is_empty() {
+            self.redo_rev += 1;
+        }
+        edits
+    }
+
+    /// 다시 받아 적기를 되돌린다: 바꾼 문장을 원래 글로 (그 뒤 사람이 고친 문장은 그대로). 되돌린 문장 수 —
+    /// 되돌릴 것이 없으면 None
+    pub fn undo_redo(&mut self) -> Option<usize> {
+        let redo = self.redo.take()?;
+        let mut n = 0;
+        for u in self.utterances.iter_mut() {
+            if let Some(ch) = redo.changed.get(&u.id).filter(|ch| u.text == ch.after) {
+                u.text = ch.before.clone();
+                n += 1;
+            }
+        }
+        self.redo_rev += 1;
+        Some(n)
     }
 
     pub fn upsert(&mut self, u: Utterance) {
@@ -1212,7 +1319,11 @@ impl SessionStore {
                     return false;
                 }
                 if let Some(u) = edited.get(&x.id) {
-                    x.text = u.text.clone();
+                    // 화면에서 글을 고쳤다 — 녹음 뒤 다시 받아 적기가 이 문장은 건드리지 않게 표시한다
+                    if x.text != u.text {
+                        x.text = u.text.clone();
+                        x.edited = true;
+                    }
                     if !stale {
                         x.speaker = u.speaker;
                     }
@@ -1245,6 +1356,29 @@ impl SessionStore {
         doc.translation = old.translation.clone();
         // 녹음 파일 이름도 앱만 고친다 (보관 기간이 지나 녹음을 지운 뒤 늦게 도착한 화면 사본이 이름을 되살리지 않게)
         doc.audio_file = old.audio_file.clone();
+        // 다시 받아 적기도 앱만 고친다. 다시 받아 적은 글이 들어가기 전에 만든 화면 사본이 늦게 도착하면
+        // (화면이 받은 마지막 다시 받아 적기 번호가 저장된 것보다 작으면), 화면에서 고치지 않은 문장(원래 글 그대로)은
+        // 다시 받아 적은 글을 지킨다. 다시 받아 적은 뒤의 사본이면 원래 글로 고친 것도 사람이 고친 것이므로 그대로 둔다
+        doc.redo = old.redo.clone();
+        if let Some(redo) = old.redo.as_ref().filter(|_| doc.redo_rev < old.redo_rev) {
+            let saved: HashMap<u64, &str> = old.utterances.iter().map(|u| (u.id, u.text.as_str())).collect();
+            for u in doc.utterances.iter_mut() {
+                if let (Some(ch), Some(&now)) = (redo.changed.get(&u.id), saved.get(&u.id)) {
+                    // 옛 사본의 글이 다시 받아 적기가 바꿔 치운 글(처음 · 중간)이면 저장된 글을 지킨다
+                    if u.text != now && ch.replaced(&u.text) {
+                        u.text = now.to_string();
+                    }
+                }
+            }
+        }
+        doc.redo_rev = old.redo_rev;
+        // 화면에서 글을 고친 문장 표시 (앱이 정한다 — 다시 받아 적기가 건드리지 않게). 늦은 옛 사본의 글은 위에서 걸렀다
+        let before: HashMap<u64, (&str, bool)> =
+            old.utterances.iter().map(|u| (u.id, (u.text.as_str(), u.edited))).collect();
+        for u in doc.utterances.iter_mut() {
+            // 저장된 기록에 없는 문장은 화면에서 새로 만든 것 (나누기 등)
+            u.edited = before.get(&u.id).is_none_or(|&(text, edited)| edited || u.text != text);
+        }
         if doc.speaker_rev < old.speaker_rev {
             // 화자 다시 정리 전에 만든 화면 사본이 늦게 저장됨: 화자 배정 · 이름은 저장된(정리된) 것을 지키고
             // 제목 · 글자 · 삭제만 반영한다
@@ -1276,6 +1410,28 @@ impl SessionStore {
         }
         write_doc(&self.dir, &doc)?;
         Ok(doc)
+    }
+
+    /// 저장된(녹음이 끝난) 기록을 고쳐 저장한다 — 다시 받아 적기. 지운 기록 · 녹음 중인 기록이면 오류
+    pub fn update_saved<T>(&mut self, id: &str, f: impl FnOnce(&mut SessionDoc) -> T) -> Result<T> {
+        if self.current.as_ref().is_some_and(|c| c.id == id) {
+            return Err(anyhow!("녹음이 끝난 뒤에 할 수 있어요"));
+        }
+        let mut doc: SessionDoc = std::fs::read_to_string(self.json_path(safe_id(id)?))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .ok_or_else(|| anyhow!("지운 기록이에요"))?;
+        doc.fold_comments();
+        let r = f(&mut doc);
+        write_doc(&self.dir, &doc)?;
+        Ok(r)
+    }
+
+    /// 다시 받아 적기를 되돌리고 되돌린 기록 · 되돌린 문장 수를 돌려준다
+    pub fn undo_redo(&mut self, id: &str) -> Result<(SessionDoc, usize)> {
+        let (n, doc) = self.update_saved(id, |d| (d.undo_redo(), d.clone()))?;
+        let n = n.ok_or_else(|| anyhow!("되돌릴 다시 받아 적기가 없어요"))?;
+        Ok((doc, n))
     }
 
     /// 번역을 고쳐 저장한다 (녹음 중인 기록이면 그 기록에) → 고친 뒤의 번역
@@ -1511,6 +1667,7 @@ mod tests {
             end_ms: start + 4000,
             speaker: Some(speaker),
             text: format!("문장 {id}"),
+            edited: false,
         }
     }
 
@@ -1704,6 +1861,144 @@ mod tests {
         assert_eq!(saved.utterances.iter().map(|u| u.speaker).collect::<Vec<_>>(), vec![Some(0), Some(1), Some(0)]);
         assert_eq!(saved.utterances[0].text, "또 고침");
         assert_eq!(saved.speaker_rev, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn ut(id: u64, text: &str) -> Utterance {
+        Utterance {
+            id,
+            start_ms: id * 5000,
+            end_ms: id * 5000 + 4000,
+            speaker: Some(0),
+            text: text.into(),
+            edited: false,
+        }
+    }
+
+    #[test]
+    fn redo_keeps_sentences_edited_meanwhile_and_can_be_undone() {
+        let mut d = SessionDoc::new("로컬".into());
+        d.utterances = vec![ut(0, "가"), ut(1, "나"), ut(2, "다"), ut(3, "라")];
+        // 다시 받아 적는 사이 사람이 1번을 고치고 3번을 지웠다
+        d.utterances[1].text = "나 (고침)".into();
+        d.utterances.remove(3);
+        let results = [
+            (0, "가".to_string(), "가가".to_string()),
+            (1, "나".to_string(), "나나".to_string()),
+            (2, "다".to_string(), "다".to_string()),
+            (3, "라".to_string(), "라라".to_string()),
+        ];
+        let edits = d.apply_redo("large-v3-q5_0", &results);
+        assert_eq!(edits, vec![RedoEdit { id: 0, before: "가".into(), text: "가가".into() }]);
+        let texts = |d: &SessionDoc| d.utterances.iter().map(|u| u.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&d), ["가가", "나 (고침)", "다"]);
+        // 같은 문장을 다른 모델로 또 다시 받아 적어도 되돌릴 글은 처음 글
+        d.apply_redo("large-v3-q5_0", &[(0, "가가".into(), "가가가".into())]);
+        assert_eq!(
+            d.redo.as_ref().unwrap().changed[&0],
+            RedoChange { before: "가".into(), after: "가가가".into(), between: vec!["가가".into()] }
+        );
+        // 다시 받아 적은 뒤 사람이 고친 문장은 되돌리지 않는다
+        d.apply_redo("large-v3-q5_0", &[(2, "다".into(), "다다".into())]);
+        d.utterances[2].text = "다 (또 고침)".into();
+        assert_eq!(d.undo_redo(), Some(1));
+        assert_eq!(texts(&d), ["가", "나 (고침)", "다 (또 고침)"]);
+        assert!(d.redo.is_none());
+        assert_eq!(d.undo_redo(), None);
+    }
+
+    #[test]
+    fn a_stale_screen_copy_keeps_the_redone_text() {
+        let dir = std::env::temp_dir().join(format!("bd-redo-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-27_140000".into();
+        d.utterances = vec![ut(0, "가"), ut(1, "나")];
+        write_doc(&dir, &d).unwrap();
+        // 화면이 들고 있던 사본 (다시 받아 적기 전)
+        let mut screen = d.clone();
+        let edits = store
+            .update_saved(&d.id, |doc| doc.apply_redo("m", &[(0, "가".into(), "가가".into()), (1, "나".into(), "나나".into())]))
+            .unwrap();
+        assert_eq!(edits.len(), 2);
+        // 그 사이 화면에서 1번만 고친 사본이 늦게 저장됨 (redo 정보는 화면이 모른다)
+        screen.utterances[1].text = "나 (고침)".into();
+        store.save_doc(screen).unwrap();
+        let saved = store.load(&d.id).unwrap();
+        assert_eq!(saved.utterances.iter().map(|u| u.text.as_str()).collect::<Vec<_>>(), ["가가", "나 (고침)"]);
+        assert!(saved.redo.is_some(), "다시 받아 적기 기록은 앱만 고친다");
+        // 다시 받아 적은 글까지 받은 사본에서 사람이 원래 글로 되돌려 고친 문장은 그대로 둔다
+        let mut fresh = saved.clone();
+        fresh.utterances[0].text = "가".into();
+        store.save_doc(fresh).unwrap();
+        assert_eq!(store.load(&d.id).unwrap().utterances[0].text, "가");
+        // (되돌리기를 보려고 다시 받아 적은 글로)
+        store.update_saved(&d.id, |doc| doc.utterances[0].text = "가가".into()).unwrap();
+        // 되돌리면 고치지 않은 문장만 원래 글로
+        let (back, n) = store.undo_redo(&d.id).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(back.utterances.iter().map(|u| u.text.as_str()).collect::<Vec<_>>(), ["가", "나 (고침)"]);
+        assert!(store.undo_redo(&d.id).is_err());
+        // 녹음 중인 기록은 고치지 않는다
+        let mut live = SessionDoc::new("로컬".into());
+        live.id = "2026-11-27_150000".into();
+        store.begin(live);
+        assert!(store.update_saved("2026-11-27_150000", |_| ()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sentences_people_corrected_are_left_alone_by_redo() {
+        let dir = std::env::temp_dir().join(format!("bd-redo-edited-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        // 녹음 중에 0번을 고쳤다
+        let mut live = SessionDoc::new("로컬".into());
+        live.id = "2026-11-27_160000".into();
+        live.utterances = vec![ut(0, "가"), ut(1, "나"), ut(2, "다")];
+        let mut screen = live.clone();
+        store.begin(live);
+        screen.utterances[0].text = "가 (회의 중 고침)".into();
+        store.save_doc(screen).unwrap();
+        assert!(store.current.as_ref().unwrap().utterances[0].edited);
+        store.flush().unwrap();
+        store.current = None;
+        // 녹음이 끝난 뒤 1번을 고쳤다 (화면 사본에는 표시가 없다 — 앱이 정한다)
+        let mut after = store.load("2026-11-27_160000").unwrap();
+        after.utterances[1].text = "나 (끝나고 고침)".into();
+        after.utterances[1].edited = false;
+        store.save_doc(after).unwrap();
+        let saved = store.load("2026-11-27_160000").unwrap();
+        assert_eq!(saved.utterances.iter().map(|u| u.edited).collect::<Vec<_>>(), [true, true, false]);
+        // 다시 받아 적기는 고친 두 문장을 건드리지 않는다
+        let seen: Vec<_> = saved.utterances.iter().map(|u| (u.id, u.text.clone(), format!("{}!", u.text))).collect();
+        let edits = store.update_saved("2026-11-27_160000", |d| d.apply_redo("m", &seen)).unwrap();
+        assert_eq!(edits.iter().map(|e| e.id).collect::<Vec<_>>(), [2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_copy_from_between_two_redos_keeps_the_latest_text() {
+        let dir = std::env::temp_dir().join(format!("bd-redo-abc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SessionStore::new(dir.clone());
+        let mut d = SessionDoc::new("로컬".into());
+        d.id = "2026-11-27_170000".into();
+        d.utterances = vec![ut(0, "A")];
+        write_doc(&dir, &d).unwrap();
+        // 한 모델로 A → B, 화면이 B 까지 받은 사본을 들고 있는 사이 다른 모델로 이어서 B → C
+        store.update_saved(&d.id, |doc| doc.apply_redo("m1", &[(0, "A".into(), "B".into())])).unwrap();
+        let screen = store.load(&d.id).unwrap();
+        store.update_saved(&d.id, |doc| doc.apply_redo("m2", &[(0, "B".into(), "C".into())])).unwrap();
+        // 사람이 고치지 않은 그 사본이 늦게 저장돼도 C 를 지키고, 고친 문장으로 보지 않는다
+        store.save_doc(screen).unwrap();
+        let saved = store.load(&d.id).unwrap();
+        assert_eq!((saved.utterances[0].text.as_str(), saved.utterances[0].edited), ("C", false));
+        assert_eq!(saved.redo.as_ref().unwrap().changed[&0].between, ["B"]);
+        // 되돌리면 처음 글로
+        let (back, _) = store.undo_redo(&d.id).unwrap();
+        assert_eq!(back.utterances[0].text, "A");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1960,7 +2255,7 @@ mod tests {
         // 화자 1: 20~24 · 화자 2 는 화자 1 에 합쳐짐: 30~34 → 화자 1 의 발언 (24초 끝 → 6초 뒤라 이어 말함)
         // 화자가 없는 문장은 세지 않는다
         d.utterances = vec![u(0, 0, 0), u(1, 5000, 0), u(2, 20000, 1), u(3, 30000, 2), u(4, 40000, 0)];
-        d.utterances.push(Utterance { id: 5, start_ms: 50000, end_ms: 60000, speaker: None, text: "?".into() });
+        d.utterances.push(Utterance { id: 5, start_ms: 50000, end_ms: 60000, speaker: None, text: "?".into(), edited: false });
         d.speaker_map.insert(2, 1);
         d.speakers.insert(1, "이 | 개발".into());
         let s = d.speaker_stats();

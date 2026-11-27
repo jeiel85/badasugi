@@ -125,6 +125,9 @@ kbd { font-family: var(--font); font-size: 12px; padding: 1px 6px; border-radius
 .spk-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
 .spk-chip input { width: 70px; border: 0; outline: 0; background: transparent; font-size: 12px; font-weight: 600; padding: 0; }
 .speakers .spk-undo { align-self: center; margin-left: 2px; font-size: 12px; }
+/* 녹음 뒤 다시 받아 적기 — 진행 · 멈추기 */
+.speakers .redo-st { align-self: center; margin-left: 2px; font-size: 12px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+.speakers .redo-st .link { font-size: 12px; }
 /* 발언 통계: 칩 아래에 말한 비율 막대 · 끝에 % */
 .spk-chip.has-share { position: relative; overflow: hidden; }
 .spk-chip.has-share::after { content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: var(--share, 0%); background: var(--c); opacity: .75; }

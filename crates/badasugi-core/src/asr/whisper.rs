@@ -90,6 +90,14 @@ pub fn unload() {
     *CACHE.lock() = None;
 }
 
+/// 이 모델을 들고 있으면 내린다 (녹음 뒤 다시 받아 적기가 끝난 뒤 — 그 사이 다른 모델을 열었으면 그대로 둔다)
+pub fn unload_if(path: &Path) {
+    let mut cache = CACHE.lock();
+    if cache.as_ref().is_some_and(|(p, _, _)| p == path) {
+        *cache = None;
+    }
+}
+
 pub struct LocalWhisper {
     ctx: Arc<WhisperContext>,
     state: WhisperState,
@@ -152,6 +160,7 @@ impl LocalWhisper {
             keywords: &[],
             context: "",
             preview: None,
+            abort: None,
         };
         let threads = self.threads;
         let make = || {
@@ -317,6 +326,9 @@ impl Transcriber for LocalWhisper {
             return self.preview(req, samples, audio_ctx, &prompt, abort);
         }
         let (threads, beam) = (self.threads, self.beam);
+        // 그만두기 (녹음 뒤 다시 받아 적기): 계산 중에 확인해 바로 CPU · GPU 를 내준다
+        let stop: Option<&AbortCheck<'_>> = req.abort;
+        let aborted = || stop.is_some_and(|f| f());
         let make = || {
             let mut params = params_template(threads, beam, req, &prompt);
             if reduced {
@@ -328,9 +340,15 @@ impl Transcriber for LocalWhisper {
                 let secs = req.samples.len() as f32 / SAMPLE_RATE as f32;
                 params.set_max_tokens((secs * 30.0) as i32 + 20);
             }
+            if let Some(holder) = &stop {
+                set_abort(&mut params, holder);
+            }
             params
         };
-        self.full(make, samples, &|| false)?;
+        self.full(make, samples, &aborted)?;
+        if aborted() {
+            anyhow::bail!("그만둠");
+        }
         let mut text = self.collect();
 
         // 줄인 창에서 반복 루프에 빠졌거나, 한국어인데 엉뚱한 영어가 나왔으면 전체 창으로 한 번 더 (느리지만 드묾)
@@ -357,11 +375,27 @@ impl Transcriber for LocalWhisper {
                 if retry < 1500 {
                     params.set_audio_ctx(retry);
                 }
+                if let Some(holder) = &stop {
+                    set_abort(&mut params, holder);
+                }
                 params
             };
-            self.full(make, samples, &|| false)?;
+            self.full(make, samples, &aborted)?;
+            if aborted() {
+                anyhow::bail!("그만둠");
+            }
             text = self.collect();
         }
         Ok(text)
+    }
+}
+
+/// 계산 중에 그만둘지 묻는 콜백을 단다 (인코더가 끝난 뒤 · 낱말을 하나씩 풀 때마다 확인한다)
+fn set_abort(params: &mut FullParams<'_, '_>, holder: &&AbortCheck<'_>) {
+    // SAFETY: `holder` 는 부르는 쪽 지역 변수를 가리키고 `full` 이 돌아올 때까지 살아 있다.
+    // whisper.cpp 는 `full` 안에서만 콜백을 부른다.
+    unsafe {
+        params.set_abort_callback(Some(abort_trampoline));
+        params.set_abort_callback_user_data(holder as *const &AbortCheck<'_> as *mut std::ffi::c_void);
     }
 }

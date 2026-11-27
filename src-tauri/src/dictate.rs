@@ -125,6 +125,11 @@ impl Dictate {
     pub fn view(&self) -> View {
         self.view.lock().clone()
     }
+
+    /// 지금 듣거나 받아 적는 중인지 (녹음 뒤 다시 받아 적기는 그동안 쉰다)
+    pub fn active(&self) -> bool {
+        self.cur.lock().is_some()
+    }
 }
 
 // ───────────────────────── 단축키 ─────────────────────────

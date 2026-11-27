@@ -300,7 +300,7 @@ mod tests {
     fn batch_stops_at_size_limits() {
         let mut d = doc();
         d.utterances = (0..40)
-            .map(|i| crate::session::Utterance { id: i, start_ms: i * 1000, end_ms: i * 1000 + 900, speaker: Some(0), text: format!("문장 {i}") })
+            .map(|i| crate::session::Utterance { id: i, start_ms: i * 1000, end_ms: i * 1000 + 900, speaker: Some(0), text: format!("문장 {i}"), edited: false })
             .collect();
         let todo: Vec<u64> = (0..40).collect();
         assert_eq!(next_batch(&d, &todo, false).unwrap().1.len(), MAX_ITEMS);
