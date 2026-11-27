@@ -39,6 +39,10 @@ pub struct Settings {
     pub live_preview: String,
     /// GPU 가속 (GPU 빌드에서 로컬 엔진) — GPU 가 없거나 열지 못하면 저절로 CPU
     pub gpu: bool,
+    /// 녹음 뒤 다시 받아 적기 (로컬 엔진) — 녹음 중에는 `local_model` 로 빠르게 받아 적고, 녹음이 끝나면 저장된 녹음을
+    /// 이 모델(더 정확하고 느린 모델의 id 또는 모델 폴더의 파일 이름)로 다시 받아 적어 글을 바꾼다. 녹음 파일 받아쓰기 ·
+    /// 녹음 폴더는 처음부터 이 모델로. 빈 값이면 끔 (redo.rs)
+    pub redo_model: String,
 
     pub hotkey: String,
     /// 중요 표시 ⭐ 전역 단축키 — 녹음 · 다시 듣기 중 지금 말하는 곳을 메모에 `[시각] ⭐` 로 (빈 값이면 없음)
@@ -175,6 +179,7 @@ impl Default for Settings {
             unload_when_idle: true,
             live_preview: "auto".into(),
             gpu: true,
+            redo_model: String::new(),
             hotkey: "Ctrl+Alt+R".into(),
             star_hotkey: "Ctrl+Alt+B".into(),
             always_on_top: false,
@@ -272,10 +277,14 @@ impl Settings {
 
     /// 로컬 모델 파일 경로
     pub fn local_model_path(&self, models_dir: &Path) -> PathBuf {
-        match badasugi_core::models::find_whisper(&self.local_model) {
-            Some(spec) => spec.path_in(models_dir),
-            None => models_dir.join(&self.local_model),
-        }
+        model_path(&self.local_model, models_dir)
+    }
+
+    /// 녹음 뒤 다시 받아 적을 모델 파일 경로 — 로컬 엔진이고, 녹음 때와 다른 모델을 골랐을 때만
+    /// (파일이 있는지는 보지 않는다)
+    pub fn redo_model_path(&self, models_dir: &Path) -> Option<PathBuf> {
+        let m = self.redo_model.trim();
+        (self.engine == "local" && !m.is_empty() && m != self.local_model.trim()).then(|| model_path(m, models_dir))
     }
 
     /// 실시간 녹음에서 말하는 동안 미리 보기를 켤지 — 자동이면 로컬 엔진만
@@ -286,6 +295,14 @@ impl Settings {
             "off" => false,
             _ => self.engine == "local",
         }
+    }
+}
+
+/// 모델 id(설정 › 녹음의 목록) 또는 모델 폴더에 직접 넣은 파일 이름 → 경로
+fn model_path(model: &str, models_dir: &Path) -> PathBuf {
+    match badasugi_core::models::find_whisper(model) {
+        Some(spec) => spec.path_in(models_dir),
+        None => models_dir.join(model),
     }
 }
 
@@ -406,5 +423,24 @@ mod tests {
         assert!(same_hotkey("Ctrl+Alt+B", " ctrl + alt + b "));
         assert!(!same_hotkey("", ""));
         assert!(!same_hotkey("Ctrl+Alt+R", "Ctrl+Alt+B"));
+    }
+
+    #[test]
+    fn redo_model_is_used_only_with_the_local_engine_and_a_different_model() {
+        let dir = Path::new("models");
+        // 예전 설정 파일: 끔
+        let s: Settings = serde_json::from_str(r#"{ "engine": "local" }"#).unwrap();
+        assert_eq!(s.redo_model_path(dir), None);
+        let s = Settings { redo_model: "large-v3-q5_0".into(), ..Settings::default() };
+        assert_eq!(s.redo_model_path(dir), Some(dir.join("ggml-large-v3-q5_0.bin")));
+        // 모델 폴더에 직접 넣은 파일
+        let s = Settings { redo_model: "ggml-ko-large.bin".into(), ..Settings::default() };
+        assert_eq!(s.redo_model_path(dir), Some(dir.join("ggml-ko-large.bin")));
+        // 녹음 때와 같은 모델이면 다시 받아 적을 까닭이 없다
+        let s = Settings { redo_model: s.local_model.clone(), ..Settings::default() };
+        assert_eq!(s.redo_model_path(dir), None);
+        // API 엔진이면 쓰지 않는다
+        let s = Settings { engine: "groq".into(), redo_model: "large-v3-q5_0".into(), ..Settings::default() };
+        assert_eq!(s.redo_model_path(dir), None);
     }
 }

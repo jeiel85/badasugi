@@ -89,6 +89,9 @@ pub struct AsrRequest<'a> {
     /// 말하는 동안 미리 보기 — 있으면 빠르게 한 번만 풀고(로컬: greedy · 다시 풀기 없음),
     /// 이 함수가 true 를 돌려주면(확정 인식할 발화가 기다리면) 로컬 엔진은 하던 인식을 그만둔다.
     pub preview: Option<&'a AbortCheck<'a>>,
+    /// 하던 인식을 그만둘지 (녹음 뒤 다시 받아 적기 — 녹음 · 말로 입력이 시작되면 CPU · GPU 를 바로 내준다).
+    /// 미리 보기와 달리 평소처럼 받아 적고, true 가 되면 로컬 엔진은 그만두고 오류를 돌려준다 (API 는 보지 않는다)
+    pub abort: Option<&'a AbortCheck<'a>>,
 }
 
 /// 미리 보기 인식을 그만둘지 (계산 중에 여러 번 부른다)
@@ -302,6 +305,7 @@ mod tests {
             keywords: &[],
             context: "네, 좋아요.",
             preview: None,
+            abort: None,
         };
         assert_eq!(req.full_prompt(), "회의 녹취록입니다. 주요 용어: OKPOS. 네, 좋아요.");
         req.prompt = "";
@@ -323,6 +327,7 @@ mod tests {
             keywords: &[],
             context,
             preview: None,
+            abort: None,
         };
         let full = req.full_prompt();
         assert!(full.len() <= PROMPT_MAX_BYTES, "{}", full.len());

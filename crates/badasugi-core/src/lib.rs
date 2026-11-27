@@ -13,6 +13,7 @@ pub mod ogg_opus;
 pub mod onnx;
 pub mod perf;
 pub mod pipeline;
+pub mod redo;
 pub mod resample;
 pub mod speaker;
 pub mod text;

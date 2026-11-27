@@ -422,6 +422,20 @@ fn run(app: &AppHandle, c: &mut Checks) {
         Err(e) => c.add("회의 알림 창", false, e),
     };
 
+    // 녹음 뒤 다시 받아 적기: 녹음 모델 말고 설치된 모델이 있으면 그 모델로 (녹음이 끝나면 저절로 시작한다)
+    let redo_with = {
+        let st = app.state::<AppState>();
+        let local = st.settings.lock().local_model.clone();
+        let m = badasugi_core::models::WHISPER_MODELS
+            .iter()
+            .find(|m| m.id != local && m.is_ready(&st.paths.models))
+            .map(|m| m.id.to_string());
+        if let Some(m) = &m {
+            st.settings.lock().redo_model = m.clone();
+        }
+        m
+    };
+
     // ── 1. 실시간 녹음: 시작 → 일시정지 → 이어서 → 정지 → 저장 ──
     let t0 = Instant::now();
     if !c.add("녹음 시작", crate::start_recording_inner(app).is_ok(), "테스트 음성을 마이크 대신") {
@@ -523,6 +537,43 @@ fn run(app: &AppHandle, c: &mut Checks) {
         ),
         Err(e) => c.add("다시 듣기", false, e),
     };
+
+    // ── 1-0. 녹음 뒤 다시 받아 적기: 정지하면 저절로 시작해, 다 하면 기록에 남는다 (글은 바뀌어도 내용은 그대로) ──
+    match &redo_with {
+        None => {
+            c.add("녹음 뒤 다시 받아 적기", true, "녹음 모델 말고 설치된 모델이 없어 건너뜀");
+        }
+        Some(m) => {
+            let t = Instant::now();
+            let q = app.state::<crate::redo::RedoQueue>();
+            let busy = |s: &crate::redo::Status| s.running.is_some() || !s.queued.is_empty();
+            let load = || app.state::<AppState>().store.lock().load(&live.id).ok();
+            let started = busy(&q.status()) || load().is_some_and(|d| d.redo.is_some());
+            while started && busy(&q.status()) && t.elapsed() < Duration::from_secs(600) {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            match load() {
+                Some(doc) => {
+                    let r = doc.redo.clone().unwrap_or_default();
+                    c.add(
+                        "녹음 뒤 다시 받아 적기",
+                        started && r.finished && r.model == *m,
+                        format!(
+                            "{m} · {:.0}초 · 문장 {}개 중 {}개 바뀜{}",
+                            t.elapsed().as_secs_f64(),
+                            doc.utterances.len(),
+                            r.changed.len(),
+                            if started { "" } else { " — 시작하지 않았어요" }
+                        ),
+                    );
+                    check_doc(c, "다시 받아 적은 녹음", &doc, &expect);
+                }
+                None => {
+                    c.add("녹음 뒤 다시 받아 적기", false, "기록을 읽을 수 없어요");
+                }
+            }
+        }
+    }
 
     // ── 1-1. 회의록 내보내기: Word(.docx) 는 앱이 직접, PDF 는 화면과 같은 길(인쇄용 칸 → PrintToPdf)로 ──
     let out = home().unwrap_or_else(std::env::temp_dir);

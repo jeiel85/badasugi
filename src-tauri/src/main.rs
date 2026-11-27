@@ -27,6 +27,7 @@ mod translate;
 mod update;
 mod pricing;
 mod privacy;
+mod redo;
 mod usage_book;
 mod voices;
 mod watch;
@@ -179,6 +180,8 @@ struct StateDto {
     /// GPU(Vulkan) 와 함께 빌드한 배포본인지 · 마지막으로 모델을 연 장치 ("GPU · …" / "CPU")
     gpu_built: bool,
     gpu_device: Option<String>,
+    /// 녹음 뒤 다시 받아 적기 — 하고 있는 회의 · 기다리는 회의
+    redo: redo::Status,
 }
 
 #[tauri::command]
@@ -232,6 +235,7 @@ fn get_state(app: AppHandle) -> StateDto {
         watch_job,
         gpu_built: badasugi_core::asr::gpu::BUILT_WITH_GPU,
         gpu_device: badasugi_core::asr::local_device(),
+        redo: app.state::<redo::RedoQueue>().status(),
     };
     dto
 }
@@ -650,7 +654,15 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
     // 안에서 패닉이 나도(손상된 파일 등) Err 로 바꿔 아래에서 대기 상태로 되돌린다 — '시작 중'에 갇히지 않게
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> CmdResult<Pipeline> {
         let s = st.settings.lock().clone();
-        let engine = build_engine(&s, &st.paths)?;
+        // 녹음 파일 · 녹음 폴더는 기다리며 받아 적으므로, 녹음 뒤 다시 받아 적기 모델을 골라 두었으면 처음부터 그 모델로
+        let engine = match (file, redo::model(&s, &st.paths.models)) {
+            (Some(_), Ok((_, model_path))) => EngineConfig::Local {
+                model_path,
+                threads: s.threads,
+                beam_size: s.beam_size,
+            },
+            _ => build_engine(&s, &st.paths)?,
+        };
         *st.api_provider.lock() = match &engine {
             EngineConfig::Api { base_url, model, .. } => {
                 Some((badasugi_core::usage::provider_of(base_url), model.trim().to_string()))
@@ -960,7 +972,7 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             drop(st.pipeline.lock().take());
             let ended_id = st.store.lock().current.as_ref().map(|d| d.id.clone());
             *st.speaker_hints.lock() = None;
-            st.file_mode.store(false, Ordering::SeqCst);
+            let was_file = st.file_mode.swap(false, Ordering::SeqCst);
             {
                 let mut store = st.store.lock();
                 if let Some(d) = store.current.as_ref() {
@@ -1030,6 +1042,10 @@ fn on_pipeline_event(app: &AppHandle, ev: Event) {
             if st.quit_after_stop.load(Ordering::SeqCst) {
                 app.exit(0);
                 return;
+            }
+            // 실시간 녹음이었으면 더 정확한 모델로 다시 받아 적기 (설정에서 켰을 때 · 파일은 처음부터 그 모델로 받아 적었다)
+            if let (false, Some(id)) = (was_file, ended_id.as_deref()) {
+                redo::after_recording(app, id);
             }
             update::maybe_install(app);
         }
@@ -2651,6 +2667,7 @@ fn main() {
             app.manage(status::Status::new(tray_base));
             app.manage(watch::Watch::load(config_dir_for_usage.join("watch.json")));
             app.manage(dictate::Dictate::new());
+            app.manage(redo::RedoQueue::default());
             log::info!(
                 "받아쓰기 {} 시작 — 엔진 {}, 모델 {}, 언어 {}, 입력 {:?}, 화자 구분 {}, 녹음 저장 {}, 미니 창 {}{}",
                 app.package_info().version,
@@ -2772,6 +2789,9 @@ fn main() {
             calendar::calendar_status,
             dictate::dictate_state,
             dictate::dictate_ready,
+            redo::redo_session,
+            redo::cancel_redo,
+            redo::undo_redo,
             get_usage,
             list_voices,
             forget_voice,

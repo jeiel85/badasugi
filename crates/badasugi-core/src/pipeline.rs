@@ -837,6 +837,7 @@ fn run_preview(engine: &mut dyn asr::Transcriber, req: PreviewReq, rx: &Receiver
         keywords: &ctx.keywords,
         context: "",
         preview: Some(&abort),
+        abort: None,
     });
     let took = t0.elapsed();
     if is_api {
@@ -1083,6 +1084,7 @@ fn recognize(engine: &mut dyn asr::Transcriber, job: &Job, ctx: &WorkerCtx, is_a
         keywords: &ctx.keywords,
         context: &context,
         preview: None,
+        abort: None,
     });
     if is_api {
         ctx.emit(Event::ApiUsage {
