@@ -234,7 +234,11 @@ fn dictate_check(app: &AppHandle, c: &mut Checks, expect_first: Option<&str>) {
     dictate::release(app);
     std::thread::sleep(Duration::from_millis(1500));
     if crate::start_recording_inner(app).is_ok() {
-        let stopped = wait_for(Duration::from_secs(60), || matches!(d.view(), View::Error { ref message } if message.contains("멈췄어요")));
+        // CPU 로만 받아 적는 판(GPU 를 가린 점검)은 회의 녹음과 말로 입력이 같은 CPU 로 받아 적어, 듣던 말을 마저 정리하고
+        // 멈추기까지 오래 걸린다 (개발 PC v0.4.40: 54~67초 — 달궈지면 60초를 넘겼다). 멈추는지를 보는 점검이라 넉넉히
+        let cpu = badasugi_core::asr::local_device().is_some_and(|d| d == "CPU");
+        let limit = Duration::from_secs(if cpu { 120 } else { 60 });
+        let stopped = wait_for(limit, || matches!(d.view(), View::Error { ref message } if message.contains("멈췄어요")));
         c.add(
             "말로 입력: 듣는 중 회의 녹음을 시작하면 멈추기",
             stopped && d.smoke_out.lock().is_none(),
@@ -659,6 +663,10 @@ fn run(app: &AppHandle, c: &mut Checks) {
             c.add("파일 기록 저장", false, "기록 파일이 없어요");
         }
     }
+
+    // 녹음 뒤 다시 받아 적기 모델은 여기까지 (녹음 · 파일 받아쓰기) — 녹음 폴더 · 말로 입력은 예전과 같은 모델로
+    // (큰 모델로 이어 돌리면 CPU 판에서 PC 가 달궈져 뒤의 시간 제한 점검이 밀렸다)
+    app.state::<AppState>().settings.lock().redo_model.clear();
 
     // ── 2-2. 목소리 잊기: 잊은 뒤 예전 회의를 고쳐 저장해도 다시 기억되면 안 된다 ──
     if speaker_ready {
