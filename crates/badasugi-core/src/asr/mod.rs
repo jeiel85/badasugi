@@ -79,9 +79,10 @@ pub struct AsrRequest<'a> {
     pub samples: &'a [f32],
     /// "ko", "en", … 또는 "auto"
     pub language: &'a str,
-    /// 용어집 프롬프트 ("회의 녹취록입니다. 주요 용어: …")
+    /// 용어집 프롬프트 ("회의 녹취록입니다. 주요 용어: …") — API 엔진용. 로컬 엔진은 `keywords` 가 있으면
+    /// 이것 대신 낱말로 따로 만든다 (`whisper::LOCAL_PROMPT_TOKENS`)
     pub prompt: &'a str,
-    /// 용어집 낱말 — 따로 받는 모델(gpt-transcribe)에만 보낸다
+    /// 용어집 낱말 — gpt-transcribe 는 따로 보내고, 로컬 엔진은 이것으로 프롬프트를 만든다
     pub keywords: &'a [String],
     /// 바로 앞에서 받아 적은 말 (같은 회의) — 문장부호 · 띄어쓰기 · 표기를 앞 문장과 맞추게 한다.
     /// 앞 문맥을 받는 엔진만 채운다 ([`EngineConfig::wants_context`]), 아니면 비어 있다.

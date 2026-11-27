@@ -106,6 +106,45 @@ pub struct LocalWhisper {
     path: PathBuf,
     /// 이 상태가 GPU 위에서 도는지 — 인식이 GPU 에서 실패하면 CPU 로 다시 열어 한 번 더
     on_gpu: bool,
+    /// 용어집 낱말로 만든 프롬프트 (낱말, 프롬프트) — 녹음 동안 같은 용어집이라 한 번만 센다
+    glossary: Option<(Vec<String>, String)>,
+}
+
+/// 로컬 엔진 프롬프트의 최대 토큰 수 = whisper.cpp 가 쓰는 한도 (`n_text_ctx / 2 - 1`, 넘치면 앞쪽을 버린다).
+/// 용어집은 앞에서부터 쉼표로 늘어놓고("A, B, C.") 넘치는 뒤쪽 용어를 뺀다 — 앞에 둔 용어가 중요한 용어.
+/// 실제 회의 2건(2026-11-23 · 11-25, gpt-transcribe 기록과 견줌)에서 고른 형식이다:
+/// - 설명 문구("회의 녹취록입니다. 주요 용어: …")를 붙이면, 용어집이 짧을 때 소리가 불분명한 곳에 그 문구를
+///   받아 적었다 (용어 20개: turbo 310문장 중 134문장, large-v3 26문장). 용어집이 길면 whisper.cpp 가 넘치는
+///   앞쪽(설명 문구 · 앞쪽 용어)을 버려서 드러나지 않았을 뿐이다. 빼도 정확도는 그대로였다.
+/// - 띄어쓰기로 늘어놓으면("A B C.") 결과의 쉼표 · 마침표가 줄어 large-v3 가 나빠졌다
+///   (글자 오류율 +4.1점, 문장부호로 끝나는 문장 73% → 39%).
+/// - 용어를 20개(91토큰)로 줄이면 turbo 는 조금 나아졌지만(11-23 −1.6점) large-v3 가 나빠져(+2.7점) 한도까지 넣는다.
+pub const LOCAL_PROMPT_TOKENS: usize = 223;
+
+/// 이 모델의 토크나이저로 센 토큰 수 (whisper.cpp 가 `initial_prompt` 를 자르는 기준과 같다)
+fn token_count(ctx: &WhisperContext, text: &str) -> usize {
+    // whisper-rs 는 토큰이 `max_tokens` 를 넘으면(-n) 길이를 잘못 잡으므로, 넘칠 수 없게 바이트 수만큼 잡는다
+    // (토큰 하나는 1바이트 이상)
+    ctx.tokenize(text, text.len() + 1).map(|t| t.len()).unwrap_or(usize::MAX)
+}
+
+/// 용어를 앞에서부터 쉼표로 이어 `budget` 토큰 안쪽까지 ("A, B, C.") — (프롬프트, 넣은 용어 수).
+/// 넘치는 용어가 나오면 거기서 멈춘다 (앞에 둔 용어가 중요한 용어).
+fn fit_terms(terms: &[String], budget: usize, count: impl Fn(&str) -> usize) -> (String, usize) {
+    let joined = |kept: &[&str]| format!("{}.", kept.join(", "));
+    let mut kept: Vec<&str> = Vec::new();
+    for t in terms.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+        kept.push(t);
+        if count(&joined(&kept)) > budget {
+            kept.pop();
+            break;
+        }
+    }
+    if kept.is_empty() {
+        (String::new(), 0)
+    } else {
+        (joined(&kept), kept.len())
+    }
 }
 
 /// 캐시에 있는 이 모델이 GPU 로 열렸는지
@@ -141,6 +180,7 @@ impl LocalWhisper {
             threads: threads as i32,
             beam,
             path: path.to_path_buf(),
+            glossary: None,
         };
         if me.on_gpu {
             me.warm_up();
@@ -259,6 +299,43 @@ unsafe extern "C" fn abort_trampoline(user_data: *mut std::ffi::c_void) -> bool 
 }
 
 impl LocalWhisper {
+    /// 이 엔진에 보낼 프롬프트. 용어집 낱말이 있으면 앞에서부터 [`LOCAL_PROMPT_TOKENS`] 안쪽으로 쉼표 나열,
+    /// 없으면 받은 프롬프트 그대로 ([`AsrRequest::full_prompt`]). 앞 문맥이 있으면 끝에 붙이되,
+    /// 합쳐서 whisper.cpp 한도를 넘으면(앞쪽 용어가 잘리므로) 앞 문맥을 뺀다.
+    fn prompt_for(&mut self, req: &AsrRequest) -> String {
+        if req.keywords.is_empty() {
+            return req.full_prompt();
+        }
+        let terms = match &self.glossary {
+            Some((k, p)) if k.as_slice() == req.keywords => p.clone(),
+            _ => {
+                let ctx = &self.ctx;
+                let (p, n) = fit_terms(req.keywords, LOCAL_PROMPT_TOKENS, |s| token_count(ctx, s));
+                log::info!(
+                    "로컬 용어집 프롬프트: 용어 {}개 중 앞 {n}개 ({}토큰)",
+                    req.keywords.len(),
+                    token_count(ctx, &p)
+                );
+                self.glossary = Some((req.keywords.to_vec(), p.clone()));
+                p
+            }
+        };
+        let context = req.context.trim();
+        if context.is_empty() {
+            return terms;
+        }
+        if terms.is_empty() {
+            // whisper.cpp 가 넘치는 앞쪽을 버린다 — 앞 문맥은 뒤(바로 앞 말)가 남는다
+            return context.to_string();
+        }
+        let full = format!("{terms} {context}");
+        if token_count(&self.ctx, &full) <= LOCAL_PROMPT_TOKENS {
+            full
+        } else {
+            terms
+        }
+    }
+
     /// 말하는 동안 미리 보기: 빠르게 한 번만 (greedy · 다시 풀기 없음 · 반복 정리만). 확정 인식할 발화가 기다리면 그만둔다.
     /// (인코더 계산 중에는 멈추지 않고, 인코더가 끝난 뒤 · 낱말을 하나씩 풀 때마다 확인한다)
     fn preview(&mut self, req: &AsrRequest, samples: &[f32], audio_ctx: i32, prompt: &str, abort: &AbortCheck<'_>) -> Result<String> {
@@ -321,7 +398,7 @@ impl Transcriber for LocalWhisper {
         let audio_ctx = (frames + ctx_margin()).clamp(ctx_min(), 1500);
         let reduced = audio_ctx < 1500 && std::env::var("BADASUGI_FULL_CTX").is_err();
 
-        let prompt = req.full_prompt();
+        let prompt = self.prompt_for(req);
         if let Some(abort) = req.preview {
             return self.preview(req, samples, audio_ctx, &prompt, abort);
         }
@@ -397,5 +474,49 @@ fn set_abort(params: &mut FullParams<'_, '_>, holder: &&AbortCheck<'_>) {
     unsafe {
         params.set_abort_callback(Some(abort_trampoline));
         params.set_abort_callback_user_data(holder as *const &AbortCheck<'_> as *mut std::ffi::c_void);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn terms(s: &str) -> Vec<String> {
+        s.split(',').map(|t| t.trim().to_string()).collect()
+    }
+
+    #[test]
+    fn fit_terms_keeps_front_terms_within_budget() {
+        let t = terms("OKPOS, 웨이브포스, OKPOS Helper, PM2.0");
+        // 글자 수로 센다고 치면: "OKPOS, 웨이브포스." = 13
+        let count = |s: &str| s.chars().count();
+        assert_eq!(fit_terms(&t, 13, count), ("OKPOS, 웨이브포스.".to_string(), 2));
+        assert_eq!(fit_terms(&t, 100, count), ("OKPOS, 웨이브포스, OKPOS Helper, PM2.0.".to_string(), 4));
+        // 넘치는 용어가 나오면 뒤의 짧은 용어도 넣지 않는다 (앞에 둔 순서를 지킨다)
+        let t = terms("OKPOS, 아주 긴 용어 이름입니다, ASP");
+        assert_eq!(fit_terms(&t, 13, count), ("OKPOS.".to_string(), 1));
+        // 빈 낱말은 건너뛰고, 첫 용어부터 넘치면 비운다
+        assert_eq!(fit_terms(&terms(" , OKPOS"), 100, count), ("OKPOS.".to_string(), 1));
+        assert_eq!(fit_terms(&terms("OKPOS"), 3, count), (String::new(), 0));
+        assert_eq!(fit_terms(&[], 100, count), (String::new(), 0));
+    }
+
+    /// 실제 모델 토크나이저로 센 토큰 수 — `BADASUGI_TEST_MODEL=<ggml 모델 경로>` 일 때만
+    #[test]
+    fn token_count_matches_whisper_tokenizer() {
+        let Ok(path) = std::env::var("BADASUGI_TEST_MODEL") else {
+            return;
+        };
+        let ctx = WhisperContext::new_with_params(&path, context_params(false)).expect("모델");
+        assert_eq!(token_count(&ctx, ""), 0);
+        assert_eq!(token_count(&ctx, "OKPOS"), 2);
+        // 한도를 넘는 용어집 — 앞에서부터 한도 안쪽까지 넣고, 하나 더 넣으면 넘친다
+        let t: Vec<String> = (1..=100).map(|i| format!("웨이브포스{i}")).collect();
+        let (p, n) = fit_terms(&t, LOCAL_PROMPT_TOKENS, |s| token_count(&ctx, s));
+        assert!(n > 0 && n < t.len(), "{n}");
+        assert!(p.starts_with("웨이브포스1, 웨이브포스2, "), "{p}");
+        assert!(token_count(&ctx, &p) <= LOCAL_PROMPT_TOKENS);
+        let more = format!("{}, {}.", p.trim_end_matches('.'), t[n]);
+        assert!(token_count(&ctx, &more) > LOCAL_PROMPT_TOKENS);
     }
 }

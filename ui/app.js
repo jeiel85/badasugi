@@ -3828,10 +3828,12 @@ function glossaryAct(term) {
   if (glossaryTerms().some((x) => x.toLowerCase() === t.toLowerCase())) return [];
   return [{ label: '용어집에 넣기', title: `용어집에 '${t}' — 다음 녹음부터 이 말을 더 잘 알아들어요 (설정 › 녹음에서 고쳐요)`, fn: () => addGlossary(t) }];
 }
+// 맨 앞에 넣는다 — 로컬 엔진은 용어집 앞쪽 40개 안팎만 쓰고(whisper::LOCAL_PROMPT_TOKENS),
+// 방금 고친 말은 실제로 잘못 들은 말이라 가장 챙겨야 한다
 function addGlossary(t) {
   if (glossaryTerms().some((x) => x.toLowerCase() === t.toLowerCase())) return;
-  const g = (S.settings.glossary || '').replace(/[\s,;]+$/, '');
-  S.settings.glossary = g ? `${g}, ${t}` : t;
+  const g = (S.settings.glossary || '').replace(/^[\s,;]+|[\s,;]+$/g, '');
+  S.settings.glossary = g ? `${t}, ${g}` : t;
   $('#opt-glossary').value = S.settings.glossary;
   saveSettings();
   saveSettings.flush();
