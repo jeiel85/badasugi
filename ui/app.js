@@ -1411,18 +1411,32 @@ function adoptRedo(id, fresh) {
   scheduleRender();
   renderMeta();
 }
+// 지금 고치고 있어 넣지 않고 들고 있는 다시 받아 적기 결과: '기록 id:문장 id' → { before, text }
+const redoHeld = new Map();
+// 문장 고치기가 끝났다 — 고치지 않고 끝냈으면(글이 그대로면) 들고 있던 결과를 이제 넣고, 고쳤으면 버린다
+// (넣지 않은 채 두면 이 사본은 다시 받아 적은 글까지 받은 것으로 되어 있어, 다음 저장이 원래 글로 덮는다)
+function settleRedo(d, u) {
+  const k = `${d.id}:${u.id}`;
+  const held = redoHeld.get(k);
+  if (!held) return;
+  redoHeld.delete(k);
+  if (d.utterances.includes(u) && u.text === held.before) { u.text = held.text; invalidateTranscript(); }
+}
 function onRedo(p) {
   const id = p.id;
   const shown = [S.liveDoc, S.viewDoc].filter((x) => x?.id === id);
   switch (p.kind) {
     case 'edits': {
-      // 화면도 바꾸기 전 글 그대로일 때만 — 그 사이 화면에서 고친(아직 저장 전인) 문장 · 지금 고치는 문장은 그대로
+      // 화면도 바꾸기 전 글 그대로일 때만 — 그 사이 화면에서 고친(아직 저장 전인) 문장은 그대로,
+      // 지금 고치고 있는 문장은 들고 있다가 고치기가 끝나면 정한다 (settleRedo)
       const typing = $('#transcript [contenteditable="true"]')?.dataset.id;
       let n = 0;
       for (const d of shown) {
         for (const ed of p.edits || []) {
           const u = d.utterances.find((x) => x.id === ed.id);
-          if (u && u.text === ed.before && String(ed.id) !== typing) { u.text = ed.text; n++; }
+          if (!u || u.text !== ed.before) continue;
+          if (String(ed.id) === typing) redoHeld.set(`${d.id}:${u.id}`, { before: ed.before, text: ed.text });
+          else { u.text = ed.text; n++; }
         }
         // 이 사본은 여기까지 받았다 — 이 뒤에 원래 글로 고쳐 저장해도 사람이 고친 것으로 본다 (session.rs save_doc)
         if (p.rev != null) d.redoRev = p.rev;
@@ -1651,6 +1665,7 @@ function startEdit(el) {
       persistDoc(d);
       suggestFromEdit(d, u.id, before, v);
     }
+    settleRedo(d, u);
     scheduleRender();
   };
   el.addEventListener('keydown', (k) => {

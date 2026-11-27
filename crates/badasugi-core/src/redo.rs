@@ -91,6 +91,13 @@ pub fn run(
             }
             while !eof && base + pcm.len() < end {
                 eof = !file.read(&mut pcm)?;
+                // 이 구간 앞의 소리는 다시 쓰지 않으므로 읽는 대로 버린다 — 긴 녹음 뒤쪽부터 이어서 하거나
+                // 긴 쉼이 있어도 메모리가 녹음 길이만큼 늘지 않게
+                let drop = start.saturating_sub(base).min(pcm.len());
+                if drop > 0 {
+                    pcm.drain(..drop);
+                    base += drop;
+                }
             }
             let from = start.saturating_sub(base).min(pcm.len());
             let to = end.saturating_sub(base).min(pcm.len());
@@ -220,6 +227,25 @@ mod tests {
             ]
         );
         assert_eq!(made.get(), 1, "인식기는 한 번만 만든다");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn resuming_late_in_a_recording_gets_the_right_audio() {
+        // 앞 구간은 이미 했다 (이어서 하기) — 앞의 소리는 읽는 대로 버리고 뒤 구간만
+        let path = temp("resume");
+        write_steps(&path, &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        let mut got = Vec::new();
+        run(
+            &path,
+            &[sp(5, 5100, 5900), sp(3, 3100, 3900)],
+            &REQ,
+            &mut || Ok(Box::new(Fake) as Box<dyn Transcriber>),
+            &|| Hold::Go,
+            &mut |s, t| got.push((s.id, t)),
+        )
+        .unwrap();
+        assert_eq!(got, vec![(3, Some("구간 4 입니다.".into())), (5, Some("구간 6 입니다.".into()))]);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
