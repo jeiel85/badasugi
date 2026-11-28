@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
-    /// "local" | "openai" | "groq" | "custom"
+    /// "local" | "openai" | "groq" | "rtzr"(리턴제로) | "clova"(CLOVA Speech) | "elevenlabs" | "custom"
     pub engine: String,
     /// 로컬 모델 id (models::WHISPER_MODELS) 또는 모델 폴더의 파일 이름
     pub local_model: String,
@@ -21,6 +21,10 @@ pub struct Settings {
     pub groq_model: String,
     pub custom_url: String,
     pub custom_model: String,
+    /// CLOVA Speech 도메인의 Invoke URL (콘솔 › CLOVA Speech › 빌더 › 설정 › 연동 정보) — Secret Key 는 자격 증명 관리자에
+    pub clova_url: String,
+    /// ElevenLabs 음성 인식 모델 (scribe_v3 · scribe_v2)
+    pub elevenlabs_model: String,
 
     pub source: SourceKind,
     pub mic_device: Option<String>,
@@ -169,6 +173,8 @@ impl Default for Settings {
             groq_model: "whisper-large-v3-turbo".into(),
             custom_url: "http://localhost:8000/v1".into(),
             custom_model: "whisper-1".into(),
+            clova_url: String::new(),
+            elevenlabs_model: "scribe_v3".into(),
             source: SourceKind::Mic,
             mic_device: None,
             language: "ko".into(),
@@ -308,8 +314,19 @@ fn model_path(model: &str, models_dir: &Path) -> PathBuf {
 
 const SERVICE: &str = "badasugi";
 
-/// API 키 저장소 키 이름
-pub const KEY_NAMES: &[&str] = &["openai", "groq", "custom", "anthropic", "gemini", "llm-custom"];
+/// API 키 저장소 키 이름 — 리턴제로는 두 값(rtzr-id: Client ID, rtzr: Client Secret), CLOVA Speech 는 Secret Key
+pub const KEY_NAMES: &[&str] = &[
+    "openai",
+    "groq",
+    "custom",
+    "anthropic",
+    "gemini",
+    "llm-custom",
+    "rtzr-id",
+    "rtzr",
+    "clova",
+    "elevenlabs",
+];
 
 /// API 키 저장소 (Windows 자격 증명 관리자)
 pub fn get_key(name: &str) -> Option<String> {
@@ -397,7 +414,7 @@ mod tests {
         assert!(s.wants_preview());
         // GPU 가속은 기본 켬 (없으면 저절로 CPU)
         assert!(s.gpu);
-        for engine in ["openai", "groq", "custom"] {
+        for engine in ["openai", "groq", "custom", "rtzr", "clova", "elevenlabs"] {
             let mut s = Settings { engine: engine.into(), ..Settings::default() };
             assert!(!s.wants_preview(), "API 는 비용이 들어 기본 꺼짐: {engine}");
             s.live_preview = "on".into();
@@ -405,6 +422,16 @@ mod tests {
         }
         let s = Settings { live_preview: "off".into(), ..Settings::default() };
         assert!(!s.wants_preview());
+    }
+
+    #[test]
+    fn korean_stt_services_have_defaults() {
+        // 리턴제로 · CLOVA Speech · ElevenLabs 가 생기기 전의 설정 파일도 읽힌다
+        let s: Settings = serde_json::from_str(r#"{ "engine": "groq" }"#).unwrap();
+        assert_eq!((s.clova_url.as_str(), s.elevenlabs_model.as_str()), ("", "scribe_v3"));
+        for k in ["rtzr-id", "rtzr", "clova", "elevenlabs"] {
+            assert!(KEY_NAMES.contains(&k), "{k}");
+        }
     }
 
     #[test]

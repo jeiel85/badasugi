@@ -45,6 +45,14 @@ pub fn encode_pcm16(samples: &[f32]) -> Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
+/// 헤더 없는 16 kHz 모노 PCM16 (리틀 엔디언) — 스트리밍 API 에 그대로 보내는 소리
+pub fn pcm16_le(samples: &[f32]) -> Vec<u8> {
+    samples
+        .iter()
+        .flat_map(|&s| ((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes())
+        .collect()
+}
+
 /// 세션 녹음 파일 (16 kHz 모노 PCM16)
 ///
 /// 1초마다 헤더를 고쳐 써서(체크포인트) 녹음 중에도 언제나 올바른 WAV 로 읽힌다.

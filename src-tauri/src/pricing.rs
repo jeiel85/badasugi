@@ -10,6 +10,9 @@
 //! - Groq: <https://console.groq.com/docs/models> — 음성 인식은 요청마다 최소 10초로 매긴다
 //! - OpenAI: <https://developers.openai.com/api/docs/pricing> — 음성 인식은 분당 추정 단가
 //! - Gemini: <https://aistudio.google.com/docs/pricing>
+//! - 리턴제로: <https://developers.rtzr.ai/docs/pricing/> (2026-11-27 확인) — 원화 · 부가세 별도, 연결마다 최소 10초
+//! - CLOVA Speech: <https://www.ncloud.com/product/aiService/clovaSpeech> (2026-11-27 확인) — 원화 · 부가세 별도, 15초 단위 올림
+//! - ElevenLabs: <https://elevenlabs.io/pricing/api> (2026-11-27 확인) — 초 단위
 
 /// 모델 이름을 표와 맞춰 볼 수 있게 다듬는다 — 소문자로, "models/" 앞머리와 날짜 꼬리
 /// ("-20250929" · "-2025-08-07") 를 뗀다
@@ -95,24 +98,52 @@ pub fn cache_read_price(provider: &str, model: &str) -> Option<f64> {
     })
 }
 
-/// 음성 인식 단가 — USD / 1시간. 모르는 모델이면 None
-pub fn audio_price(provider: &str, model: &str) -> Option<f64> {
+/// 음성 인식 단가 (1시간) — 달러로 매기는 곳과 원화로 매기는 곳(리턴제로 · CLOVA Speech, 부가세 별도)이 있다
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AudioPrice {
+    Usd(f64),
+    Krw(f64),
+}
+
+impl AudioPrice {
+    /// 달러로 — 원화 단가는 `usd_krw`(설정 › 사용량의 환율)로 나눈다.
+    /// 화면은 같은 환율로 다시 원화를 셈하므로 원화 단가의 금액은 환율과 상관없이 그대로 보인다.
+    pub fn usd(self, usd_krw: f64) -> f64 {
+        match self {
+            AudioPrice::Usd(p) => p,
+            AudioPrice::Krw(p) => p / if usd_krw > 0.0 { usd_krw } else { crate::settings::DEFAULT_USD_KRW },
+        }
+    }
+}
+
+/// 음성 인식 단가 (1시간). 모르는 모델이면 None
+pub fn audio_price(provider: &str, model: &str) -> Option<AudioPrice> {
+    use AudioPrice::{Krw, Usd};
     let m = normalize(model);
     Some(match (provider, m.as_str()) {
-        ("groq", "whisper-large-v3-turbo") => 0.04,
-        ("groq", "whisper-large-v3") => 0.111,
+        ("groq", "whisper-large-v3-turbo") => Usd(0.04),
+        ("groq", "whisper-large-v3") => Usd(0.111),
         // 분당 $0.0045 · $0.006 · $0.003
-        ("openai", "gpt-transcribe") => 0.27,
-        ("openai", "gpt-4o-transcribe" | "whisper-1") => 0.36,
-        ("openai", "gpt-4o-mini-transcribe") => 0.18,
+        ("openai", "gpt-transcribe") => Usd(0.27),
+        ("openai", "gpt-4o-transcribe" | "whisper-1") => Usd(0.36),
+        ("openai", "gpt-4o-mini-transcribe") => Usd(0.18),
+        // 리턴제로: 모델 · 파일/스트리밍 상관없이 시간당 1,000원 (한 달 1,000시간까지 — 넘으면 500원)
+        ("rtzr", _) => Krw(1000.0),
+        // CLOVA Speech 장문 인식: 15초 5원 = 시간당 1,200원
+        ("clova", "장문 인식") => Krw(1200.0),
+        // ElevenLabs Scribe v3 · v2: 시간당 $0.20, 용어(keyterms)를 넣으면 $0.05 더
+        ("elevenlabs", "scribe_v3" | "scribe_v2") => Usd(0.20),
+        ("elevenlabs", "scribe_v3+keyterms" | "scribe_v2+keyterms") => Usd(0.25),
         _ => return None,
     })
 }
 
-/// 요청 하나에 요금이 매겨지는 녹음 길이(초) — Groq 는 10초보다 짧아도 10초로 매긴다
+/// 요청 하나에 요금이 매겨지는 녹음 길이(초) — Groq · 리턴제로는 10초보다 짧아도 10초로,
+/// CLOVA Speech 는 15초 단위로 올려 매긴다
 pub fn billed_secs(provider: &str, secs: f64) -> f64 {
     match provider {
-        "groq" => secs.max(10.0),
+        "groq" | "rtzr" => secs.max(10.0),
+        "clova" => (secs / 15.0).ceil().max(1.0) * 15.0,
         _ => secs,
     }
 }
@@ -136,7 +167,20 @@ mod tests {
         assert_eq!(token_price("custom", "openai/gpt-oss-120b"), None);
         assert_eq!(token_price("gemini", "gemini-flash-latest"), None);
         assert_eq!(audio_price("custom", "whisper-1"), None);
-        assert_eq!(audio_price("groq", "whisper-large-v3-turbo"), Some(0.04));
+        assert_eq!(audio_price("groq", "whisper-large-v3-turbo"), Some(AudioPrice::Usd(0.04)));
+        assert_eq!(audio_price("clova", "모르는 모델"), None);
+    }
+
+    #[test]
+    fn korean_services_are_priced_in_won() {
+        assert_eq!(audio_price("rtzr", "sommers"), Some(AudioPrice::Krw(1000.0)));
+        assert_eq!(audio_price("clova", "장문 인식"), Some(AudioPrice::Krw(1200.0)));
+        assert_eq!(audio_price("elevenlabs", "scribe_v3"), Some(AudioPrice::Usd(0.20)));
+        assert_eq!(audio_price("elevenlabs", "scribe_v3+keyterms"), Some(AudioPrice::Usd(0.25)));
+        // 원화 단가는 환율로 나눠 달러로 (화면이 같은 환율로 원화를 셈한다)
+        assert!((AudioPrice::Krw(1000.0).usd(1250.0) - 0.8).abs() < 1e-12);
+        assert_eq!(AudioPrice::Usd(0.2).usd(1250.0), 0.2);
+        assert!((AudioPrice::Krw(1360.0).usd(0.0) - 1.0).abs() < 1e-12, "환율이 비면 기본 환율");
     }
 
     #[test]
@@ -144,5 +188,11 @@ mod tests {
         assert_eq!(billed_secs("groq", 3.2), 10.0);
         assert_eq!(billed_secs("groq", 12.5), 12.5);
         assert_eq!(billed_secs("openai", 3.2), 3.2);
+        assert_eq!(billed_secs("rtzr", 4.0), 10.0);
+        assert_eq!(billed_secs("elevenlabs", 4.0), 4.0);
+        // CLOVA Speech 는 15초 단위 올림
+        assert_eq!(billed_secs("clova", 0.4), 15.0);
+        assert_eq!(billed_secs("clova", 15.0), 15.0);
+        assert_eq!(billed_secs("clova", 15.2), 30.0);
     }
 }

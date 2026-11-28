@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use badasugi_core::asr::EngineConfig;
+use badasugi_core::asr::{EngineConfig, Service};
 use badasugi_core::audio::{CaptureConfig, DeviceInfo, SourceKind};
 use badasugi_core::models::{self, ModelSpec};
 use badasugi_core::pipeline::{Event, EventSink, Pipeline, PipelineConfig};
@@ -149,6 +149,10 @@ struct KeysDto {
     anthropic: bool,
     gemini: bool,
     llm_custom: bool,
+    rtzr_id: bool,
+    rtzr: bool,
+    clova: bool,
+    elevenlabs: bool,
 }
 
 #[derive(Serialize)]
@@ -212,6 +216,10 @@ fn get_state(app: AppHandle) -> StateDto {
             anthropic: settings::get_key("anthropic").is_some(),
             gemini: settings::get_key("gemini").is_some(),
             llm_custom: settings::get_key("llm-custom").is_some(),
+            rtzr_id: settings::get_key("rtzr-id").is_some(),
+            rtzr: settings::get_key("rtzr").is_some(),
+            clova: settings::get_key("clova").is_some(),
+            elevenlabs: settings::get_key("elevenlabs").is_some(),
         },
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         version: env!("CARGO_PKG_VERSION"),
@@ -397,6 +405,30 @@ fn build_engine(s: &Settings, paths: &Paths) -> Result<EngineConfig, String> {
             api_key: settings::get_key("custom").unwrap_or_default(),
             model: s.custom_model.clone(),
         },
+        "rtzr" => EngineConfig::Service {
+            service: Service::Rtzr,
+            base_url: String::new(),
+            key_id: settings::get_key("rtzr-id").ok_or("리턴제로 Client ID 를 설정에서 입력해 주세요.")?,
+            secret: settings::get_key("rtzr").ok_or("리턴제로 Client Secret 을 설정에서 입력해 주세요.")?,
+            model: String::new(),
+        },
+        "clova" => EngineConfig::Service {
+            service: Service::Clova,
+            base_url: match s.clova_url.trim() {
+                "" => return Err("CLOVA Speech Invoke URL 을 설정에서 입력해 주세요.".into()),
+                u => u.to_string(),
+            },
+            key_id: String::new(),
+            secret: settings::get_key("clova").ok_or("CLOVA Speech Secret Key 를 설정에서 입력해 주세요.")?,
+            model: String::new(),
+        },
+        "elevenlabs" => EngineConfig::Service {
+            service: Service::Elevenlabs,
+            base_url: String::new(),
+            key_id: String::new(),
+            secret: need_key("elevenlabs", "ElevenLabs")?,
+            model: s.elevenlabs_model.clone(),
+        },
         _ => EngineConfig::Local {
             model_path: s.local_model_path(&paths.models),
             threads: s.threads,
@@ -446,7 +478,7 @@ async fn test_engine(app: AppHandle) -> CmdResult<String> {
         let e = build_engine(&s, &st.paths)?;
         (s, e)
     };
-    tauri::async_runtime::spawn_blocking(move || match engine {
+    tauri::async_runtime::spawn_blocking(move || match &engine {
         EngineConfig::Local { model_path, .. } => {
             if model_path.exists() {
                 Ok(format!("로컬 모델 준비됨: {}", model_path.display()))
@@ -454,13 +486,12 @@ async fn test_engine(app: AppHandle) -> CmdResult<String> {
                 Err("모델 파일이 없습니다. 먼저 내려받아 주세요.".to_string())
             }
         }
-        EngineConfig::Api {
-            base_url,
-            api_key,
-            model,
-        } => badasugi_core::asr::openai::test_connection(&base_url, &api_key, &model)
+        EngineConfig::Api { model, .. } => badasugi_core::asr::test_connection(&engine)
             .map(|_| format!("연결 성공 · {} ({})", model, s.engine))
             .map_err(err),
+        EngineConfig::Service { service, .. } => badasugi_core::asr::test_connection(&engine)
+            .map(|_| format!("연결 성공 · {}", engine.label().trim_start_matches("API · ")))
+            .map_err(|e| format!("{} 연결 실패: {e}", service.name())),
     })
     .await
     .map_err(err)?
@@ -664,12 +695,8 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
             },
             _ => build_engine(&s, &st.paths)?,
         };
-        *st.api_provider.lock() = match &engine {
-            EngineConfig::Api { base_url, model, .. } => {
-                Some((badasugi_core::usage::provider_of(base_url), model.trim().to_string()))
-            }
-            _ => None,
-        };
+        let terms = glossary_terms(&s.glossary);
+        *st.api_provider.lock() = engine.usage(&terms);
         let mut doc = SessionDoc::new(engine.label());
         doc.id = st.store.lock().unique_id(&doc.id);
         if let Some(f) = file {
@@ -693,7 +720,6 @@ pub(crate) fn start_session(app: &AppHandle, file: Option<&Path>, source: Option
         } else {
             Vec::new()
         };
-        let terms = glossary_terms(&s.glossary);
         let cfg = PipelineConfig {
             capture: CaptureConfig {
                 source: source.unwrap_or(s.source),
@@ -2266,7 +2292,9 @@ fn on_display_change(app: &AppHandle) {
 /// 화면 스크립트가 시작을 끝냈다는 신호 (스크립트 오류로 화면이 비면 오지 않는다)
 /// 설정 › 사용량: 이 앱으로 쓴 양(오늘 · 이번 달) + 공급자가 알려 준 남은 한도
 #[tauri::command]
-fn get_usage(app: AppHandle) -> usage_book::UsageReport {
+/// `usd_krw`: 화면이 원화를 셈하는 환율 — 원화 단가(리턴제로 · CLOVA)를 같은 환율로 달러로 바꿔야 원화가 그대로 보인다
+/// (환율 칸을 바꾸면 설정이 저장되기 전에 다시 그리므로 저장된 값을 쓰면 어긋난다)
+fn get_usage(app: AppHandle, usd_krw: Option<f64>) -> usage_book::UsageReport {
     let book = app.state::<usage_book::UsageBook>();
     book.save();
     // 모델을 기록하기 전(v0.4.6 까지) 사용분은 지금 설정한 모델 단가로 셈한다
@@ -2288,7 +2316,7 @@ fn get_usage(app: AppHandle) -> usage_book::UsageReport {
             m => Some(m.to_string()),
         }
     };
-    book.report(&legacy)
+    book.report(&legacy, usd_krw.filter(|r| r.is_finite() && *r > 0.0).unwrap_or(s.usd_krw))
 }
 
 #[tauri::command]

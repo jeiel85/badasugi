@@ -1,7 +1,11 @@
-//! 음성 인식 엔진. 로컬(whisper.cpp) 과 OpenAI 호환 API(OpenAI · Groq · 자체 서버) 를 같은 인터페이스로 다룬다.
+//! 음성 인식 엔진. 로컬(whisper.cpp), OpenAI 호환 API(OpenAI · Groq · 자체 서버),
+//! 전용 형식 API(리턴제로 · CLOVA Speech · ElevenLabs) 를 같은 인터페이스로 다룬다.
 
+pub mod clova;
+pub mod elevenlabs;
 pub mod gpu;
 pub mod openai;
+pub mod rtzr;
 #[cfg(feature = "local-whisper")]
 pub mod whisper;
 
@@ -31,6 +35,53 @@ pub enum EngineConfig {
         api_key: String,
         model: String,
     },
+    /// 요청 형식이 저마다 다른 음성 인식 API (리턴제로 · CLOVA Speech · ElevenLabs)
+    #[serde(rename_all = "camelCase")]
+    Service {
+        service: Service,
+        /// API 주소 — 비우면 서비스 기본 주소. CLOVA Speech 는 도메인마다 받는 Invoke URL
+        #[serde(default)]
+        base_url: String,
+        /// 리턴제로 Client ID (다른 서비스는 비움)
+        #[serde(default)]
+        key_id: String,
+        /// 리턴제로 Client Secret · CLOVA Speech Secret Key · ElevenLabs API 키
+        secret: String,
+        /// 리턴제로 sommers · ElevenLabs scribe_v… (CLOVA Speech 는 비움)
+        #[serde(default)]
+        model: String,
+    },
+}
+
+/// 전용 형식 음성 인식 API
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Service {
+    /// 리턴제로 (RTZR · Sommers)
+    Rtzr,
+    /// 네이버 클라우드 CLOVA Speech
+    Clova,
+    /// ElevenLabs Scribe
+    Elevenlabs,
+}
+
+impl Service {
+    /// 설정의 엔진 값이자 사용량 공급자 이름
+    pub fn id(self) -> &'static str {
+        match self {
+            Service::Rtzr => "rtzr",
+            Service::Clova => "clova",
+            Service::Elevenlabs => "elevenlabs",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Service::Rtzr => "리턴제로",
+            Service::Clova => "CLOVA Speech",
+            Service::Elevenlabs => "ElevenLabs",
+        }
+    }
 }
 
 fn one() -> u32 {
@@ -42,7 +93,23 @@ impl EngineConfig {
     pub fn concurrency(&self) -> usize {
         match self {
             EngineConfig::Local { .. } => 1,
-            EngineConfig::Api { .. } => 3,
+            EngineConfig::Api { .. } | EngineConfig::Service { .. } => 3,
+        }
+    }
+
+    /// API 사용량을 셀 이름 (공급자, 모델) — 로컬 엔진은 없음.
+    /// ElevenLabs 는 용어(keyterms)를 보내면 단가가 달라 모델 이름에 `+keyterms` 를 붙인다.
+    pub fn usage(&self, keywords: &[String]) -> Option<(&'static str, String)> {
+        match self {
+            EngineConfig::Local { .. } => None,
+            EngineConfig::Api { base_url, model, .. } => Some((crate::usage::provider_of(base_url), model.trim().to_string())),
+            EngineConfig::Service { service, model, .. } => {
+                let mut m = service_model(*service, model);
+                if *service == Service::Elevenlabs && !elevenlabs::keyterms(keywords).is_empty() {
+                    m.push_str("+keyterms");
+                }
+                Some((service.id(), m))
+            }
         }
     }
 
@@ -70,7 +137,21 @@ impl EngineConfig {
                     .unwrap_or("");
                 format!("API · {model} ({host})")
             }
+            EngineConfig::Service { service, model, .. } => match model.trim() {
+                "" => format!("API · {}", service.name()),
+                m => format!("API · {} {m}", service.name()),
+            },
         }
+    }
+}
+
+/// 사용량 · 요금에 쓸 모델 이름 — 모델을 고르지 않는 서비스는 서비스 이름 그대로
+fn service_model(service: Service, model: &str) -> String {
+    match (service, model.trim()) {
+        (Service::Clova, _) => clova::MODEL.to_string(),
+        (Service::Rtzr, "") => rtzr::DEFAULT_MODEL.to_string(),
+        (Service::Elevenlabs, "") => elevenlabs::DEFAULT_MODEL.to_string(),
+        (_, m) => m.to_string(),
     }
 }
 
@@ -257,6 +338,55 @@ pub fn create(cfg: &EngineConfig) -> Result<Box<dyn Transcriber>> {
             api_key,
             model,
         } => Ok(Box::new(openai::ApiTranscriber::new(base_url, api_key, model)?)),
+        EngineConfig::Service {
+            service,
+            base_url,
+            key_id,
+            secret,
+            model,
+        } => Ok(match service {
+            Service::Rtzr => Box::new(rtzr::RtzrTranscriber::new(base_url, key_id, secret, model)?),
+            Service::Clova => Box::new(clova::ClovaTranscriber::new(base_url, secret)?),
+            Service::Elevenlabs => Box::new(elevenlabs::ElevenLabsTranscriber::new(base_url, secret, model)?),
+        }),
+    }
+}
+
+/// 연결 확인 (설정 › 녹음의 연결 테스트): 1초 무음을 한 번 보내 키 · 주소 · 모델이 맞는지 본다 — 다시 보내지 않는다.
+/// 로컬 엔진은 확인할 것이 없어 바로 Ok.
+pub fn test_connection(cfg: &EngineConfig) -> Result<()> {
+    match cfg {
+        EngineConfig::Local { .. } => Ok(()),
+        EngineConfig::Api {
+            base_url,
+            api_key,
+            model,
+        } => openai::test_connection(base_url, api_key, model),
+        EngineConfig::Service {
+            service,
+            base_url,
+            key_id,
+            secret,
+            model,
+        } => {
+            let silence = vec![0.0f32; crate::SAMPLE_RATE as usize];
+            let req = AsrRequest {
+                samples: &silence,
+                language: "ko",
+                prompt: "",
+                keywords: &[],
+                context: "",
+                preview: None,
+                abort: None,
+            };
+            // 다시 보내지 않고 한 번만 (기다리는 시간은 확정 문장과 같다)
+            match service {
+                Service::Rtzr => rtzr::RtzrTranscriber::new(base_url, key_id, secret, model)?.once(&req),
+                Service::Clova => clova::ClovaTranscriber::new(base_url, secret)?.once(&req),
+                Service::Elevenlabs => elevenlabs::ElevenLabsTranscriber::new(base_url, secret, model)?.once(&req),
+            }
+            .map(|_| ())
+        }
     }
 }
 
@@ -361,6 +491,36 @@ mod tests {
             beam_size: 1,
         };
         assert!(!local.wants_context());
+    }
+
+    #[test]
+    fn services_count_usage_under_their_own_name() {
+        let svc = |service, model: &str| EngineConfig::Service {
+            service,
+            base_url: String::new(),
+            key_id: String::new(),
+            secret: "k".into(),
+            model: model.into(),
+        };
+        assert_eq!(svc(Service::Rtzr, "").usage(&[]), Some(("rtzr", "sommers".to_string())));
+        assert_eq!(svc(Service::Clova, "").usage(&[]), Some(("clova", clova::MODEL.to_string())));
+        // ElevenLabs 는 용어를 보내면 단가가 달라 따로 센다 (보낼 용어가 없으면 그대로)
+        let kw = vec!["OKPOS".to_string()];
+        assert_eq!(svc(Service::Elevenlabs, "").usage(&kw), Some(("elevenlabs", "scribe_v3+keyterms".to_string())));
+        let empty = vec!["  ".to_string()];
+        assert_eq!(svc(Service::Elevenlabs, "scribe_v2").usage(&empty), Some(("elevenlabs", "scribe_v2".to_string())));
+        assert_eq!(svc(Service::Clova, "").label(), "API · CLOVA Speech");
+        assert_eq!(svc(Service::Elevenlabs, "scribe_v3").label(), "API · ElevenLabs scribe_v3");
+        assert!(!svc(Service::Rtzr, "").wants_context(), "앞 문맥은 OpenAI GPT 인식 모델만");
+        assert_eq!(svc(Service::Rtzr, "").concurrency(), 3);
+        let json = serde_json::to_value(svc(Service::Elevenlabs, "scribe_v3")).unwrap();
+        assert_eq!((&json["kind"], &json["service"]), (&serde_json::json!("service"), &serde_json::json!("elevenlabs")));
+        let local = EngineConfig::Local {
+            model_path: "m.bin".into(),
+            threads: 0,
+            beam_size: 1,
+        };
+        assert_eq!(local.usage(&kw), None);
     }
 
     #[test]

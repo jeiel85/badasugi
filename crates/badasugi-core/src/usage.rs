@@ -26,7 +26,7 @@ fn rates() -> &'static Mutex<BTreeMap<String, RateSnapshot>> {
     RATES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// API 주소 → 공급자 이름 ("groq" · "openai" · "anthropic" · "gemini" · "custom")
+/// API 주소 → 공급자 이름 ("groq" · "openai" · "anthropic" · "gemini" · "rtzr" · "clova" · "elevenlabs" · "custom")
 pub fn provider_of(url: &str) -> &'static str {
     let u = url.to_ascii_lowercase();
     if u.contains("api.groq.com") {
@@ -37,6 +37,12 @@ pub fn provider_of(url: &str) -> &'static str {
         "anthropic"
     } else if u.contains("generativelanguage.googleapis.com") {
         "gemini"
+    } else if u.contains("openapi.vito.ai") || u.contains("rtzr.ai") {
+        "rtzr"
+    } else if u.contains("clovaspeech") || u.contains("ncloud.com") || u.contains("ntruss.com") {
+        "clova"
+    } else if u.contains("api.elevenlabs.io") {
+        "elevenlabs"
     } else {
         "custom"
     }
@@ -48,6 +54,11 @@ fn is_rate_header(name: &str) -> bool {
 
 /// 응답 헤더에서 한도 정보를 골라 기억한다 (없으면 그대로)
 pub fn record_headers(url: &str, headers: &reqwest::header::HeaderMap) {
+    record_headers_for(provider_of(url), headers);
+}
+
+/// [`record_headers`] 와 같지만 공급자 이름을 직접 받는다 (주소로 알 수 없는 시험 서버 · 전용 형식 API)
+pub fn record_headers_for(provider: &str, headers: &reqwest::header::HeaderMap) {
     let items: Vec<(String, String)> = headers
         .iter()
         .filter(|(k, _)| is_rate_header(k.as_str()))
@@ -56,7 +67,7 @@ pub fn record_headers(url: &str, headers: &reqwest::header::HeaderMap) {
     if items.is_empty() {
         return;
     }
-    let provider = provider_of(url).to_string();
+    let provider = provider.to_string();
     let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     if let Ok(mut r) = rates().lock() {
         r.insert(provider.clone(), RateSnapshot { provider, at, items });
