@@ -428,7 +428,8 @@ fn glossary_terms(glossary: &str) -> Vec<String> {
         .collect()
 }
 
-/// 용어집을 whisper 프롬프트로 (자연스러운 문장 형태가 효과가 좋다)
+/// 용어집을 API 엔진(Groq · whisper-1 등) 프롬프트로. 로컬 엔진은 이것 대신 낱말(`keywords`)로 설명 문구 없는
+/// 쉼표 나열을 따로 만든다 — 이 문장 형태는 whisper.cpp 에서 "주요 용어"를 받아 적었다 (`whisper::LOCAL_PROMPT_TOKENS`)
 fn glossary_prompt(terms: &[String]) -> String {
     if terms.is_empty() {
         String::new()
