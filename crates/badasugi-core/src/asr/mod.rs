@@ -377,6 +377,7 @@ pub fn test_connection(cfg: &EngineConfig) -> Result<()> {
                 keywords: &[],
                 context: "",
                 preview: None,
+                abort: None,
             };
             // 다시 보내지 않고 한 번만 (기다리는 시간은 확정 문장과 같다)
             match service {

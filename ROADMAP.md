@@ -206,7 +206,7 @@
 
 ---
 
-### 19. 한국어 특화 음성 인식 API — ✅ v0.4.41
+### 19. 한국어 특화 음성 인식 API — ✅ v0.4.43
 
 - **왜**: OpenAI 크레딧이 떨어졌을 때 쓸 수 있는 API 엔진. 한국어만 따로 잰 독립 비교는 드물고(대부분 업체 측정), 예전 비교에서 한국어 글자 오류율이 리턴제로 6.18% · CLOVA 9.52% · Whisper 11.39% 였다. ElevenLabs Scribe 는 Artificial Analysis 전체 정확도 1위(AA-WER 1.95%).
 - **어떻게** (`crates/badasugi-core/src/asr/`): 세 곳 모두 요청 형식이 달라 `EngineConfig::Service` 로 따로 붙였다. 다시 보내기 · 오류 안내(`ApiError`)는 OpenAI 호환 엔진과 같이 쓴다.
@@ -230,7 +230,7 @@
 
 ## 원래 로드맵에 있던 것
 
-- 한국어 특화 STT API(리턴제로 · CLOVA Speech) 연동 — ✅ v0.4.41 (ElevenLabs Scribe 도 함께, 19번)
+- 한국어 특화 STT API(리턴제로 · CLOVA Speech) 연동 — ✅ v0.4.43 (ElevenLabs Scribe 도 함께, 19번)
 - macOS 지원
 
 ## 참고 자료

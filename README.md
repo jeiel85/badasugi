@@ -325,7 +325,7 @@ docs/                   홈페이지 (GitHub Pages)
 - [x] 녹음 파일(mp3·m4a·wav) 불러와 전사 (v0.2)
 - [x] 자동 업데이트 · 일시정지 · 화자 합치기 · 기록 검색 (v0.2)
 - [x] 회의 후 전체 화자 재정리 (v0.4)
-- [x] 한국어 특화 STT API(리턴제로 · CLOVA Speech) · ElevenLabs Scribe 연동 (v0.4.41)
+- [x] 한국어 특화 STT API(리턴제로 · CLOVA Speech) · ElevenLabs Scribe 연동 (v0.4.43)
 - [x] 화자 목소리 기억 — 다음 회의에서 이름 자동 지정 (v0.4)
 - [ ] macOS 지원
 

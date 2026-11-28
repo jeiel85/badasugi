@@ -357,7 +357,7 @@ mod tests {
     fn stream_url_picks_model_by_language_and_encodes_keywords() {
         let t = RtzrTranscriber::new("https://openapi.vito.ai/", "id", "secret", "").unwrap();
         let kw = vec!["스캔프리".to_string(), "OKPOS".to_string()];
-        let req = |language| AsrRequest { samples: &[], language, prompt: "", keywords: &kw, context: "", preview: None };
+        let req = |language| AsrRequest { samples: &[], language, prompt: "", keywords: &kw, context: "", preview: None, abort: None };
         let ko = t.stream_url(&req("ko"));
         assert!(ko.starts_with("wss://openapi.vito.ai/v1/transcribe:streaming?sample_rate=16000&encoding=LINEAR16"), "{ko}");
         assert!(ko.contains("model_name=sommers_ko"));
@@ -455,7 +455,7 @@ mod tests {
         let mut t = RtzrTranscriber::new(&m.base, "id-a", "secret", "").unwrap();
         let samples = vec![0.1f32; 16_000];
         let kw = vec!["스캔프리".to_string()];
-        let req = AsrRequest { samples: &samples, language: "ko", prompt: "무시", keywords: &kw, context: "", preview: None };
+        let req = AsrRequest { samples: &samples, language: "ko", prompt: "무시", keywords: &kw, context: "", preview: None, abort: None };
         assert_eq!(t.transcribe(&req).unwrap(), "스캔프리 결제를 금요일까지 배포해요.");
         let (query, auth, bytes) = m.streams.recv().unwrap();
         assert_eq!(auth, "Bearer tok1");
@@ -472,7 +472,7 @@ mod tests {
         let m = mock(true, &["다시 받았어요."]);
         let mut t = RtzrTranscriber::new(&m.base, "id-b", "secret", "").unwrap();
         let samples = vec![0.0f32; 1600];
-        let req = AsrRequest { samples: &samples, language: "ko", prompt: "", keywords: &[], context: "", preview: None };
+        let req = AsrRequest { samples: &samples, language: "ko", prompt: "", keywords: &[], context: "", preview: None, abort: None };
         assert_eq!(t.transcribe(&req).unwrap(), "다시 받았어요.");
         assert_eq!(m.auths.load(Ordering::SeqCst), 2, "401 이면 토큰을 새로 받는다");
         let (_, first_auth, _) = m.streams.recv().unwrap();
@@ -499,7 +499,7 @@ mod tests {
         });
         let mut t = RtzrTranscriber::new(&base, "id-c", "wrong", "").unwrap();
         let samples = vec![0.0f32; 1600];
-        let req = AsrRequest { samples: &samples, language: "ko", prompt: "", keywords: &[], context: "", preview: None };
+        let req = AsrRequest { samples: &samples, language: "ko", prompt: "", keywords: &[], context: "", preview: None, abort: None };
         let e = t.transcribe(&req).unwrap_err();
         assert!(!super::super::retryable(&e));
         let msg = e.to_string();

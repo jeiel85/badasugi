@@ -148,6 +148,7 @@ mod tests {
             keywords,
             context: "앞 문맥은 보내지 않는다",
             preview: None,
+            abort: None,
         }
     }
 

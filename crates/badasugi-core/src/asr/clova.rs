@@ -163,7 +163,7 @@ mod tests {
     use std::sync::mpsc;
 
     fn req<'a>(language: &'a str, keywords: &'a [String]) -> AsrRequest<'a> {
-        AsrRequest { samples: &[], language, prompt: "", keywords, context: "", preview: None }
+        AsrRequest { samples: &[], language, prompt: "", keywords, context: "", preview: None, abort: None }
     }
 
     #[test]
